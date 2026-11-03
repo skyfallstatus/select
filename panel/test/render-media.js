@@ -1,11 +1,11 @@
 #!/usr/bin/env node
-// Renders docs/media/panel.png, panel-dark.png and panel-sorted.png: the real panel page in headless Chromium, on the
+// Renders docs/media/panel-grid.png, panel-grid-dark.png, panel.png, panel-dark.png and panel-sorted.png: the real panel page in headless Chromium, on the
 // synthetic fixture and generated pictures, with a real scan and real clicks. The panel is cut to Ingest's rounded look
 // on a clear ground, and everything inside the rounded edge is what the page drew.
 'use strict';
 const fs = require('fs');
 const path = require('path');
-const { launch, fixture, setDeadline, sleep, OUT, pickShow, pickSort } = require('./harness.js');
+const { launch, fixture, setDeadline, sleep, OUT, pickSource, pickSort } = require('./harness.js');
 const { ensureThumbs } = require('./build_fixture.js');
 
 const MEDIA = path.join(__dirname, '../../docs/media');
@@ -38,7 +38,7 @@ async function panel(b, theme, list, source) {
   await b.evalIn(`(function(){var s=document.createElement('style');s.textContent=${JSON.stringify(CUT)};document.head.appendChild(s);
     __mock.skin=${JSON.stringify(THEME[theme])};__mock.listeners['com.adobe.csxs.events.ThemeColorChanged'].forEach(function(f){f();});
     __mock.project=${JSON.stringify(PROJECT)};__mock.items=${JSON.stringify((list || clean).map((r, i) => ({ id: 'n' + i, path: r.path, name: path.basename(r.path) })))};})()`);
-  await b.click(`#source button[data-src="${source || 'project'}"]`);
+  await pickSource(b, source || 'project');
   const n = b.engineLog.exited.length;
   await b.click('#scan');
   while (b.engineLog.exited.length === n) { await sleep(20); }
@@ -83,7 +83,7 @@ async function main() {
   await sleep(260);
   fs.writeFileSync(path.join(OUT, 'bins-sheet.txt'), await b.evalIn(`document.getElementById('dialog').innerText`));
   await b.click('#dialog-ok');
-  await b.waitFor(`/Sorted into 5 bins/.test(document.getElementById('foot-verdict').textContent)`, 'green foot');
+  await b.waitFor(`/Sorted into 5 bins/.test(document.getElementById('foot-verdict').textContent)`, 'green status');
   await shot(b, 'panel-sorted.png');
   console.log(JSON.stringify(await b.evalIn(`document.getElementById('foot').innerText`)), 'script problems:', b.problems.length);
   await b.close();

@@ -323,7 +323,7 @@ const domRows = `Array.from(document.querySelectorAll('#body .r')).filter(functi
 const colIndex = key => `SelectApp.state.columns.map(function(c){return c.key;}).indexOf(${JSON.stringify(key)})`;
 const ids = `SelectApp.state.order.map(function(i){return SelectApp.state.store.rows[i];})`;
 const foot = `({kind:document.getElementById('foot').className,mark:document.getElementById('foot-mark').dataset.kind,verdict:document.getElementById('foot-verdict').textContent,sentence:document.getElementById('foot-sentence').textContent,
-  actions:Array.from(document.querySelectorAll('#foot-actions button')).filter(function(b){return !b.hidden;}).map(function(b){return b.id+(b.classList.contains('primary')?'*':'');}),
+  actions:Array.from(document.querySelectorAll('#foot-actions button')).filter(function(b){return !b.hidden&&b.id!=='foot-close';}).map(function(b){return b.id+(b.classList.contains('primary')?'*':'');}),close:!document.getElementById('foot-close').hidden,
   background:getComputedStyle(document.getElementById('foot')).backgroundColor,color:getComputedStyle(document.getElementById('foot-verdict')).color})`;
 
 function clips(n) {
@@ -335,7 +335,11 @@ function clips(n) {
   return list;
 }
 
-// Show and Sort are two menus under their words. Real clicks: open the menu, then press the item.
+// From, Show and Sort are menus under their words. Real clicks: open the menu, then press the item.
+async function pickSource(b, src) {
+  await b.click('#source');
+  await b.click(`#picker button[data-id="${src}"]`);
+}
 async function pickShow(b, id) {
   await b.click('#show');
   await b.click(`#picker button[data-id="${id || 'everything'}"]`);
@@ -362,7 +366,7 @@ async function press(b, key) {
 
 // The open picker as [id, label, hint, on].
 const pickerItems = `Array.from(document.querySelectorAll('#picker button')).map(function(x){var h=x.querySelector('span');return [x.dataset.id,x.firstChild.textContent,h.textContent,x.classList.contains('on')&&x.getAttribute('aria-checked')==='true'];})`;
-// The two words of the bar.
+// The two words of the toolbar's Show and Sort.
 const barNow = `({show:document.querySelector('#show .v').textContent,showOn:document.getElementById('show').classList.contains('on'),sort:document.querySelector('#sort .v').textContent,sortOn:document.getElementById('sort').classList.contains('on'),flip:!document.getElementById('flip').hidden,picker:!document.getElementById('picker').hidden})`;
 
 async function setItems(b, n) { await b.evalIn(`__mock.items=${JSON.stringify(clips(n))}`); }
@@ -378,12 +382,18 @@ async function pressScan(b) {
 }
 
 async function scanAndWait(b) {
-  await b.click('#source button[data-src="project"]');
+  await pickSource(b, 'project');
   const n = b.engineLog.exited.length;
   await pressScan(b);
   const end = Date.now() + 60000;
   while (b.engineLog.exited.length === n && Date.now() < end) { await sleep(10); }
   await b.waitFor(`SelectApp.state.scan && !SelectApp.state.scan.handle && SelectApp.state.scan.state!=='Scanning'`, 'scan end', 60000);
+}
+
+// An rgba() token laid over a #rrggbb ground, as #rrggbb.
+function over(rgba, ground) {
+  const [r, g, bl, a] = rgba.match(/[\d.]+/g).map(Number);
+  return '#' + [r, g, bl].map((v, i) => Math.round(v * a + parseInt(ground.slice(1 + 2 * i, 3 + 2 * i), 16) * (1 - a)).toString(16).padStart(2, '0')).join('').toUpperCase();
 }
 
 // WCAG contrast of two #rrggbb colours.
@@ -445,19 +455,24 @@ async function main() {
   try {
     await b.open();
     check('page loads with no script errors', b.problems.length === 0, b.problems);
-    const row = await b.evalIn(`({kids:Array.from(document.getElementById('bar').children).filter(function(x){return !x.hidden;}).map(function(x){return x.id;}).join(),
+    const row = await b.evalIn(`({kids:Array.from(document.getElementById('toolbar').children).filter(function(x){return !x.hidden&&x.id;}).map(function(x){return x.id;}).join(),
       shows:SelectCore.SHOWS.length,showTips:SelectCore.SHOWS.filter(function(s){return s.tip.length>40;}).length,sorts:SelectCore.SORTS.length,sortTips:SelectCore.SORTS.filter(function(s){return (SelectCore.COLUMN[s.key].tip||'').length>4;}).length,
       dots:document.querySelectorAll('#families button').length,dotTips:Array.from(document.querySelectorAll('#families button')).filter(function(x){return x.title.length>4;}).length,
-      words:[document.querySelector('#show .k').textContent,document.querySelector('#show .v').textContent,document.querySelector('#sort .k').textContent,document.querySelector('#sort .v').textContent].join('|'),
-      titles:document.getElementById('show').title.length>4&&document.getElementById('sort').title.length>4,old:!!document.querySelector('#presets,#clear-view,#sort-menu,[data-group]')})`);
-    check('the bar is Show, Sort and nine dots, and every show, sort and dot has a tooltip', row.kids === 'show,sort,families,modes' && row.words === 'Show|Everything|Sort|As listed' && row.shows === 10 && row.showTips === 10 && row.sorts === 10 && row.sortTips === 10 && row.dots === 9 && row.dotTips === 9 && row.titles && !row.old, row);
+      words:[document.querySelector('#source .k').textContent,document.querySelector('#source .v').textContent,document.querySelector('#show .k').textContent,document.querySelector('#show .v').textContent,document.querySelector('#sort .k').textContent,document.querySelector('#sort .v').textContent].join('|'),
+      titles:document.getElementById('show').title.length>4&&document.getElementById('sort').title.length>4,old:!!document.querySelector('#presets,#clear-view,#sort-menu,[data-group],#bar,#title,#subtitle,#foot-under,#foot-meter,#source button[data-src]'),
+      status:document.getElementById('foot').parentNode.id})`);
+    check('one toolbar: From, Show, Sort, nine dots, search, view and the menu, every show, sort and dot with a tooltip, and the status under it', row.kids === 'source,show,sort,families,search-box,modes,more' && row.words === 'From|Selection|Show|Everything|Sort|As listed' && row.shows === 10 && row.showTips === 10 && row.sorts === 10 && row.sortTips === 10 && row.dots === 9 && row.dotTips === 9 && row.titles && !row.old && row.status === 'top', row);
     await b.waitFor(`document.getElementById('project-name').textContent==='lantern-spring'`, 'project name');
-    check('project name shows from status, without the extension', true);
+    check('project name comes from status, without the extension, and From\'s tooltip leads with it', (await b.evalIn(`document.getElementById('source').title`)).split('\n')[0] === 'lantern-spring');
 
-    // -------- the foot before a scan
-    await b.click('#source button[data-src="project"]');
+    // -------- the From menu, and the status before a scan
+    await b.click('#source');
+    const fromMenu = await b.evalIn(`({items:${pickerItems},title:(document.querySelector('#picker .title')||{}).textContent,expanded:document.getElementById('source').getAttribute('aria-expanded')})`);
+    await b.click('#picker button[data-id="project"]');
+    const fromNow = await b.evalIn(`({v:document.querySelector('#source .v').textContent,source:SelectApp.state.source,picker:!document.getElementById('picker').hidden,saved:localStorage.getItem('select.source')})`);
+    check('From opens a menu under the project\'s name: Selection, Project, Folder, the current one ticked; picking one names it and remembers it', fromMenu.title === 'lantern-spring' && fromMenu.expanded === 'true' && JSON.stringify(fromMenu.items.map(x => [x[0], x[1], x[3]])) === '[["selection","Selection",true],["project","Project",false],["folder","Folder",false]]' && fromMenu.items.every(x => x[2].length > 4) && fromNow.v === 'Project' && fromNow.source === 'project' && !fromNow.picker && fromNow.saved === 'project', { fromMenu, fromNow });
     const before = await footNow();
-    check('foot before a scan: a ring, a plain line and a cobalt Scan', before.mark === 'waiting' && /Nothing scanned yet/.test(before.verdict) && /every clip in this project/.test(before.sentence) && before.actions.join() === 'scan*', before);
+    check('status before a scan: a ring, a plain verdict and a cobalt Scan', before.mark === 'waiting' && before.verdict === 'Nothing scanned yet' && before.sentence === '' && before.actions.join() === 'scan*' && !before.close, before);
     check('the primary action is cobalt', (await b.evalIn(`getComputedStyle(document.getElementById('scan')).backgroundColor`)) === 'rgb(47, 111, 230)');
     await b.shot('00-empty');
 
@@ -472,15 +487,14 @@ async function main() {
     await b.waitFor(`SelectApp.state.store.tier1>=50`, 'tier 1', 30000);
     await sleep(120);
     const mid = await footNow();
-    const meter = await b.evalIn(`({shown:!document.getElementById('foot-meter').hidden,width:parseFloat(document.getElementById('foot-meter-fill').style.width),fill:getComputedStyle(document.getElementById('foot-meter-fill')).backgroundColor,spin:getComputedStyle(document.querySelector('#foot-mark .m-arc')).animationName})`);
-    check('foot while scanning: spinner, count of the total, clips per second, quiet Stop', mid.mark === 'running' && /^Reading [1-9]\d* of 400$/.test(mid.verdict) && /[1-9]\d* clips per second/.test(mid.sentence) && mid.actions.join() === 'stop', mid);
-    check('the meter is thin, grey and moving', meter.shown && meter.width > 0 && meter.width < 100 && meter.fill === 'rgb(160, 160, 166)' && meter.spin === 'turn', meter);
+    const spin = await b.evalIn(`getComputedStyle(document.querySelector('#foot-mark .m-arc')).animationName`);
+    check('status while scanning: one line, the arc turning, a count of the total, quiet Stop, no bar', mid.mark === 'running' && spin === 'turn' && /^Reading [1-9]\d* of 400$/.test(mid.verdict) && mid.sentence === '' && mid.actions.join() === 'stop' && !(await b.evalIn(`!!document.querySelector('[role="progressbar"]')`)), { mid, spin });
     const filled = await b.evalIn(`(function(){var d=${domRows},i=${colIndex('sharpness')};return d.filter(function(r){return r.cells[i]!=='';}).length;})()`);
     check('columns fill in while the scan runs', filled > 0, filled);
     await b.shot('01-scanning');
     await b.waitFor(`SelectApp.state.scan && SelectApp.state.scan.state==='Done'`, 'done', 30000);
     const done = await b.evalIn(`({foot:${foot},t0:SelectApp.state.store.tier0,t1:SelectApp.state.store.tier1,errors:SelectApp.state.store.errors})`);
-    check('scan ends Done, both tiers landed', /^400 clips read$/.test(done.foot.verdict) && /^Took \d+\.\d s\. Choose what to show, or how to sort, above\. \d+ clips are listed with blank picture scores: this Mac has no decoder for them, and ffmpeg isn't installed\./.test(done.foot.sentence) && done.t0 === 400 - unreadable && done.t1 === 400 - unreadable && done.errors === unreadable, done);
+    check('scan ends Done, both tiers landed', /^400 clips read$/.test(done.foot.verdict) && /^\d+ clips have no picture scores: this Mac has no decoder for them, and ffmpeg isn't installed\.$/.test(done.foot.sentence) && done.t0 === 400 - unreadable && done.t1 === 400 - unreadable && done.errors === unreadable, done);
     check('engine binary path is inside the extension, with scan arguments', /\/bin\/select-engine$/.test(b.engineLog.lastBin) && b.engineLog.lastArgs.join(' ') === 'scan --paths-file -', b.engineLog.lastBin);
     await b.waitFor(`document.querySelectorAll('#body img[src]').length>0`, 'thumbs');
     await sleep(200);
@@ -519,7 +533,10 @@ async function main() {
     await sleep(100);
     const tail = await b.evalIn(`(function(){var d=${domRows},i=${colIndex('audioDb')};return d.slice(-5).map(function(r){return r.cells[i];});})()`);
     check('nulls sort to the end of the table and stay empty', tail.every(v => v === ''), tail);
+    const tucked = await b.waitFor(`document.getElementById('foot').classList.contains('tucked')`, 'status tucks', 1500).then(() => true, () => false);
     await b.evalIn(`document.getElementById('grid').scrollTop=0`);
+    const back = await b.waitFor(`!document.getElementById('foot').classList.contains('tucked')`, 'status back', 1500).then(() => true, () => false);
+    check('scrolling down the clips tucks the calm status away, and a quick return to the top brings it back', tucked && back, { tucked, back });
 
     // -------- Show and Sort
     await resetView(b);
@@ -535,7 +552,7 @@ async function main() {
       await pickSort(b, key);
       let v = await orderOf(field(key)), f = await footNow(), bar = await barState();
       const view = await viewNow();
-      check(`Sort ${e.label} sorts ${e.ways[0].toLowerCase()} and says so`, sorted(v, e.dir) && JSON.stringify(view.sort) === JSON.stringify([{ key, dir: e.dir }]) && !view.show && f.verdict === e.ways[0] && bar.sort === e.ways[0] && bar.sortOn && bar.flip && !bar.picker && /^400 clips in \d+(\.\d)? s\./.test(f.sentence), { verdict: f.verdict, sentence: f.sentence, bar });
+      check(`Sort ${e.label} sorts ${e.ways[0].toLowerCase()} and says so`, sorted(v, e.dir) && JSON.stringify(view.sort) === JSON.stringify([{ key, dir: e.dir }]) && !view.show && f.verdict === e.ways[0] && bar.sort === e.ways[0] && bar.sortOn && bar.flip && !bar.picker && f.sentence === done.foot.sentence, { verdict: f.verdict, sentence: f.sentence, bar });
       await pickSort(b, key);
       v = await orderOf(field(key)); f = await footNow(); bar = await barState();
       check(`picking ${e.label} again flips it: ${e.ways[1].toLowerCase()}`, sorted(v, -e.dir) && (await viewNow()).sort[0].dir === -e.dir && f.verdict === e.ways[1] && bar.sort === e.ways[1], { verdict: f.verdict, bar });
@@ -561,7 +578,7 @@ async function main() {
     check('the active word is in ink and semibold, the others in ink2, no pills', pickStyle.on[0] === 'rgb(237, 237, 238)' && pickStyle.on[1] === '600' && pickStyle.off[0] === 'rgb(173, 173, 177)' && pickStyle.off[1] === '400' && pickStyle.bg.every(x => x === 'rgba(0, 0, 0, 0)') && pickStyle.border.every(x => x === 'none'), pickStyle);
     await pickSort(b, null);
     const asListed = { listed: await b.evalIn(`SelectApp.state.order.length===400&&SelectApp.state.order.every(function(at,i){return at===i;})`), view: await viewNow(), f: await footNow(), bar: await barState() };
-    check('As listed turns the sort off: the order clips came in, no flip button, the word plain', asListed.listed && !asListed.view.sort.length && !asListed.bar.sortOn && !asListed.bar.flip && asListed.bar.sort === 'As listed' && asListed.f.verdict === '400 clips read' && /Choose what to show, or how to sort, above\./.test(asListed.f.sentence), asListed);
+    check('As listed turns the sort off: the order clips came in, no flip button, the word plain', asListed.listed && !asListed.view.sort.length && !asListed.bar.sortOn && !asListed.bar.flip && asListed.bar.sort === 'As listed' && asListed.f.verdict === '400 clips read' && asListed.f.sentence === done.foot.sentence, asListed);
     await pickSort(b, 'clipHighPct');
     check('a switched-off column shows while the view sorts by it', await b.evalIn(`!!document.querySelector('#head .h[data-key="clipHighPct"]')`));
     await pickSort(b, 'createdAt');
@@ -575,13 +592,13 @@ async function main() {
     for (const id of showIds) {
       await pickShow(b, id);
       const info = await b.evalIn(`(function(){var S=SelectApp.state,C=SelectCore,s=C.SHOW[${JSON.stringify(id)}],rows=S.store.rows,ctx=s.prepare?s.prepare(rows):null;
-        return {shown:S.order.length,count:C.showCount(rows,s.id),pass:S.order.every(function(i){return s.group?rows[i].dupGroup>0:s.filter(rows[i],ctx);}),label:s.label,says:s.says,groups:S.hasGroups,view:S.view};})()`);
+        return {shown:S.order.length,count:C.showCount(rows,s.id),pass:S.order.every(function(i){return s.group?rows[i].dupGroup>0:s.filter(rows[i],ctx);}),label:s.label,groups:S.hasGroups,view:S.view};})()`);
       const f = await footNow(), bar = await barState();
-      check(`Show ${info.label} shows only what it says, as many as its count, and names itself`, info.shown > 0 && info.shown < 400 && info.shown === info.count && info.pass && info.view.show === id && !info.view.sort.length && f.verdict === info.label && f.sentence.includes(info.says) && bar.show === info.label && bar.showOn && !bar.sortOn && !bar.flip && info.groups === (id === 'similar'), { shown: info.shown, count: info.count, pass: info.pass, verdict: f.verdict, sentence: f.sentence, bar });
+      check(`Show ${info.label} shows only what it says, as many as its count, and names itself`, info.shown > 0 && info.shown < 400 && info.shown === info.count && info.pass && info.view.show === id && !info.view.sort.length && f.verdict === info.label && (id === 'similar' || f.sentence.startsWith(`${info.shown} of 400 clips`)) && bar.show === info.label && bar.showOn && !bar.sortOn && !bar.flip && info.groups === (id === 'similar'), { shown: info.shown, count: info.count, pass: info.pass, verdict: f.verdict, sentence: f.sentence, bar });
       if (id === 'similar') {
         await b.shot('03-similar');
         const heads = await b.evalIn(`({first:(document.querySelector('#body .gh')||{}).textContent,dup:!!document.querySelector('#head .h[data-key="dupGroup"]'),groups:SelectApp.state.groupCount})`);
-        check('similar shots show as groups, each under its own heading', /^Group 1 · \d+ clips$/.test(heads.first) && !heads.dup && heads.groups > 1 && new RegExp('^' + heads.groups + ' groups, ').test(f.sentence), heads);
+        check('similar shots show as groups, each under its own heading', /^Group 1 · \d+ clips$/.test(heads.first) && !heads.dup && heads.groups > 1 && new RegExp('^' + heads.groups + ' groups\\b').test(f.sentence), { heads, sentence: f.sentence });
       }
       if (id === 'interviews') { await b.shot('04-interviews'); }
       await b.click('#more');
@@ -597,7 +614,7 @@ async function main() {
     const within = show => `(function(){var S=SelectApp.state,C=SelectCore,rows=S.store.rows,s=C.SHOW[${JSON.stringify(show)}],ctx=s.prepare?s.prepare(rows):null,r=S.order.map(function(i){return rows[i];});
       return {view:S.view,shown:r.length,count:C.showCount(rows,s.id),pass:r.every(function(x){return s.filter(x,ctx);}),sharp:r.map(function(x){return x.sharpness;}),long:r.map(function(x){return x.durationS;}),luma:r.map(function(x){return x.luma;}),motion:r.map(function(x){return x.motionProxy;}),colours:r.map(function(x){return x.colorName;})};})()`;
     let combo = await b.evalIn(within('interviews')), comboFoot = await footNow(), comboBar = await barState();
-    check('Show, then Sort: the sort orders what the show shows, and the bar and foot name both', combo.view.show === 'interviews' && combo.view.sort[0].key === 'sharpness' && combo.shown === combo.count && combo.shown > 1 && combo.pass && sorted(combo.sharp, -1) && comboFoot.verdict === 'Interviews, sharpest first' && comboFoot.sentence.includes('Speech and a face, 15 seconds or longer.') && comboBar.show === 'Interviews' && comboBar.sort === 'Sharpest first' && comboBar.showOn && comboBar.sortOn, { view: combo.view, verdict: comboFoot.verdict, sentence: comboFoot.sentence, bar: comboBar });
+    check('Show, then Sort: the sort orders what the show shows, and the bar and foot name both', combo.view.show === 'interviews' && combo.view.sort[0].key === 'sharpness' && combo.shown === combo.count && combo.shown > 1 && combo.pass && sorted(combo.sharp, -1) && comboFoot.verdict === 'Interviews, sharpest first' && comboFoot.sentence.startsWith(`${combo.shown} of 400 clips`) && comboBar.show === 'Interviews' && comboBar.sort === 'Sharpest first' && comboBar.showOn && comboBar.sortOn, { view: combo.view, verdict: comboFoot.verdict, sentence: comboFoot.sentence, bar: comboBar });
     await resetView(b);
     await pickSort(b, 'durationS');
     await pickShow(b, 'people');
@@ -647,7 +664,7 @@ async function main() {
     check('Enter picks the item in focus', (await viewNow()).show === 'interviews' && (await barState()).show === 'Interviews' && !(await barState()).picker);
     await resetView(b);
     await b.click('#show');
-    await b.click('#foot-sentence');
+    await b.click('#foot-verdict');
     check('a click outside closes the menu and changes nothing', (await b.evalIn(`document.getElementById('picker').hidden&&document.getElementById('show').getAttribute('aria-expanded')==='false'`)) && (await viewNow()).show === null && !(await viewNow()).sort.length);
     await b.click('#show');
     await b.click('#show');
@@ -720,7 +737,7 @@ async function main() {
     await resetView(b);
     await pickSort(b, 'sharpness');
     const finished = await footNow();
-    check('foot when finished: a grey tick, the sort as the verdict, three actions, Sort into Bins cobalt, Scan gone', finished.mark === 'done' && finished.verdict === 'Sharpest first' && /^400 clips in \d+\.\d s\. \d+ clips are listed with blank picture scores/.test(finished.sentence) && (finished.sentence.match(/blank/g) || []).length === 1 && finished.actions.join() === 'do-label,do-columns,do-bins*', finished);
+    check('status when finished: a grey tick, the sort as the verdict, facts only, three actions, Sort into Bins cobalt, Scan gone', finished.mark === 'done' && finished.verdict === 'Sharpest first' && /^\d+ clips have no picture scores/.test(finished.sentence) && (finished.sentence.match(/no picture scores/g) || []).length === 1 && finished.actions.join() === 'do-label,do-columns,do-bins*' && !finished.close, finished);
     await b.click('#more');
     const menu = await b.evalIn(`Array.from(document.querySelectorAll('#menu button')).filter(function(x){return !x.hidden;}).map(function(x){return x.textContent;})`);
     check('the menu holds Rescan, Columns, Previous View, Clear Results, Report a Bug and About', menu.join('|') === 'Rescan|Columns…|Previous View|Clear Results|Report a Bug|About Select', menu);
@@ -732,9 +749,9 @@ async function main() {
     await b.click(rowSel(2));
     await b.click(rowSel(6), { shift: true });
     await b.click(rowSel(4), { meta: true });
-    check('click, shift-click and cmd-click select rows', (await b.evalIn(`SelectApp.state.selected.size`)) === 4, await b.evalIn(text('foot-sentence')));
+    check('click, shift-click and cmd-click select rows, and the status counts them', (await b.evalIn(`SelectApp.state.selected.size`)) === 4 && (await b.evalIn(text('foot-verdict'))) === '4 of 400 clips selected', await b.evalIn(text('foot-verdict')));
     const selected = await b.evalIn(`(function(){var s=getComputedStyle(document.querySelector('#body .r.sel'),'::before');return {bg:s.backgroundColor,radius:s.borderRadius,left:s.left};})()`);
-    check('selected rows use a quiet grey, inset and rounded, never cobalt', selected.bg === 'rgb(58, 58, 64)' && selected.radius === '7px' && selected.left === '8px', selected);
+    check('selected rows sit on a soft plate, inset and rounded, never cobalt', selected.bg === 'rgba(255, 255, 255, 0.11)' && selected.radius === '7px' && selected.left === '8px', selected);
     const hierarchy = await b.evalIn(`(function(){var r=document.querySelector('#body .r:not(.err):not(.two)');return {by:getComputedStyle(r.querySelector('.c-sharpness')).color,weight:getComputedStyle(r.querySelector('.c-sharpness')).fontWeight,other:getComputedStyle(r.querySelector('.c-luma')).color};})()`);
     check('the sorted column keeps ink and the other figures step back', hierarchy.by === 'rgb(237, 237, 238)' && hierarchy.weight === '600' && hierarchy.other === 'rgb(173, 173, 177)', hierarchy);
     await b.shot('13-selected');
@@ -742,10 +759,10 @@ async function main() {
     await b.click('#do-label');
     await waitModal();
     const labelText = await dialogText();
-    check('Label confirmation gives the count and the undo truth, and how far Undo Write reaches', /Label 4 clips/.test(labelText) && /Mango/.test(labelText) && /4 clips/.test(labelText) && /Cmd\+Z/.test(labelText) && /takes back the last 10 writes to this project, newest first, and keeps them when the panel reloads/.test(labelText), labelText);
+    check('Label confirmation gives the count and the label, and nothing about undo while Cmd+Z and Undo Write both reach it', /^Label 4 clips\?/.test(labelText) && /Label: Mango/.test(labelText) && !/Cmd\+Z/.test(labelText) && !/Undo Write/.test(labelText), labelText);
     await b.shot('05-label-dialog');
     await b.click('#dialog-cancel');
-    check('cancel writes nothing', (await calls('label')).length === 0 && /Cancelled/.test(await noteText()));
+    check('cancel writes nothing, and closes the sheet', (await calls('label')).length === 0 && !(await modalOpen()) && !(await b.evalIn(`SelectApp.state.busy`)));
 
     await b.click('#do-label');
     await waitModal();
@@ -757,13 +774,13 @@ async function main() {
     await b.waitFor(`/Labelled/.test(${text('foot-verdict')})`);
     await sleep(320);
     const labelled = await footNow();
-    check('labels read back: the foot turns green, with a white Undo', /green/.test(labelled.kind) && labelled.mark === 'seal' && labelled.background === GREEN && labelled.actions.join() === 'undo-write', labelled);
+    check('labels read back: the status turns green, with a white Undo and a way to dismiss it', /green/.test(labelled.kind) && labelled.mark === 'seal' && labelled.background === GREEN && labelled.actions.join() === 'undo-write' && labelled.close && labelled.sentence === '', labelled);
 
     await b.evalIn(`__mock.restoreSkip=1`);
     await b.click('#undo-write');
     await waitModal();
     const undoSheet = await dialogText();
-    check('Undo Write says what it puts back, in plain words, and when the write was made', /^Undo Write\?/.test(undoSheet) && /Takes Mango off 4 clips and puts back the labels they had before\./.test(undoSheet) && /The write was made today at \d\d:\d\d\./.test(undoSheet) && /This is the last write Undo Write can take back/.test(undoSheet), undoSheet);
+    check('Undo Write says what it puts back, in plain words, and when the write was made', /^Undo Write\?/.test(undoSheet) && /Takes Mango off 4 clips and puts back the labels they had before\./.test(undoSheet) && /Made today at \d\d:\d\d\./.test(undoSheet), undoSheet);
     await b.click('#dialog-ok');
     await b.waitFor(`__mock.calls.some(function(c){return c.fn==='restore';})`);
     const rest = (await calls('restore'))[0].args;
@@ -777,7 +794,8 @@ async function main() {
     await b.click('#do-columns');
     await waitModal();
     const colText = await dialogText();
-    check('Add Columns confirmation: count, fields in the panel\'s words, undo limits', /400 clips/.test(colText) && /13 columns/.test(colText) && /Rank, Sharpness, Brightness, Highlights, Motion, Loudness, People/.test(colText) && /start with Select/.test(colText) && /keeps only the last 50, so Cmd\+Z can't reach this write/.test(colText) && /Metadata Display/.test(colText), colText);
+    const colFields = (/^Rank, .*$/m.exec(colText) || [''])[0].split(', ');
+    check('Add Columns confirmation: count, the 13 fields in the panel\'s words, and the undo truth', /^Add columns to 400 clips\?/.test(colText) && /^Rank, Sharpness, Brightness, Highlights, Motion, Loudness, People/.test(colFields.join(', ')) && colFields.length === 13 && /Too big for Cmd\+Z\. Undo Write takes it back\./.test(colText) && /Undo Write clears the values\. The columns stay in the Project panel\./.test(colText), colText);
     await b.shot('06-columns-dialog');
     await b.click('#dialog-ok');
     await b.waitFor(`/Added 13 columns/.test(${text('foot-verdict')})`);
@@ -785,13 +803,16 @@ async function main() {
     check('Add Columns goes in batches of 100, rows ranked by view order, shown once', cols.length === 4 && cols.every(c => c.rows.length === 100 && c.fields.length === 13) && colRows[0].values.SelectRank === '0001' && colRows[399].values.SelectRank === '0400' && colRows.every((r, i) => r.values.SelectRank === String(i + 1).padStart(4, '0')) && cols.map(c => c.show).join() === 'true,false,false,false', cols.map(c => [c.rows.length, c.show]));
     await sleep(320);
     check('columns read back and shown: green', (await footNow()).background === GREEN, (await footNow()).sentence);
-    await b.evalIn(`SelectApp.state.outcome=null;SelectApp.applyView()`);
+    await b.click('#foot-close');
+    await sleep(320);
+    const dismissed = await footNow();
+    check('the dismiss button puts the green away and brings the writes back', !dismissed.close && dismissed.background !== GREEN && dismissed.verdict === 'Sharpest first' && dismissed.actions.join() === 'do-label,do-columns,do-bins*' && (await b.evalIn(`SelectApp.state.outcome`)) === null, dismissed);
 
     await b.click('#do-bins');
     await waitModal();
     const binText = await dialogText();
-    check('Sort into Bins confirmation says items move, not files', /moves items in the Project panel, not files on disk/.test(binText) && /SELECT \d{4}-\d\d-\d\d Sharpest first/.test(binText) && /01 Sharpest\s+\d+/.test(binText) && /05 Softest\s+\d+/.test(binText), binText);
-    check('the sheet has a radius of 14, one cobalt button and the undo truth', (await b.evalIn(`getComputedStyle(document.getElementById('dialog')).borderRadius`)) === '14px' && (await b.evalIn(`Array.from(document.querySelectorAll('#dialog button')).filter(function(x){return getComputedStyle(x).backgroundColor==='rgb(47, 111, 230)';}).length`)) === 1 && /keeps only the last 50/.test(binText));
+    check('Sort into Bins confirmation names the top bin and every bin with its count', /^Sort 400 clips into bins\?/.test(binText) && /SELECT \d{4}-\d\d-\d\d Sharpest first/.test(binText) && /01 Sharpest\s+\d+/.test(binText) && /05 Softest\s+\d+/.test(binText), binText);
+    check('the sheet has a radius of 14, one cobalt button and the undo truth', (await b.evalIn(`getComputedStyle(document.getElementById('dialog')).borderRadius`)) === '14px' && (await b.evalIn(`Array.from(document.querySelectorAll('#dialog button')).filter(function(x){return getComputedStyle(x).backgroundColor==='rgb(47, 111, 230)';}).length`)) === 1 && /Too big for Cmd\+Z\. Undo Write takes it back\./.test(binText));
     await b.shot('07-bins-dialog');
     await b.click('#dialog-ok');
     await b.waitFor(`/Sorted into/.test(${text('foot-verdict')})`);
@@ -799,7 +820,7 @@ async function main() {
     check('Sort into Bins goes in batches of 100 into one top bin, every clip once, read back once', binCalls.length === 4 && !binCalls[0].top && new Set(binCalls.slice(1).map(c => c.top)).size === 1 && /^t\d+$/.test(binCalls[1].top) && moves.length === 400 && new Set(moves).size === 400 && (await calls('binsCheck')).length === 1, binCalls.map(c => [c.top || '-', c.buckets.map(x => x.items.length)]));
     await sleep(320);
     const sortedFoot = await b.evalIn(`(function(){var u=getComputedStyle(document.getElementById('undo-write'));return {f:${foot},undoBg:u.backgroundColor,undoColor:u.color,sentence:getComputedStyle(document.getElementById('foot-sentence')).color};})()`);
-    check('bins read back: green foot, plain words, Undo in white', sortedFoot.f.background === GREEN && /^Sorted into 6 bins$/.test(sortedFoot.f.verdict) && /^400 clips moved\. Your files weren't touched\.$/.test(sortedFoot.f.sentence) && sortedFoot.undoBg === 'rgb(255, 255, 255)' && sortedFoot.undoColor === GREEN && sortedFoot.sentence === 'rgb(255, 255, 255)', sortedFoot);
+    check('bins read back: green status, the verdict alone, Undo in white', sortedFoot.f.background === GREEN && /^Sorted into 6 bins$/.test(sortedFoot.f.verdict) && sortedFoot.f.sentence === '' && sortedFoot.undoBg === 'rgb(255, 255, 255)' && sortedFoot.undoColor === GREEN && sortedFoot.f.color === 'rgb(255, 255, 255)', sortedFoot);
     await b.shot('08-bins-green');
     await b.click('#flip');
     await sleep(320);
@@ -914,8 +935,8 @@ async function main() {
     await waitModal();
     await b.click('#dialog-ok');
     await b.waitFor(`SelectApp.state.write&&SelectApp.state.write.done>=100`, 'first batch landed');
-    const going = await b.evalIn(`({foot:${foot},meter:!document.getElementById('foot-meter').hidden,width:parseFloat(document.getElementById('foot-meter-fill').style.width),busy:SelectApp.state.busy})`);
-    check('a long write shows real progress: how many of how many, a meter, and Stop', going.foot.verdict === 'Labelling 100 of 400 clips' && /100 at a time\. Stop ends it after this batch/.test(going.foot.sentence) && going.meter && Math.round(going.width) === 25 && going.foot.actions.join() === 'stop' && going.busy === 'Labelling 400 clips', going);
+    const going = await b.evalIn(`({foot:${foot},busy:SelectApp.state.busy})`);
+    check('a long write shows real progress in one line: how many of how many, and Stop', going.foot.verdict === 'Labelling 100 of 400 clips' && going.foot.sentence === '' && going.foot.mark === 'running' && going.foot.actions.join() === 'stop' && !going.foot.close && going.busy === 'Labelling 400 clips', going);
     await b.click('#more');
     const busyMenu = await b.evalIn(`(function(){var q=function(id){return document.querySelector('#menu [data-menu="'+id+'"]');};return {undo:q('undo').disabled,undoShown:!q('undo').hidden,rescan:q('rescan').disabled,clear:q('clear').disabled};})()`);
     await press(b, 'Escape');
@@ -929,7 +950,7 @@ async function main() {
     await b.click('#undo-write');
     await waitModal();
     const partUndo = await dialogText();
-    check('Undo Write offers exactly what the stopped write did, and says how far it still reaches', /Takes Mango off 200 clips/.test(partUndo) && /After this, Undo Write can still take back \d+ earlier writes?\./.test(partUndo), partUndo);
+    check('Undo Write offers exactly what the stopped write did, and when it was made', /Takes Mango off 200 clips and puts back/.test(partUndo) && /Made today at \d\d:\d\d\./.test(partUndo), partUndo);
     await b.click('#dialog-ok');
     await b.waitFor(`SelectApp.state.outcome&&/Undone/.test(SelectApp.state.outcome.verdict)&&!SelectApp.state.busy`);
     const back200 = (await calls('restore')).map(c => c.args);
@@ -1049,11 +1070,11 @@ async function main() {
 
     // -------- 0.2: a Selection scan says where its clips come from, and never swaps a picked clip for another copy
     await b.evalIn(`__mock.items=__mock.items.slice(0,2);__mock.picked={clips:2,where:['Day 2']}`);
-    await b.click('#source button[data-src="selection"]');
+    await pickSource(b, 'selection');
     await pressScan(b);
     await b.waitFor(`SelectApp.state.scan&&SelectApp.state.scan.state==='Done'&&SelectApp.state.store.rows.length===2`, 'selection scan');
-    const pickedNote = await noteText();
-    check('a Selection scan says how many clips, and from which bin, as it starts', pickedNote === 'Scanning the 2 clips selected in “Day 2”.', pickedNote);
+    const picked = { collect: (await calls('collect')).pop().args.mode, from: await b.evalIn(`document.getElementById('source').title`), v: await b.evalIn(`document.querySelector('#source .v').textContent`), note: await noteText() };
+    check('a Selection scan reads the selection, and From says so with its count, with no note', picked.collect === 'selection' && picked.v === 'Selection' && picked.from === 'lantern-spring\nThe clips or bins selected in the Project panel\n2 clips scanned' && picked.note === '', picked);
     await b.evalIn(`__mock.items=[{id:'copy9',path:__mock.items[0].path,name:'copy'},__mock.items[1]];__mock.calls.length=0;SelectApp.state.selected.clear();SelectApp.state.outcome=null;SelectApp.applyView()`);
     await b.click('#do-label');
     await waitModal();
@@ -1061,7 +1082,7 @@ async function main() {
     await b.click('#dialog-ok');
     await b.waitFor(`__mock.calls.some(function(c){return c.fn==='label';})&&!SelectApp.state.busy`);
     const pickItems = (await calls('label'))[0].args.items;
-    check('a picked clip that left the project is skipped, never replaced by another copy of its file', /1 clip picked for this scan isn't in the project any more, so it will be skipped\. Other copies of the same files stay as they are\./.test(gonePick) && pickItems.length === 1 && pickItems[0][0] === 'id1', { gonePick, pickItems });
+    check('a picked clip that left the project is skipped, never replaced by another copy of its file', /1 clip not in this project will be skipped\./.test(gonePick) && pickItems.length === 1 && pickItems[0][0] === 'id1', { gonePick, pickItems });
     await b.evalIn(`__mock.picked=null`);
     await setItems(b, 400);
     await scanAndWait(b);
@@ -1087,12 +1108,12 @@ async function main() {
     await b.click('#more');
     await b.click('[data-menu="clear"]');
     const cleared = await footNow();
-    const clearedView = await b.evalIn(`({sort:SelectApp.state.view.sort.length,show:SelectApp.state.view.show,family:SelectApp.state.view.family,on:document.querySelectorAll('.pick.on,#families button.on').length,words:document.querySelector('#show .v').textContent+'|'+document.querySelector('#sort .v').textContent,flip:!document.getElementById('flip').hidden,marks:document.querySelectorAll('#head .mark').length})`);
+    const clearedView = await b.evalIn(`({sort:SelectApp.state.view.sort.length,show:SelectApp.state.view.show,family:SelectApp.state.view.family,on:document.querySelectorAll('#show.on,#sort.on,#families button.on').length,words:document.querySelector('#show .v').textContent+'|'+document.querySelector('#sort .v').textContent,flip:!document.getElementById('flip').hidden,marks:document.querySelectorAll('#head .mark').length})`);
     check('Clear Results goes back to the first foot and the first view, and writes nothing', cleared.mark === 'waiting' && cleared.actions.join() === 'scan*' && (await b.evalIn(`SelectApp.state.store.rows.length`)) === 0 && !clearedView.sort && !clearedView.show && !clearedView.family && !clearedView.on && clearedView.words === 'Everything|As listed' && !clearedView.flip && !clearedView.marks, { cleared, clearedView });
 
     // -------- folder source, not in the project
     await b.evalIn(`__mock.folderFiles=['A0001.MP4','._A0001.MP4','A0001M01.XML','B0002.mov'];__mock.items=[{id:'p1',path:'/Volumes/Field SSD/f/A0001.MP4',name:'A0001.MP4'}]`);
-    await b.click('#source button[data-src="folder"]');
+    await pickSource(b, 'folder');
     check('Folder reveals a quiet path line with Choose', await b.evalIn(`!document.getElementById('folder-box').hidden&&!document.getElementById('choose').hidden&&getComputedStyle(document.getElementById('folder')).borderTopStyle==='none'`));
     await b.click('#folder');
     await b.send('Input.insertText', { text: '/Volumes/Field SSD/f' });
@@ -1109,6 +1130,8 @@ async function main() {
     check('listing a folder offers Stop, and Stop ends it at once with nothing new scanned', listing.verdict === 'Listing clips' && listing.actions.join() === 'stop' && (await b.evalIn(`SelectApp.state.listing`)) === false && (await b.evalIn(`SelectApp.state.store.rows.length`)) === 2, listing);
     await b.evalIn(`__mock.readdirMs=0`);
     const atOf = await b.evalIn(`SelectApp.state.order.map(function(i){return SelectApp.state.store.rows[i].name;}).indexOf('B0002.mov')`);
+    // The first press clears the note above the clips, so they move up a line before the second press: the
+    // double-click still opens the clip the first press picked.
     await b.click(`#body .r[data-at="${atOf}"]`, { count: 2 });
     await waitModal();
     const offer = await dialogText();
@@ -1138,13 +1161,15 @@ async function main() {
     await b.evalIn(`__mock.project={path:'/Volumes/Field SSD/Projects/other.prproj',name:'other.prproj'};__mock.items=[{id:'q1',path:'/Volumes/Field SSD/f/A0001.MP4',name:'A0001.MP4'}];__mock.calls.length=0`);
     await b.click('#do-label');
     await waitModal();
-    check('the confirmation names the project in front', /other/.test(await dialogText()), await dialogText());
-    await b.click('#dialog-cancel');
-    await b.evalIn(`__mock.project=${JSON.stringify(PROJECT)}`);
+    await b.click('#dialog-ok');
+    await b.waitFor(`__mock.calls.some(function(c){return c.fn==='label';})&&!SelectApp.state.busy`);
+    const inFront = (await calls('label'))[0].args;
+    check('the write goes to the project in front, on its own item for the path', inFront.project === '/Volumes/Field SSD/Projects/other.prproj' && JSON.stringify(inFront.items) === '[["q1","/Volumes/Field SSD/f/A0001.MP4"]]', inFront);
+    await b.evalIn(`__mock.project=${JSON.stringify(PROJECT)};SelectApp.state.outcome=null;SelectApp.applyView()`);
 
     // -------- failures of the engine
     await setItems(b, 400);
-    await b.click('#source button[data-src="project"]');
+    await pickSource(b, 'project');
     b.engineEnv.FAKE_DELAY_MS = '5';
     await pressScan(b);
     await b.waitFor(`SelectApp.state.scan.handle&&SelectApp.state.store.tier0>3`);
@@ -1152,7 +1177,7 @@ async function main() {
     await b.click('#stop');
     await b.waitFor(`SelectApp.state.scan.state==='Stopped'`);
     const stopped = await b.evalIn(`({rows:SelectApp.state.store.rows.length,t0:SelectApp.state.store.tier0,foot:${foot}})`);
-    check('Stop ends the engine, rows stay, Scan is back', b.engineLog.exited.length === spawnedBefore + 1 && stopped.rows === 400 && stopped.t0 < 400 && stopped.foot.verdict === 'Stopped' && /What was read stays/.test(stopped.foot.sentence) && stopped.foot.actions.includes('scan*'), stopped);
+    check('Stop ends the engine, rows stay, Scan is back', b.engineLog.exited.length === spawnedBefore + 1 && stopped.rows === 400 && stopped.t0 < 400 && stopped.foot.verdict === 'Stopped' && /^\d+ of 400 clips read\./.test(stopped.foot.sentence) && stopped.foot.actions.includes('scan*'), stopped);
 
     b.engineEnv.FAKE_DELAY_MS = '0';
     b.engineEnv.FAKE_MODE = 'crash';
@@ -1203,22 +1228,24 @@ async function main() {
     await b.evalIn(`document.documentElement.dataset.theme`);
     const token = name => `getComputedStyle(document.documentElement).getPropertyValue(${JSON.stringify('--' + name)}).trim()`;
     const dark = await b.evalIn(`({theme:document.documentElement.dataset.theme,surface:${token('surface')},ink:${token('ink')}})`);
-    check('Premiere dark: dark tokens', dark.theme === 'dark' && dark.surface === '#26262A' && dark.ink === '#EDEDEE', dark);
+    check('Premiere dark: dark tokens, on Premiere\'s own panel grey', dark.theme === 'dark' && dark.surface === '#232323' && dark.ink === '#EDEDEE', dark);
     await b.evalIn(`__mock.skin={red:230,green:230,blue:230};__mock.listeners['com.adobe.csxs.events.ThemeColorChanged'].forEach(function(f){f();})`);
     const light = await b.evalIn(`({theme:document.documentElement.dataset.theme,surface:${token('surface')},ink:${token('ink')},bg:getComputedStyle(document.getElementById('grid')).backgroundColor})`);
-    check('Premiere set bright: the theme-change event switches to the light tokens', light.theme === 'light' && light.surface === '#FFFFFF' && light.ink === '#1D1D1F' && light.bg === 'rgb(255, 255, 255)', light);
+    check('Premiere set bright: the theme-change event switches to the light tokens, on its new grey', light.theme === 'light' && light.surface === '#E6E6E6' && light.ink === '#1D1D1F' && light.bg === 'rgb(230, 230, 230)', light);
     await b.shot('18-light');
+    // Ingest's tokens, but the ground and the greys around it are Premiere's own panel grey (230 and 35 here) moved by
+    // Ingest's steps, and on the light grey ink2 and the red darken until they still read on every grey they sit on.
     const TOKENS = {
-      light: { ink: '#1D1D1F', ink2: '#5F6063', ink3: '#8E8E93', surface: '#FFFFFF', foot: '#F4F4F6', disc: '#E7E7EC', tick: '#3A3A3C', ring: '#C9C9CE', track: '#E9E9EE', meter: '#6E6E73', 'focus-ring': '#8A8A90', cobalt: '#2563EB', bad: '#C9281C', safe: '#15803D' },
-      dark: { ink: '#EDEDEE', ink2: '#ADADB1', ink3: '#7C7C82', surface: '#26262A', foot: '#1C1C1F', disc: '#3A3A40', tick: '#EDEDEE', ring: '#55555C', track: '#3A3A40', meter: '#A0A0A6', 'focus-ring': '#9A9AA0', cobalt: '#2F6FE6', bad: '#FF6A5F', safe: '#15803D' }
+      light: { ink: '#1D1D1F', ink2: '#555659', ink3: '#8E8E93', surface: '#E6E6E6', foot: '#DBDBDB', disc: '#CECECE', tick: '#3A3A3C', ring: '#B0B0B0', track: '#D0D0D0', meter: '#6E6E73', 'focus-ring': '#8A8A90', cobalt: '#2563EB', bad: '#B8271C', safe: '#15803D', 'plate-sel': 'rgba(0, 0, 0, .075)' },
+      dark: { ink: '#EDEDEE', ink2: '#ADADB1', ink3: '#7C7C82', surface: '#232323', foot: '#191919', disc: '#373737', tick: '#EDEDEE', ring: '#555555', track: '#373737', meter: '#A0A0A6', 'focus-ring': '#9A9AA0', cobalt: '#2F6FE6', bad: '#FF6A5F', safe: '#15803D', 'plate-sel': 'rgba(255, 255, 255, .11)' }
     };
     const measured = [];
     for (const theme of ['light', 'dark']) {
       await b.evalIn(`__mock.skin=${theme === 'light' ? '{red:230,green:230,blue:230}' : '{red:35,green:35,blue:35}'};__mock.listeners['com.adobe.csxs.events.ThemeColorChanged'].forEach(function(f){f();})`);
       const got = await b.evalIn(`(function(){var o={};${JSON.stringify(Object.keys(TOKENS[theme]))}.forEach(function(k){o[k]=${token('X').replace('"--X"', "'--'+k")};});return o;})()`);
-      check(`every ${theme} token is exactly Ingest's`, JSON.stringify(got) === JSON.stringify(TOKENS[theme]), got);
-      const T = TOKENS[theme];
-      for (const [fg, bg, label] of [[T.ink, T.surface, 'ink on surface'], [T.ink2, T.surface, 'ink2 on surface'], [T.ink, T.foot, 'ink on foot'], [T.ink2, T.foot, 'ink2 on foot'], [T.ink, T.disc, 'ink on a selected row'], [T.ink2, T.disc, 'ink2 on a selected row'], [T.ink, T.track, 'ink on a quiet button'], [T.bad, T.foot, 'bad on foot'], ['#FFFFFF', T.cobalt, 'white on cobalt'], ['#FFFFFF', T.safe, 'white on safe'], [T.safe, '#FFFFFF', 'safe on white']]) {
+      check(`every ${theme} token is Ingest's, with the greys from Premiere's panel colour`, JSON.stringify(got) === JSON.stringify(TOKENS[theme]), got);
+      const T = TOKENS[theme], sel = over(T['plate-sel'], T.surface);
+      for (const [fg, bg, label] of [[T.ink, T.surface, 'ink on surface'], [T.ink2, T.surface, 'ink2 on surface'], [T.ink, T.foot, 'ink on foot'], [T.ink2, T.foot, 'ink2 on foot'], [T.ink, sel, 'ink on a selected row'], [T.ink2, sel, 'ink2 on a selected row'], [T.ink, T.disc, 'ink on a menu item under the pointer'], [T.ink2, T.disc, 'ink2 on a menu item under the pointer'], [T.ink, T.track, 'ink on a quiet button'], [T.bad, T.surface, 'bad on the status'], ['#FFFFFF', T.cobalt, 'white on cobalt'], ['#FFFFFF', T.safe, 'white on safe'], [T.safe, '#FFFFFF', 'safe on white']]) {
         measured.push({ theme, label, ratio: contrast(fg, bg) });
       }
     }
@@ -1227,21 +1254,21 @@ async function main() {
 
     // -------- 620 px, the panel's minimum
     await b.size(620, 420);
-    // the longest words the bar can hold at once: the longest show and the longest sort, with its flip button, then a colour too
+    // the longest words the toolbar can hold at once: the longest show and the longest sort, with its flip button, then a colour too
     await resetView(b);
     await pickShow(b, 'onscreen');
     await pickSort(b, 'clipHighPct');
     await sleep(120);
     const narrowNow = () => b.evalIn(`(function(){var d=document.documentElement,w=innerWidth,inside=function(sel){var r=document.querySelector(sel).getBoundingClientRect();return r.left>=0&&r.right<=w&&r.bottom<=innerHeight;};
-      var words=['#show','#sort','#flip','#families','#modes'].map(function(sel){var r=document.querySelector(sel).getBoundingClientRect();return {sel:sel,mid:Math.round(r.top+r.height/2),l:r.left,r:r.right,shown:r.width>0};}),bar=document.getElementById('bar');
+      var words=['#source','#show','#sort','#flip','#families','#search-box','#modes','#more'].map(function(sel){var r=document.querySelector(sel).getBoundingClientRect();return {sel:sel,mid:Math.round(r.top+r.height/2),l:r.left,r:r.right,shown:r.width>0};}),bar=document.getElementById('toolbar');
       var cut=Array.from(document.querySelectorAll('.pick .v')).filter(function(x){return x.scrollWidth>x.clientWidth;}).map(function(x){return x.textContent;});
       return {page:d.scrollWidth,lines:new Set(words.map(function(x){return x.mid;})).size,barOver:bar.scrollWidth-bar.clientWidth,cut:cut,said:document.querySelector('#show .v').textContent+'|'+document.querySelector('#sort .v').textContent,modes:inside('#mode-grid'),search:inside('#search-box'),wordsIn:words.every(function(x){return x.shown&&x.l>=0&&x.r<=w;}),bins:inside('#do-bins'),label:inside('#do-label'),more:inside('#more'),source:inside('#source'),verdict:document.getElementById('foot-verdict').scrollWidth<=document.getElementById('foot-verdict').clientWidth,table:document.getElementById('grid').scrollWidth,grid:document.getElementById('grid').clientWidth,head:document.getElementById('top').scrollWidth};})()`);
     const narrow = await narrowNow();
     await b.click('#families [data-family="red"]');
     await sleep(120);
     const narrowRed = await narrowNow();
-    check('at 620 px the bar stays one line with a show, a sort and a colour on, its words whole', narrowRed.lines === 1 && narrowRed.barOver <= 0 && !narrowRed.cut.length && narrowRed.wordsIn && narrowRed.modes && narrowRed.page <= 620, narrowRed);
-    check('at 620 px nothing leaves the panel: the bar is one line with its words whole, the foot and the header stay whole', narrow.page <= 620 && narrow.lines === 1 && narrow.barOver <= 0 && !narrow.cut.length && narrow.said === 'Text on screen|Most clipped first' && narrow.modes && narrow.search && narrow.wordsIn && narrow.bins && narrow.label && narrow.more && narrow.source && narrow.verdict && narrow.head <= 620, narrow);
+    check('at 620 px the toolbar stays one line with a source, a show, a sort and a colour on, its words whole', narrowRed.lines === 1 && narrowRed.barOver <= 0 && !narrowRed.cut.length && narrowRed.wordsIn && narrowRed.modes && narrowRed.page <= 620, narrowRed);
+    check('at 620 px nothing leaves the panel: the toolbar is one line with its words whole, the status and its actions stay whole', narrow.page <= 620 && narrow.lines === 1 && narrow.barOver <= 0 && !narrow.cut.length && narrow.said === 'Text on screen|Most clipped first' && narrow.modes && narrow.search && narrow.wordsIn && narrow.bins && narrow.label && narrow.more && narrow.source && narrow.verdict && narrow.head <= 620, narrow);
     check('at 620 px the table scrolls inside itself', narrow.table >= narrow.grid, narrow);
     await b.shot('19-620-light');
     await b.size(900, 620);
@@ -1270,7 +1297,7 @@ async function main() {
     await b.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: box.x + 300, y: box.y - 300, button: 'left', clickCount: 1 });
     check('a pressed button scales to 0.97', /matrix\(0\.97/.test(pressed), pressed);
     const radius = await b.evalIn(`getComputedStyle(document.getElementById('do-bins')).borderRadius`);
-    check('buttons have a radius of 7', radius === '7px', radius);
+    check('the status\'s buttons have a radius of 6', radius === '6px', radius);
 
     // -------- colour discipline, on the finished panel and on the sheets
     const cobalts = await b.evalIn(`(function(){var c=[getComputedStyle(document.documentElement).getPropertyValue('--cobalt')],hits=[];document.querySelectorAll('body *').forEach(function(e){if(e.closest('[hidden]')){return;}var s=getComputedStyle(e);if(s.backgroundColor==='rgb(47, 111, 230)'||s.color==='rgb(47, 111, 230)'){hits.push(e.id||e.className);}});return hits;})()`);
@@ -1283,7 +1310,7 @@ async function main() {
 
     // stage three, live: rows usable, writes usable, the foot calm
     b.engineEnv.FAKE_DELAY_MS = '3';
-    await b.click('#source button[data-src="project"]');
+    await pickSource(b, 'project');
     await pressScan(b);
     // before any clip is looked at closely, what needs that waits with an ellipsis, and what doesn't keeps its count
     await b.waitFor(`SelectApp.state.scan.handle&&SelectApp.state.store.tier0>20&&SelectApp.state.store.tier2===0`, 'scan before stage three', 30000);
@@ -1300,14 +1327,14 @@ async function main() {
     await b.click('#show');
     const midShow = await b.evalIn(`({items:${pickerItems},running:!!SelectApp.state.scan.handle})`);
     await press(b, 'Escape');
-    const legible = await b.evalIn(`(function(){var el=document.getElementById('foot-sentence');return {anims:el.getAnimations().length,opacity:getComputedStyle(el).opacity,w:el.getBoundingClientRect().width};})()`);
-    check('the stage-three count changes in place, legible, with no fade restarting', legible.anims === 0 && legible.opacity === '1' && legible.w > 100, legible);
-    check('stage three: the foot says it is finding people, words, sound and colour, and the writes work', /^Finding people, words, sound and colour: \d+ of 392$/.test(stage.sentence) && stage.mark === 'running' && stage.actions.join() === 'stop,do-label,do-columns,do-bins*', stage);
+    const legible = await b.evalIn(`(function(){var el=document.getElementById('foot-verdict');return {anims:el.getAnimations().length,opacity:getComputedStyle(el).opacity,w:el.getBoundingClientRect().width,text:el.textContent};})()`);
+    check('the stage-three count changes in place, legible, with no fade restarting', legible.anims === 0 && legible.opacity === '1' && legible.w > 100 && /^Looking closer \d+ of 392$/.test(legible.text), legible);
+    check('stage three: the status says it is looking closer, with a count of its own, and the writes work', /^Looking closer \d+ of 392$/.test(stage.verdict) && stage.sentence === '' && stage.mark === 'running' && stage.actions.join() === 'stop,do-label,do-columns,do-bins*', stage);
     check('the Show menu counts what has landed so far, marks a count still climbing, and similar shots wait for the end', midShow.running && midShow.items.length === 11 && /^\d+…$/.test(hintOf(midShow.items, 'people')) && /^\d+$/.test(hintOf(midShow.items, 'silent')) && hintOf(midShow.items, 'similar') === '…', midShow.items.map(x => x[0] + ' ' + x[2]));
     await pickSort(b, 'colorName');
     await sleep(120);
     const holding = await b.evalIn(`({bins:document.getElementById('do-bins').disabled,label:document.getElementById('do-label').disabled,columns:document.getElementById('do-columns').disabled,shown:!document.getElementById('do-bins').hidden,why:document.getElementById('status-unread').textContent,title:document.getElementById('do-bins').title,running:!!SelectApp.state.scan.handle})`);
-    check('in stage three, a Colour write waits: visible, off, with a plain reason', holding.running && holding.shown && holding.bins && holding.label && holding.columns && /^Colour needs every clip looked at/.test(holding.why) && holding.why.startsWith(holding.title), holding);
+    check('in stage three, a Colour write waits: visible, off, with a plain reason on the button', holding.running && holding.shown && holding.bins && holding.label && holding.columns && /^Colour needs every clip looked at/.test(holding.title) && holding.why === '', holding);
     await b.shot('35-stage-three-waiting');
     // Forced: the button turned on and pressed in one task. The foot redraws every 66 ms while lines arrive and turns it
     // off again, so turning it on in one call and clicking in later ones raced that redraw: a click on a button that was
@@ -1358,21 +1385,22 @@ async function main() {
     await b.click('#dialog-ok');
     await b.waitFor(`__mock.calls.some(function(c){return c.fn==='columns';})`);
     const earlyCols = (await calls('columns'))[0].args;
-    check('Add Columns in stage three writes the 6 Tier 1 fields and says the rest come later', earlyCols.fields.length === 6 && !earlyCols.fields.some(f => f.name === 'SelectColour') && /Adds 6 columns/.test(earlySheet) && /The other 7/.test(earlySheet), earlyCols.fields.map(f => f.name));
+    check('Add Columns in stage three writes the 6 Tier 1 fields and says the rest come later', earlyCols.fields.length === 6 && !earlyCols.fields.some(f => f.name === 'SelectColour') && (/^Rank, .*$/m.exec(earlySheet) || [''])[0].split(', ').length === 6 && /7 more, such as People and Colour, once looking closer is done\./.test(earlySheet), { fields: earlyCols.fields.map(f => f.name), earlySheet });
     await b.waitFor(`SelectApp.state.outcome&&!SelectApp.state.busy`, 'columns landed in stage three');
-    const midWrite = await b.evalIn(`({running:!!SelectApp.state.scan.handle,foot:${foot},meter:!document.getElementById('foot-meter').hidden})`);
-    check('a write made during stage three keeps the scan\'s Stop and its meter in the foot', midWrite.running && midWrite.foot.actions[0] === 'stop' && midWrite.meter && /^(Added|Wrote)/.test(midWrite.foot.verdict), midWrite);
+    const midWrite = await b.evalIn(`({running:!!SelectApp.state.scan.handle,foot:${foot}})`);
+    check('a write made during stage three keeps the scan\'s Stop in the status', midWrite.running && midWrite.foot.actions[0] === 'stop' && /^(Added|Wrote)/.test(midWrite.foot.verdict), midWrite);
     b.engineEnv.FAKE_DELAY_MS = '3';
     await b.waitFor(`SelectApp.state.scan.state==='Done'`, 'done', 30000);
     await b.evalIn(`SelectApp.state.outcome=null;SelectApp.applyView()`);
     await resetView(b);
 
-    // search, real keystrokes
-    await b.click('#search');
+    // search, real keystrokes: the glass opens into a field on a click
+    const shut = await b.evalIn(`!document.getElementById('search-box').classList.contains('open')`);
+    await b.click('#search-box');
     await b.send('Input.insertText', { text: 'bread' });
     await b.waitFor(`SelectApp.state.query==='bread'`);
-    const found = await b.evalIn(`({shown:SelectApp.state.order.length,count:document.getElementById('search-count').textContent,why:document.querySelector('#body .r .why').textContent,foot:document.getElementById('foot-sentence').textContent})`);
-    check('search narrows, says how many, and shows why a clip is there', found.shown > 0 && found.shown < 400 && found.count === `${found.shown} of 400` && found.why === 'bread' && new RegExp(`^${found.shown} of 400 clips match`).test(found.foot), found);
+    const found = await b.evalIn(`({shown:SelectApp.state.order.length,count:document.getElementById('search-count').textContent,why:document.querySelector('#body .r .why').textContent,open:document.getElementById('search-box').classList.contains('open'),focus:document.activeElement.id})`);
+    check('search opens on a click, narrows, says how many, and shows why a clip is there', shut && found.open && found.focus === 'search' && found.shown > 0 && found.shown < 400 && found.count === `${found.shown} of 400` && found.why === 'bread', { shut, found });
     await b.send('Input.insertText', { text: ' sony' });
     await b.waitFor(`SelectApp.state.query==='bread sony'`);
     check('a second word narrows further', (await b.evalIn(`SelectApp.state.order.length`)) < found.shown, await b.evalIn(`document.getElementById('search-count').textContent`));
@@ -1382,6 +1410,15 @@ async function main() {
     await b.shot('30-search-empty');
     await b.click('#empty-clear');
     check('Clear search puts every clip back', (await b.evalIn(`SelectApp.state.order.length`)) === 400 && (await b.evalIn(`document.getElementById('search').value`)) === '');
+    const closed = await b.waitFor(`!document.getElementById('search-box').classList.contains('open')&&!document.getElementById('toolbar').classList.contains('searching')`, 'search closes', 2000).then(() => true, () => false);
+    check('an empty search left behind closes back to the glass', closed);
+    await b.click('#search-box');
+    const opened = await b.evalIn(`document.getElementById('toolbar').classList.contains('searching')`);
+    await b.click('#sort');
+    const firstClick = await b.evalIn(`({picker:!document.getElementById('picker').hidden,expanded:document.getElementById('sort').getAttribute('aria-expanded'),first:(document.querySelector('#picker button')||{dataset:{}}).dataset.id})`);
+    firstClick.searching = !(await b.waitFor(`!document.getElementById('toolbar').classList.contains('searching')`, 'search closes', 1000).then(() => true, () => false));
+    await press(b, 'Escape');
+    check('with the search open and empty, the first click on Sort still opens its menu, and the search closes', opened && firstClick.picker && firstClick.expanded === 'true' && firstClick.first === 'listed' && !firstClick.searching, { opened, firstClick });
 
     // the grid
     await pickSort(b, 'sharpness');
@@ -1397,8 +1434,9 @@ async function main() {
     await b.click(tile(1));
     await b.click(tile(3), { shift: true });
     await b.click(tile(7), { meta: true });
-    const sel = await b.evalIn(`({n:SelectApp.state.selected.size,cls:document.querySelectorAll('#tiles .t.sel').length,ring:getComputedStyle(document.querySelector('#tiles .t.sel .pic')).boxShadow,foot:document.getElementById('foot-sentence').textContent})`);
-    check('click, shift-click and cmd-click select tiles, with a grey ring, never cobalt', sel.n === 4 && sel.cls === 4 && !/47, 111, 230/.test(sel.ring) && /^4 of 400 clips selected/.test(sel.foot), sel);
+    await sleep(200);    // the plate fades in
+    const sel = await b.evalIn(`(function(){var t=document.querySelector('#tiles .t.sel'),p=getComputedStyle(t,'::before');return {n:SelectApp.state.selected.size,cls:document.querySelectorAll('#tiles .t.sel').length,plate:p.backgroundColor,radius:p.borderRadius,ring:getComputedStyle(t.querySelector('.pic')).boxShadow,foot:document.getElementById('foot-verdict').textContent};})()`);
+    check('click, shift-click and cmd-click select tiles, on a soft plate, no ring, never cobalt', sel.n === 4 && sel.cls === 4 && sel.plate === 'rgba(255, 255, 255, 0.11)' && sel.radius === '10px' && !/47, 111, 230/.test(sel.ring + sel.plate) && !/ 1\.5px| 3px/.test(sel.ring) && sel.foot === '4 of 400 clips selected', sel);
     await b.click('#mode-list');
     check('a selection made in the grid is the selection in the list', (await b.evalIn(`document.querySelectorAll('#body .r.sel').length`)) === 4);
     await b.click('#mode-grid');
@@ -1487,12 +1525,12 @@ async function main() {
     await pressScan(b);
     await b.waitFor(`SelectApp.state.scan.handle&&SelectApp.state.store.tier1>50`, 'scan under way', 30000);
     const waiting = await b.evalIn(`({text:document.getElementById('empty-words').textContent,hidden:document.getElementById('empty').hidden})`);
-    check('Similar shots waits in plain words until the line arrives', !waiting.hidden && waiting.text === 'Similar shots come last, once every clip has been looked at.', waiting);
+    check('Similar shots waits in plain words until the line arrives', !waiting.hidden && waiting.text === 'Similar shots come once every clip is looked at.', waiting);
     await b.waitFor(`SelectApp.state.scan.state==='Done'&&SelectApp.state.order.length>0`, 'groups', 30000);
     await sleep(120);
     const grouped = await b.evalIn(`({heads:Array.from(document.querySelectorAll('#tiles .gh')).filter(function(h){return !h.hidden;}).map(function(h){return h.textContent;}),count:SelectApp.state.groupCount,top:document.querySelector('#tiles .gh').style.top,foot:document.getElementById('foot-sentence').textContent})`);
     const shelves = await b.evalIn(`(function(){var h=SelectApp.state.L.heads;return {same:h[0].y===h[1].y,x:h[1].x>0};})()`);
-    check('groups land last and show as groups in the grid, packed along shelves', grouped.count > 5 && grouped.heads[0] === 'Group 1 · 3 clips' && /groups, /.test(grouped.foot) && shelves.same && shelves.x, grouped);
+    check('groups land last and show as groups in the grid, packed along shelves', grouped.count > 5 && grouped.heads[0] === 'Group 1 · 3 clips' && /^\d+ groups\b/.test(grouped.foot) && shelves.same && shelves.x, grouped);
     await b.shot('32-grid-groups');
     await b.click('#mode-list');
     await sleep(100);
@@ -1508,7 +1546,7 @@ async function main() {
     b.engineEnv.FAKE_TIER2 = 'fail';
     await scanAndWait(b);
     const t2Fail = await b.evalIn(`({failed:SelectApp.state.store.tier2Failed,errors:SelectApp.state.store.errors,foot:document.getElementById('status-unread').textContent,kept:SelectApp.state.store.rows.filter(function(r){return r.notUnderstood&&r.tier===1&&typeof r.luma==='number';}).length})`);
-    check('a Tier 2 failure leaves the clip whole, and says so once', t2Fail.failed > 5 && t2Fail.errors === 8 && t2Fail.kept > 0 && /could not be looked at more closely/.test(t2Fail.foot), t2Fail);
+    check('a Tier 2 failure leaves the clip whole, and says so once', t2Fail.failed > 5 && t2Fail.errors === 8 && t2Fail.kept > 0 && /couldn't be looked at closely\./.test(t2Fail.foot) && (t2Fail.foot.match(/looked at closely/g) || []).length === 1, t2Fail);
     const slowRow = await b.evalIn(`(function(){var o=SelectApp.state.order,rows=SelectApp.state.store.rows;for(var i=0;i<o.length;i++){if(rows[o[i]].lookReason&&!rows[o[i]].reason){document.getElementById('grid').scrollTop=i*40;return rows[o[i]].name;}}return null;})()`);
     await sleep(140);
     const slowWhy = await b.evalIn(`(function(){var r=Array.from(document.querySelectorAll('#body .r')).filter(function(x){return x.querySelector('.n').textContent===${JSON.stringify(slowRow)};})[0];return r?{why:r.querySelector('.why').textContent,color:getComputedStyle(r.querySelector('.why')).color}:null;})()`);
@@ -1522,7 +1560,7 @@ async function main() {
     await scanAndWait(b);
     await pickShow(b, 'mediums');
     const noData = await b.evalIn(`({text:document.getElementById('empty-words').textContent,foot:document.getElementById('foot-sentence').textContent})`);
-    check('a show on data no clip has says so plainly, not an empty table', /No clip has shot size data/.test(noData.text) && /No clip has shot size data/.test(noData.foot), noData);
+    check('a show on data no clip has says so plainly, not an empty table', noData.text === 'No shot size data in this scan.' && /^No shot size data in this scan\./.test(noData.foot), noData);
     await b.click('#show');
     const noShow = await b.evalIn(pickerItems);
     await b.click('#sort');
@@ -1538,7 +1576,7 @@ async function main() {
     await scanAndWait(b);
     await sleep(300);
     const search1000 = [];
-    await b.click('#search');
+    await b.click('#search-box');
     for (const ch of 'bread water') {
       await b.send('Input.insertText', { text: ch });
       await b.waitFor(`SelectApp.state.query.slice(-1)===${JSON.stringify(ch)}`);
@@ -1575,13 +1613,13 @@ async function main() {
     // the grid at the smallest panel, and in Premiere's light theme
     await b.size(620, 420);
     await sleep(160);
-    const narrowGrid = await b.evalIn(`(function(){var r=document.querySelector('#tiles .t').getBoundingClientRect(),g=document.getElementById('grid'),cols=SelectApp.state.L.cols,last=document.querySelector('#tiles .t[data-at="'+(cols-1)+'"]').getBoundingClientRect();return {cols:cols,w:Math.round(r.width),over:g.scrollWidth-g.clientWidth,right:last.right,page:document.documentElement.scrollWidth,barLines:new Set(['#show','#sort','#flip','#families','#modes'].map(function(sel){var b=document.querySelector(sel).getBoundingClientRect();return Math.round(b.top+b.height/2);})).size,barOver:document.getElementById('bar').scrollWidth-document.getElementById('bar').clientWidth};})()`);
-    check('the grid fits 620 px with no sideways scroll, and the bar stays one line', narrowGrid.cols >= 3 && narrowGrid.over === 0 && narrowGrid.right <= 620 && narrowGrid.page <= 620 && narrowGrid.barLines === 1 && narrowGrid.barOver <= 0, narrowGrid);
+    const narrowGrid = await b.evalIn(`(function(){var r=document.querySelector('#tiles .t').getBoundingClientRect(),g=document.getElementById('grid'),cols=SelectApp.state.L.cols,last=document.querySelector('#tiles .t[data-at="'+(cols-1)+'"]').getBoundingClientRect();return {cols:cols,w:Math.round(r.width),over:g.scrollWidth-g.clientWidth,right:last.right,page:document.documentElement.scrollWidth,barLines:new Set(['#source','#show','#sort','#flip','#families','#search-box','#modes','#more'].map(function(sel){var b=document.querySelector(sel).getBoundingClientRect();return Math.round(b.top+b.height/2);})).size,barOver:document.getElementById('toolbar').scrollWidth-document.getElementById('toolbar').clientWidth};})()`);
+    check('the grid fits 620 px with no sideways scroll, and the toolbar stays one line', narrowGrid.cols >= 3 && narrowGrid.over === 0 && narrowGrid.right <= 620 && narrowGrid.page <= 620 && narrowGrid.barLines === 1 && narrowGrid.barOver <= 0, narrowGrid);
     await b.evalIn(`__mock.skin={red:230,green:230,blue:230};__mock.listeners['com.adobe.csxs.events.ThemeColorChanged'].forEach(function(f){f();})`);
     await sleep(100);
     await b.shot('34-grid-620-light');
     const lightGrid = await b.evalIn(`({caption:getComputedStyle(document.querySelector('#tiles .t .n')).color,bg:getComputedStyle(document.getElementById('grid')).backgroundColor})`);
-    check('the grid follows the light theme of Premiere', lightGrid.caption === 'rgb(29, 29, 31)' && lightGrid.bg === 'rgb(255, 255, 255)', lightGrid);
+    check('the grid follows the light theme of Premiere', lightGrid.caption === 'rgb(29, 29, 31)' && lightGrid.bg === 'rgb(230, 230, 230)', lightGrid);
     await b.size(900, 620);
     await b.evalIn(`__mock.skin={red:35,green:35,blue:35};__mock.listeners['com.adobe.csxs.events.ThemeColorChanged'].forEach(function(f){f();});SelectApp.setMode('list')`);
     await setItems(b, 400);
@@ -1626,4 +1664,4 @@ async function main() {
 
 if (require.main === module) { main(); }
 
-module.exports = { pickShow, pickSort, launch, setItems, clips, scanAndWait, pressScan, setDeadline, stopEverything, fixture, sleep, foot, OUT };
+module.exports = { pickSource, pickShow, pickSort, launch, setItems, clips, scanAndWait, pressScan, setDeadline, stopEverything, fixture, sleep, foot, OUT };

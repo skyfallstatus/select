@@ -16,8 +16,8 @@ Get **Select.pkg** from the [latest release](https://github.com/skyfallstatus/se
    5. On macOS 13 or 14 you can skip the first three: Control-click the package and choose **Open**.
 2. Quit Premiere if it's open, then open it again. Select is under **Window › Extensions**.
    - Had Select 0.1? Install this package once, the same way. 0.1 can't update itself. It installed for all users, and it can stay: Premiere loads the newer copy.
-   - From now on Select updates itself. When a new version is ready, a line at the bottom of the panel says so, and **Restart** switches to it. If it needs Premiere restarted instead, the line says that. **Check for Updates** in the `···` menu checks now, and **Check Automatically** turns the daily check off.
-3. Open a project you know well. Choose **Selection**, **Project** or **Folder**, and press **Scan**.
+   - From now on Select updates itself. When a new version is ready, a line at the top of the panel says so, and **Restart** switches to it. If it needs Premiere restarted instead, the line says that. **Check for Updates** in the `···` menu checks now, and **Check Automatically** turns the daily check off.
+3. Open a project you know well. Choose **Selection**, **Project** or **Folder** from the **From** menu, and press **Scan**.
 4. Try **Show** and **Sort** together. Interviews, longest first. People, softest first. Silent clips. Do the clips at the top deserve to be there? Did a clip you know is bad stay down in the list?
 5. Try search and the grid. Look for something you know you shot. Sort by colour. Look at Similar shots on a day with lots of takes.
 6. Try it on a big shoot, a messy one, and a mix of cameras.
@@ -34,7 +34,7 @@ It says Premiere 23 or later and macOS 13 or later, but older versions are untes
 
 They write to the project, never to your files. Cmd+Z can't reverse a batch, so use **Undo Write** in the panel. It takes back the last 10 writes to a project, newest first, and they're still there after the panel or Premiere restarts. An item you've changed since a write is left alone. Select keeps these records in `~/Library/Application Support/com.skyfallstatus.select/undo`, on your Mac only.
 
-A big write goes 100 clips at a time, with a bar in the foot. **Stop** ends it after the batch in progress, and Undo Write takes back what was written. If a clip changed in the project while you were confirming, for example after File › Revert, Select leaves it alone and says so.
+A big write goes 100 clips at a time, with a count at the top of the panel. **Stop** ends it after the batch in progress, and Undo Write takes back what was written. If a clip changed in the project while you were confirming, for example after File › Revert, Select leaves it alone and says so.
 
 Sorting and scanning are safe. They change nothing in the project, and nothing on your drives. Select reads your clips and keeps its results in its own folder on your Mac.
 

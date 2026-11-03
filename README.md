@@ -3,17 +3,10 @@
 A Premiere Pro panel that sorts hundreds of clips in seconds, so you know where to look first.
 
 <p align="center">
-  <img src="docs/media/demo.png" width="760" alt="An animated illustration of the Select panel with invented clips. The grid of clips sorts itself by colour into rainbow order, a search narrows it down, and a write to the project ends with the bottom of the panel turning green.">
+  <img src="docs/media/panel-grid-dark.png" width="760" alt="The Select panel in grid view with 24 invented clips, simple drawn scenes rather than real footage, sorted by colour: reds and oranges first, then yellows, greens, blues and purples, with grey clips last. Each clip shows a small strip of its main colours.">
 </p>
 
 Press **Scan** and Select looks at every clip: the picture, the sound and the camera's details. Then pick what to **Show** (interviews, people, speech, similar shots…) and how to **Sort** (sharpness, brightness, colour, length…). Search finds what's in your clips. Everything stays on your Mac.
-
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/media/panel-grid-dark.png">
-    <img src="docs/media/panel-grid.png" width="760" alt="The Select panel in grid view with 24 invented clips, simple drawn scenes rather than real footage, sorted by colour: reds and oranges first, then yellows, greens, blues and purples, with grey clips last. Each clip shows a small strip of its main colours.">
-  </picture>
-</p>
 
 Select is in beta, so try it on a copy of your project first.
 
@@ -42,13 +35,13 @@ On macOS 13 or 14, you can instead Control-click the package and choose **Open**
 
 ### Updates
 
-Select updates itself. When a new version is ready, a line at the bottom of the panel says so. **Restart** switches to it, or Premiere uses it the next time it opens. **Check for Updates** in the **···** menu checks now.
+Select updates itself. When a new version is ready, a line at the top of the panel says so. **Restart** switches to it, or Premiere uses it the next time it opens. **Check for Updates** in the **···** menu checks now.
 
 Coming from Select 0.1? Install the package once, as above. 0.1 can't update itself.
 
 ## Use
 
-1. Choose **Selection**, **Project** or **Folder** at the top, and press **Scan**.
+1. Choose **Selection**, **Project** or **Folder** from the **From** menu, and press **Scan**.
 2. Pick from **Show** and **Sort**, tap a colour dot, or search.
 3. Happy with the view? **Label**, **Add Columns** or **Sort into Bins** puts it in your project. **Undo Write** in the **···** menu takes it back. Select keeps the last 10 writes for each project, and they stay when the panel reloads.
 
