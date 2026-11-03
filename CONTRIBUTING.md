@@ -29,6 +29,28 @@ A new format needs at least one real file from that camera before the README say
 
 Please don't move something up without the evidence for it.
 
+## Building
+
+You need the Command Line Tools with Swift, so you don't need Xcode. It's been built with Swift 6.3. There are no dependencies. ffmpeg and Node are only used by the tests, and they're skipped with a clear message if they're missing.
+
+```sh
+scripts/build-engine.sh     # the engine, for Apple silicon and Intel
+scripts/build-panel.sh      # the panel with the engine inside, in dist/
+scripts/test.sh             # the tests. No footage or Premiere needed
+scripts/dev-install.sh      # copies it to your own extensions folder
+```
+
+`dev-install.sh` installs an unsigned copy, which needs Adobe's debug mode. It tells you how. Testers don't need any of this.
+
+```
+engine/Sources    the native engine: file reader, decoding, scores, cache
+engine/tests      the contract test and the fuzz test
+panel/            the panel: CSXS manifest, client, host script, tests
+scripts/          build, sign, package, release, privacy scan
+docs/             the engine's interface, formats, packaging, releasing
+product.conf      the name, ids and version, in one place
+```
+
 ## How to test
 
 ```sh
