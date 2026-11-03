@@ -277,16 +277,35 @@ function clips(n) {
   return list;
 }
 
-// A preset is a word in the sort row, or a word in one of its group menus. Real clicks either way.
-async function pressPreset(b, id) {
-  const group = await b.evalIn(`(SelectCore.GROUPS.filter(function(g){return g.presets.indexOf(${JSON.stringify(id)})>=0;})[0]||{}).id||''`);
-  if (group) {
-    await b.click(`#presets [data-group="${group}"]`);
-    await b.click(`#sort-menu [data-id="${id}"]`);
-  } else {
-    await b.click(`#presets [data-id="${id}"]`);
-  }
+// Show and Sort are two menus under their words. Real clicks: open the menu, then press the item.
+async function pickShow(b, id) {
+  await b.click('#show');
+  await b.click(`#picker button[data-id="${id || 'everything'}"]`);
 }
+async function pickSort(b, key) {
+  await b.click('#sort');
+  await b.click(`#picker button[data-id="${key || 'listed'}"]`);
+}
+
+// Back to every clip, as listed, no colour: the view a fresh scan starts with. Real clicks, only on what is on.
+async function resetView(b) {
+  const v = await b.evalIn(`SelectApp.state.view`);
+  if (v.show) { await pickShow(b, null); }
+  if (v.sort.length) { await pickSort(b, null); }
+  if (v.family) { await b.click(`#families [data-family="${v.family}"]`); }
+}
+
+const KEYS = { Escape: 27, ArrowDown: 40, ArrowUp: 38, Enter: 13 };
+async function press(b, key) {
+  const k = { key, code: key, windowsVirtualKeyCode: KEYS[key] };
+  await b.send('Input.dispatchKeyEvent', { type: 'keyDown', ...k, ...(key === 'Enter' ? { text: '\r' } : {}) });
+  await b.send('Input.dispatchKeyEvent', { type: 'keyUp', ...k });
+}
+
+// The open picker as [id, label, hint, on].
+const pickerItems = `Array.from(document.querySelectorAll('#picker button')).map(function(x){var h=x.querySelector('span');return [x.dataset.id,x.firstChild.textContent,h.textContent,x.classList.contains('on')&&x.getAttribute('aria-checked')==='true'];})`;
+// The two words of the bar.
+const barNow = `({show:document.querySelector('#show .v').textContent,showOn:document.getElementById('show').classList.contains('on'),sort:document.querySelector('#sort .v').textContent,sortOn:document.getElementById('sort').classList.contains('on'),flip:!document.getElementById('flip').hidden,picker:!document.getElementById('picker').hidden})`;
 
 async function setItems(b, n) { await b.evalIn(`__mock.items=${JSON.stringify(clips(n))}`); }
 
@@ -334,12 +353,16 @@ async function replay(file) {
   await sleep(600);
   await b.shot('20-real-done');
   const report = {};
-  for (const p of ['softest', 'sharpest', 'darkest', 'overexposed', 'motion', 'static', 'silent', 'interviews', 'duplicates', 'shoot']) {
-    await pressPreset(b, p);
+  const views = [['sort', 'sharpness'], ['flip', 'sharpness'], ['sort', 'luma'], ['flip', 'luma'], ['sort', 'clipHighPct'], ['sort', 'motionProxy'], ['flip', 'motionProxy'], ['sort', 'shake'],
+    ['sort', 'createdAt'], ['sort', 'colorName'], ['show', 'silent'], ['show', 'interviews'], ['show', 'people'], ['show', 'speech'], ['show', 'onscreen'], ['show', 'similar']];
+  for (const [kind, id] of views) {
+    if (kind === 'show') { await pickShow(b, id); } else { await pickSort(b, id); }
+    if (kind === 'flip') { await b.click('#flip'); }
     await sleep(250);
-    report[p] = await b.evalIn(`({says:document.getElementById('foot-sentence').textContent,top:${ids}.slice(0,3).map(function(r){return r.name;})})`);
-    await b.shot('21-real-' + p);
-    await pressPreset(b, p);
+    const name = kind + '-' + id;
+    report[name] = await b.evalIn(`({verdict:document.getElementById('foot-verdict').textContent,says:document.getElementById('foot-sentence').textContent,top:${ids}.slice(0,3).map(function(r){return r.name;})})`);
+    await b.shot('21-real-' + name);
+    await resetView(b);
   }
   console.log(JSON.stringify(report, null, 1));
   const empties = await b.evalIn(`(function(){var o={},rows=SelectApp.state.store.rows;SelectCore.COLUMNS.forEach(function(c){if(c.sortable===false){return;}o[c.key]=rows.filter(function(r){return SelectCore.cellText(r,c)==='';}).length;});return o;})()`);
@@ -364,8 +387,12 @@ async function main() {
   try {
     await b.open();
     check('page loads with no script errors', b.problems.length === 0, b.problems);
-    const row = await b.evalIn(`({tips:SelectCore.PRESETS.filter(function(p){return p.tip.length>40;}).length,all:SelectCore.PRESETS.length,words:document.querySelectorAll('#presets .word').length,dots:document.querySelectorAll('#families button').length,tips2:Array.from(document.querySelectorAll('#presets .word')).filter(function(x){return x.title.length>4;}).length})`);
-    check('the sort row is seven words and nine dots, and every preset has a tooltip', row.all === 23 && row.tips === 23 && row.words === 7 && row.dots === 9 && row.tips2 === 7, row);
+    const row = await b.evalIn(`({kids:Array.from(document.getElementById('bar').children).filter(function(x){return !x.hidden;}).map(function(x){return x.id;}).join(),
+      shows:SelectCore.SHOWS.length,showTips:SelectCore.SHOWS.filter(function(s){return s.tip.length>40;}).length,sorts:SelectCore.SORTS.length,sortTips:SelectCore.SORTS.filter(function(s){return (SelectCore.COLUMN[s.key].tip||'').length>4;}).length,
+      dots:document.querySelectorAll('#families button').length,dotTips:Array.from(document.querySelectorAll('#families button')).filter(function(x){return x.title.length>4;}).length,
+      words:[document.querySelector('#show .k').textContent,document.querySelector('#show .v').textContent,document.querySelector('#sort .k').textContent,document.querySelector('#sort .v').textContent].join('|'),
+      titles:document.getElementById('show').title.length>4&&document.getElementById('sort').title.length>4,old:!!document.querySelector('#presets,#clear-view,#sort-menu,[data-group]')})`);
+    check('the bar is Show, Sort and nine dots, and every show, sort and dot has a tooltip', row.kids === 'show,sort,families,modes' && row.words === 'Show|Everything|Sort|As listed' && row.shows === 10 && row.showTips === 10 && row.sorts === 10 && row.sortTips === 10 && row.dots === 9 && row.dotTips === 9 && row.titles && !row.old, row);
     await b.waitFor(`document.getElementById('project-name').textContent==='lantern-spring'`, 'project name');
     check('project name shows from status, without the extension', true);
 
@@ -395,7 +422,7 @@ async function main() {
     await b.shot('01-scanning');
     await b.waitFor(`SelectApp.state.scan && SelectApp.state.scan.state==='Done'`, 'done', 30000);
     const done = await b.evalIn(`({foot:${foot},t0:SelectApp.state.store.tier0,t1:SelectApp.state.store.tier1,errors:SelectApp.state.store.errors})`);
-    check('scan ends Done, both tiers landed', /^400 clips read$/.test(done.foot.verdict) && /^Took \d+\.\d s\. Pick a sort above\. \d+ clips are listed with blank picture scores: this Mac has no decoder for them, and ffmpeg isn't installed\./.test(done.foot.sentence) && done.t0 === 400 - unreadable && done.t1 === 400 - unreadable && done.errors === unreadable, done);
+    check('scan ends Done, both tiers landed', /^400 clips read$/.test(done.foot.verdict) && /^Took \d+\.\d s\. Choose what to show, or how to sort, above\. \d+ clips are listed with blank picture scores: this Mac has no decoder for them, and ffmpeg isn't installed\./.test(done.foot.sentence) && done.t0 === 400 - unreadable && done.t1 === 400 - unreadable && done.errors === unreadable, done);
     check('engine binary path is inside the extension, with scan arguments', /\/bin\/select-engine$/.test(b.engineLog.lastBin) && b.engineLog.lastArgs.join(' ') === 'scan --paths-file -', b.engineLog.lastBin);
     await b.waitFor(`document.querySelectorAll('#body img[src]').length>0`, 'thumbs');
     await sleep(200);
@@ -436,40 +463,142 @@ async function main() {
     check('nulls sort to the end of the table and stay empty', tail.every(v => v === ''), tail);
     await b.evalIn(`document.getElementById('grid').scrollTop=0`);
 
-    // -------- presets
-    await b.click('#clear-view');
+    // -------- Show and Sort
+    await resetView(b);
     const orderOf = key => b.evalIn(`${ids}.map(function(r){return r[${JSON.stringify(key)}];})`);
     const sorted = (v, dir) => { const a = v.filter(x => x !== null && x !== undefined); return a.every((x, i) => !i || (dir > 0 ? a[i - 1] <= x : a[i - 1] >= x)); };
-    const presets = [['softest', 'sharpness', 1], ['sharpest', 'sharpness', -1], ['darkest', 'luma', 1], ['overexposed', 'clipHighPct', -1], ['motion', 'motionProxy', -1], ['static', 'motionProxy', 1]];
-    for (const [id, key, dir] of presets) {
-      await pressPreset(b, id);
-      const v = await orderOf(key);
-      const on = await b.evalIn(`SelectApp.state.view.preset`);
-      const f = await footNow();
-      check(`preset ${id} sorts and says so`, sorted(v, dir) && on === id && f.verdict === (await b.evalIn(`SelectCore.PRESET[${JSON.stringify(id)}].label`)) && / at the top\./.test(f.sentence) && (await b.evalIn(`!!document.querySelector('#presets .on')`)), f.sentence);
-      await pressPreset(b, id);
-      const off = await b.evalIn(`document.querySelector('#presets button.on')===null&&SelectApp.state.view.preset===null`);
-      check(`preset ${id} turns off with a second press`, off);
+    const field = key => (key === 'createdAt' ? 'time' : key);
+    const viewNow = () => b.evalIn(`SelectApp.state.view`);
+    const barState = () => b.evalIn(barNow);
+    const SORT = await b.evalIn(`SelectCore.SORT`);
+    const readsAs = w => (/^[A-Z] /.test(w) ? w : w.toLowerCase());
+    for (const key of ['sharpness', 'luma', 'clipHighPct', 'motionProxy', 'durationS', 'audioDb', 'createdAt']) {
+      const e = SORT[key];
+      await pickSort(b, key);
+      let v = await orderOf(field(key)), f = await footNow(), bar = await barState();
+      const view = await viewNow();
+      check(`Sort ${e.label} sorts ${e.ways[0].toLowerCase()} and says so`, sorted(v, e.dir) && JSON.stringify(view.sort) === JSON.stringify([{ key, dir: e.dir }]) && !view.show && f.verdict === e.ways[0] && bar.sort === e.ways[0] && bar.sortOn && bar.flip && !bar.picker && /^400 clips in \d+(\.\d)? s\./.test(f.sentence), { verdict: f.verdict, sentence: f.sentence, bar });
+      await pickSort(b, key);
+      v = await orderOf(field(key)); f = await footNow(); bar = await barState();
+      check(`picking ${e.label} again flips it: ${e.ways[1].toLowerCase()}`, sorted(v, -e.dir) && (await viewNow()).sort[0].dir === -e.dir && f.verdict === e.ways[1] && bar.sort === e.ways[1], { verdict: f.verdict, bar });
+      await pickSort(b, null);
     }
-    const presetStyle = await b.evalIn(`(function(){var x=document.querySelector('#presets [data-id="colour"]');x.click();var a=getComputedStyle(x),o=getComputedStyle(document.querySelector('#presets [data-id="shoot"]'));var r={on:[a.color,a.fontWeight,a.backgroundColor,a.borderStyle],off:[o.color,o.fontWeight,o.backgroundColor]};x.click();return r;})()`);
-    check('the active word is in ink and semibold, the others in ink2, no pills', presetStyle.on[0] === 'rgb(237, 237, 238)' && presetStyle.on[1] === '600' && presetStyle.on[2] === 'rgba(0, 0, 0, 0)' && presetStyle.off[0] === 'rgb(173, 173, 177)' && presetStyle.off[1] === '400', presetStyle);
-    await pressPreset(b, 'overexposed');
+    await pickSort(b, 'sharpness');
+    const flipTip = await b.evalIn(`document.getElementById('flip').title`);
+    await b.click('#flip');
+    let flipped = { v: await orderOf('sharpness'), view: await viewNow(), f: await footNow(), bar: await barState(), tip: await b.evalIn(`document.getElementById('flip').title`) };
+    check('the flip button reverses the sort, and its tooltip says which way it goes', sorted(flipped.v, 1) && flipped.view.sort[0].dir === 1 && flipped.f.verdict === 'Softest first' && flipped.bar.sort === 'Softest first' && flipTip === 'Reverse to Softest first' && flipped.tip === 'Reverse to Sharpest first', { flipTip, tip: flipped.tip, bar: flipped.bar });
+    await b.click('#flip');
+    check('and flips it back', sorted(await orderOf('sharpness'), -1) && (await footNow()).verdict === 'Sharpest first');
+
+    // the Sort menu: every sort, how each will read, the active one ticked and focused
+    await b.click('#sort');
+    const sortMenu = await b.evalIn(`({items:${pickerItems},focus:document.activeElement.dataset.id,weights:Array.from(document.querySelectorAll('#picker button')).map(function(x){return getComputedStyle(x).fontWeight;}),tips:Array.from(document.querySelectorAll('#picker button')).every(function(x){return x.title.length>4;})})`);
+    const wantSort = [['listed', 'As listed', '', false]].concat(Object.values(SORT).map(e => [e.key, e.label, readsAs(e.ways[0]), e.key === 'sharpness']));
+    check('the Sort menu lists As listed and every sort, each hint how it will read, the active one ticked and focused', JSON.stringify(sortMenu.items) === JSON.stringify(wantSort) && sortMenu.focus === 'sharpness' && sortMenu.weights.filter(w => w === '600').length === 1 && sortMenu.weights[1 + Object.keys(SORT).indexOf('sharpness')] === '600' && sortMenu.tips, sortMenu);
+    await press(b, 'Escape');
+    await b.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 450, y: 360 });
+    await sleep(60);
+    const pickStyle = await b.evalIn(`(function(){var on=getComputedStyle(document.querySelector('#sort .v')),off=getComputedStyle(document.querySelector('#show .v')),bs=getComputedStyle(document.getElementById('sort')),bo=getComputedStyle(document.getElementById('show'));return {on:[on.color,on.fontWeight],off:[off.color,off.fontWeight],bg:[bs.backgroundColor,bo.backgroundColor],border:[bs.borderTopStyle,bo.borderTopStyle]};})()`);
+    check('the active word is in ink and semibold, the others in ink2, no pills', pickStyle.on[0] === 'rgb(237, 237, 238)' && pickStyle.on[1] === '600' && pickStyle.off[0] === 'rgb(173, 173, 177)' && pickStyle.off[1] === '400' && pickStyle.bg.every(x => x === 'rgba(0, 0, 0, 0)') && pickStyle.border.every(x => x === 'none'), pickStyle);
+    await pickSort(b, null);
+    const asListed = { listed: await b.evalIn(`SelectApp.state.order.length===400&&SelectApp.state.order.every(function(at,i){return at===i;})`), view: await viewNow(), f: await footNow(), bar: await barState() };
+    check('As listed turns the sort off: the order clips came in, no flip button, the word plain', asListed.listed && !asListed.view.sort.length && !asListed.bar.sortOn && !asListed.bar.flip && asListed.bar.sort === 'As listed' && asListed.f.verdict === '400 clips read' && /Choose what to show, or how to sort, above\./.test(asListed.f.sentence), asListed);
+    await pickSort(b, 'clipHighPct');
     check('a switched-off column shows while the view sorts by it', await b.evalIn(`!!document.querySelector('#head .h[data-key="clipHighPct"]')`));
-    await pressPreset(b, 'overexposed');
-    for (const id of ['silent', 'interviews', 'duplicates', 'shoot']) {
-      await pressPreset(b, id);
-      const info = await b.evalIn(`({shown:SelectApp.state.order.length,sentence:document.getElementById('foot-sentence').textContent,group:SelectApp.state.hasGroups})`);
-      check(`preset ${id} shows what it does`, info.sentence.length > 5 && (id === 'shoot' ? info.shown === 400 : info.shown > 0 && info.shown < 400), info);
-      if (id === 'duplicates') {
-        await b.shot('03-near-duplicates');
-        check('near duplicates show as groups, each under its own heading', await b.evalIn(`/^Group 1 /.test(document.querySelector('#body .gh').textContent)&&!document.querySelector('#head .h[data-key="dupGroup"]')`));
+    await pickSort(b, 'createdAt');
+    await b.click('#more');
+    await b.click('[data-menu="undo-view"]');
+    check('a sort undoes with Undo View', JSON.stringify((await viewNow()).sort) === JSON.stringify([{ key: 'clipHighPct', dir: -1 }]) && (await barState()).sort === 'Most clipped first');
+    await pickSort(b, null);
+
+    // every Show: what it shows passes its test, as many as its count, named in the bar and the foot, and Undo View takes it back
+    const showIds = await b.evalIn(`SelectCore.SHOWS.map(function(s){return s.id;})`);
+    for (const id of showIds) {
+      await pickShow(b, id);
+      const info = await b.evalIn(`(function(){var S=SelectApp.state,C=SelectCore,s=C.SHOW[${JSON.stringify(id)}],rows=S.store.rows,ctx=s.prepare?s.prepare(rows):null;
+        return {shown:S.order.length,count:C.showCount(rows,s.id),pass:S.order.every(function(i){return s.group?rows[i].dupGroup>0:s.filter(rows[i],ctx);}),label:s.label,says:s.says,groups:S.hasGroups,view:S.view};})()`);
+      const f = await footNow(), bar = await barState();
+      check(`Show ${info.label} shows only what it says, as many as its count, and names itself`, info.shown > 0 && info.shown < 400 && info.shown === info.count && info.pass && info.view.show === id && !info.view.sort.length && f.verdict === info.label && f.sentence.includes(info.says) && bar.show === info.label && bar.showOn && !bar.sortOn && !bar.flip && info.groups === (id === 'similar'), { shown: info.shown, count: info.count, pass: info.pass, verdict: f.verdict, sentence: f.sentence, bar });
+      if (id === 'similar') {
+        await b.shot('03-similar');
+        const heads = await b.evalIn(`({first:(document.querySelector('#body .gh')||{}).textContent,dup:!!document.querySelector('#head .h[data-key="dupGroup"]'),groups:SelectApp.state.groupCount})`);
+        check('similar shots show as groups, each under its own heading', /^Group 1 · \d+ clips$/.test(heads.first) && !heads.dup && heads.groups > 1 && new RegExp('^' + heads.groups + ' groups, ').test(f.sentence), heads);
       }
       if (id === 'interviews') { await b.shot('04-interviews'); }
       await b.click('#more');
       await b.click('[data-menu="undo-view"]');
-      check(`preset ${id} undoes with Undo view`, await b.evalIn(`SelectApp.state.view.preset===null&&SelectApp.state.order.length===400`));
+      const back = await barState();
+      check(`Show ${info.label} undoes with Undo View`, (await b.evalIn(`SelectApp.state.view.show===null&&SelectApp.state.order.length===400`)) && back.show === 'Everything' && !back.showOn, back);
     }
     check('group headings leave after undo', await b.evalIn(`!SelectApp.state.L.heads.length&&Array.from(document.querySelectorAll('#body .gh')).length===0`));
+
+    // Show and Sort are two separate questions: either can come first, changing one keeps the other, and a colour stays through both
+    await pickShow(b, 'interviews');
+    await pickSort(b, 'sharpness');
+    const within = show => `(function(){var S=SelectApp.state,C=SelectCore,rows=S.store.rows,s=C.SHOW[${JSON.stringify(show)}],ctx=s.prepare?s.prepare(rows):null,r=S.order.map(function(i){return rows[i];});
+      return {view:S.view,shown:r.length,count:C.showCount(rows,s.id),pass:r.every(function(x){return s.filter(x,ctx);}),sharp:r.map(function(x){return x.sharpness;}),long:r.map(function(x){return x.durationS;}),luma:r.map(function(x){return x.luma;}),motion:r.map(function(x){return x.motionProxy;}),colours:r.map(function(x){return x.colorName;})};})()`;
+    let combo = await b.evalIn(within('interviews')), comboFoot = await footNow(), comboBar = await barState();
+    check('Show, then Sort: the sort orders what the show shows, and the bar and foot name both', combo.view.show === 'interviews' && combo.view.sort[0].key === 'sharpness' && combo.shown === combo.count && combo.shown > 1 && combo.pass && sorted(combo.sharp, -1) && comboFoot.verdict === 'Interviews, sharpest first' && comboFoot.sentence.includes('Speech and a face, 15 seconds or longer.') && comboBar.show === 'Interviews' && comboBar.sort === 'Sharpest first' && comboBar.showOn && comboBar.sortOn, { view: combo.view, verdict: comboFoot.verdict, sentence: comboFoot.sentence, bar: comboBar });
+    await resetView(b);
+    await pickSort(b, 'durationS');
+    await pickShow(b, 'people');
+    combo = await b.evalIn(within('people')); comboFoot = await footNow();
+    check('Sort, then Show: the show keeps the sort', combo.view.show === 'people' && JSON.stringify(combo.view.sort) === '[{"key":"durationS","dir":-1}]' && combo.shown === combo.count && combo.pass && sorted(combo.long, -1) && comboFoot.verdict === 'People, longest first', { view: combo.view, verdict: comboFoot.verdict });
+    await pickShow(b, 'speech');
+    const keptSort = await viewNow();
+    await pickSort(b, 'luma');
+    combo = await b.evalIn(within('speech')); comboFoot = await footNow();
+    check('a new show keeps the sort, and a new sort keeps the show', keptSort.show === 'speech' && keptSort.sort[0].key === 'durationS' && combo.view.show === 'speech' && combo.view.sort[0].key === 'luma' && combo.pass && sorted(combo.luma, -1) && comboFoot.verdict === 'Speech, brightest first', { keptSort, view: combo.view, verdict: comboFoot.verdict });
+    await b.click('#head .h[data-key="motionProxy"]');
+    combo = await b.evalIn(within('speech')); comboBar = await barState();
+    check('a header click sets the sort and keeps the show', combo.view.show === 'speech' && JSON.stringify(combo.view.sort) === '[{"key":"motionProxy","dir":-1}]' && combo.pass && sorted(combo.motion, -1) && comboBar.sort === 'Most motion first' && comboBar.show === 'Speech', { view: combo.view, bar: comboBar });
+    const fam = await b.evalIn(`(function(){var c=SelectCore.familyCounts(SelectApp.state.store.rows);return Object.keys(c).filter(function(k){return k!=='neutral';}).sort(function(x,y){return c[y]-c[x];})[0];})()`);
+    await b.click(`#families [data-family="${fam}"]`);
+    await pickShow(b, 'people');
+    await pickSort(b, 'luma');
+    combo = await b.evalIn(within('people')); comboFoot = await footNow();
+    const famWord = await b.evalIn(`SelectCore.FAMILY[${JSON.stringify(fam)}].word`);
+    check('a colour dot stays through a new show and a new sort, and the verdict names all three', combo.view.family === fam && combo.view.show === 'people' && combo.view.sort[0].key === 'luma' && combo.shown > 0 && combo.pass && combo.colours.every(c => c === fam) && sorted(combo.luma, -1) && comboFoot.verdict === `${famWord}, people, brightest first`, { view: combo.view, shown: combo.shown, verdict: comboFoot.verdict });
+    await resetView(b);
+
+    // Interviews: speech and a face, and long enough to be one
+    await pickShow(b, 'interviews');
+    const iv = await b.evalIn(`(function(){var S=SelectApp.state,rows=S.store.rows,shown=S.order.map(function(i){return rows[i];});var short=rows.filter(function(r){return r.speech===true&&r.faces>0&&r.durationS<SelectCore.INTERVIEW_MIN_S;});
+      return {min:SelectCore.INTERVIEW_MIN_S,shown:shown.length,shortest:Math.min.apply(null,shown.map(function(r){return r.durationS;})),short:short.length,leaked:short.filter(function(r){return shown.indexOf(r)>=0;}).length};})()`);
+    check('Interviews leaves out clips under 15 s, even with speech and a face', iv.min === 15 && iv.shown > 0 && iv.shortest >= 15 && iv.short > 0 && iv.leaked === 0, iv);
+    await resetView(b);
+
+    // the Show menu: its sections, its counts, and the keyboard
+    await b.click('#show');
+    const showMenu = await b.evalIn(`({items:${pickerItems},seq:Array.from(document.getElementById('picker').children).map(function(x){return x.tagName==='HR'?'|':x.dataset.id;}).join(' '),
+      want:SelectCore.SHOWS.map(function(s){return [s.id,SelectCore.fmtInt(SelectCore.showCount(SelectApp.state.store.rows,s.id))];}),focus:document.activeElement.dataset.id,expanded:document.getElementById('show').getAttribute('aria-expanded'),
+      tips:Array.from(document.querySelectorAll('#picker button')).every(function(x){return x.title.length>4;})})`);
+    check('the Show menu: Everything, then people, sound and picture, each count from core.showCount', showMenu.seq === 'everything | interviews people nopeople mediums wides | speech music silent | onscreen similar' && JSON.stringify(showMenu.items[0]) === '["everything","Everything","400",true]' && showMenu.want.every(([id, n]) => showMenu.items.find(x => x[0] === id)[2] === n) && showMenu.items.filter(x => x[3]).length === 1 && showMenu.focus === 'everything' && showMenu.expanded === 'true' && showMenu.tips, showMenu);
+    await press(b, 'ArrowDown');
+    const down = await b.evalIn(`document.activeElement.dataset.id`);
+    await press(b, 'ArrowUp');
+    await press(b, 'ArrowUp');
+    const wrapped = await b.evalIn(`document.activeElement.dataset.id`);
+    await press(b, 'Escape');
+    const escaped = await b.evalIn(`({hidden:document.getElementById('picker').hidden,focus:document.activeElement.id,expanded:document.getElementById('show').getAttribute('aria-expanded'),show:SelectApp.state.view.show})`);
+    check('arrow keys move through the menu and wrap round; Escape closes it, changes nothing and gives focus back to Show', down === 'interviews' && wrapped === 'similar' && escaped.hidden && escaped.focus === 'show' && escaped.expanded === 'false' && escaped.show === null, { down, wrapped, escaped });
+    await b.click('#show');
+    await press(b, 'ArrowDown');
+    await press(b, 'Enter');
+    check('Enter picks the item in focus', (await viewNow()).show === 'interviews' && (await barState()).show === 'Interviews' && !(await barState()).picker);
+    await resetView(b);
+    await b.click('#show');
+    await b.click('#foot-sentence');
+    check('a click outside closes the menu and changes nothing', (await b.evalIn(`document.getElementById('picker').hidden&&document.getElementById('show').getAttribute('aria-expanded')==='false'`)) && (await viewNow()).show === null && !(await viewNow()).sort.length);
+    await b.click('#show');
+    await b.click('#show');
+    const againClosed = await b.evalIn(`document.getElementById('picker').hidden`);
+    await b.click('#show');
+    await b.click('#sort');
+    const swapped = await b.evalIn(`({hidden:document.getElementById('picker').hidden,first:document.querySelector('#picker button').dataset.id,show:document.getElementById('show').getAttribute('aria-expanded'),sort:document.getElementById('sort').getAttribute('aria-expanded')})`);
+    check('pressing Show again closes its menu, and pressing Sort swaps to the Sort menu', againClosed && !swapped.hidden && swapped.first === 'listed' && swapped.show === 'false' && swapped.sort === 'true', { againClosed, swapped });
+    await press(b, 'Escape');
 
     // -------- sort at 1,000 rows: real clicks on every header
     await setItems(b, 1000);
@@ -477,7 +606,7 @@ async function main() {
     await scanAndWait(b);
     check('1,000 clips scanned', (await b.evalIn(`SelectApp.state.store.rows.length`)) === 1000);
     await b.evalIn(`SelectApp.state.history.length=0`);
-    await b.evalIn(`document.getElementById('clear-view').click()`);
+    await resetView(b);
     await sleep(300);    // thumbnails landing are not part of a re-sort
     const times = [];
     const keys = await b.evalIn(`SelectApp.state.columns.filter(function(c){return c.sortable!==false&&!c.onlyWithGroups;}).map(function(c){return c.key;})`);
@@ -530,10 +659,10 @@ async function main() {
     await setItems(b, 400);
     b.engineEnv.FAKE_DELAY_MS = '0';
     await scanAndWait(b);
-    await b.evalIn(`document.getElementById('clear-view').click()`);
-    await pressPreset(b, 'sharpest');
+    await resetView(b);
+    await pickSort(b, 'sharpness');
     const finished = await footNow();
-    check('foot when finished: a grey tick, the sort as the verdict, three actions, Sort into Bins cobalt, Scan gone', finished.mark === 'done' && finished.verdict === 'Sharpest first' && /^400 clips in \d+\.\d s\. Sharpest at the top\. \d+ clips are listed with blank picture scores/.test(finished.sentence) && (finished.sentence.match(/blank/g) || []).length === 1 && finished.actions.join() === 'do-label,do-columns,do-bins*', finished);
+    check('foot when finished: a grey tick, the sort as the verdict, three actions, Sort into Bins cobalt, Scan gone', finished.mark === 'done' && finished.verdict === 'Sharpest first' && /^400 clips in \d+\.\d s\. \d+ clips are listed with blank picture scores/.test(finished.sentence) && (finished.sentence.match(/blank/g) || []).length === 1 && finished.actions.join() === 'do-label,do-columns,do-bins*', finished);
     await b.click('#more');
     const menu = await b.evalIn(`Array.from(document.querySelectorAll('#menu button')).filter(function(x){return !x.hidden;}).map(function(x){return x.textContent;})`);
     check('the menu holds Rescan, Columns, Undo View, Clear Results, Report a Bug and About', menu.join('|') === 'Rescan|Columns…|Undo View|Clear Results|Report a Bug|About Select', menu);
@@ -613,10 +742,10 @@ async function main() {
     const sortedFoot = await b.evalIn(`(function(){var u=getComputedStyle(document.getElementById('undo-write'));return {f:${foot},undoBg:u.backgroundColor,undoColor:u.color,sentence:getComputedStyle(document.getElementById('foot-sentence')).color};})()`);
     check('bins read back: green foot, plain words, Undo in white', sortedFoot.f.background === GREEN && /^Sorted into 6 bins$/.test(sortedFoot.f.verdict) && /^400 clips moved\. Your files weren't touched\.$/.test(sortedFoot.f.sentence) && sortedFoot.undoBg === 'rgb(255, 255, 255)' && sortedFoot.undoColor === GREEN && sortedFoot.sentence === 'rgb(255, 255, 255)', sortedFoot);
     await b.shot('08-bins-green');
-    await pressPreset(b, 'softest');
+    await b.click('#flip');
     await sleep(320);
     check('a new view moves on from the green foot', (await footNow()).background !== GREEN);
-    await pressPreset(b, 'sharpest');
+    await b.click('#flip');
 
     // -------- a read-back that does not match is never green
     await b.evalIn(`__mock.misplaced=3`);
@@ -741,8 +870,8 @@ async function main() {
     await b.click('#more');
     await b.click('[data-menu="clear"]');
     const cleared = await footNow();
-    const clearedView = await b.evalIn(`({sort:SelectApp.state.view.sort.length,preset:SelectApp.state.view.preset,on:document.querySelectorAll('#presets button.on').length,marks:document.querySelectorAll('#head .mark').length})`);
-    check('Clear Results goes back to the first foot and the first view, and writes nothing', cleared.mark === 'waiting' && cleared.actions.join() === 'scan*' && (await b.evalIn(`SelectApp.state.store.rows.length`)) === 0 && !clearedView.sort && !clearedView.preset && !clearedView.on && !clearedView.marks, { cleared, clearedView });
+    const clearedView = await b.evalIn(`({sort:SelectApp.state.view.sort.length,show:SelectApp.state.view.show,family:SelectApp.state.view.family,on:document.querySelectorAll('.pick.on,#families button.on').length,words:document.querySelector('#show .v').textContent+'|'+document.querySelector('#sort .v').textContent,flip:!document.getElementById('flip').hidden,marks:document.querySelectorAll('#head .mark').length})`);
+    check('Clear Results goes back to the first foot and the first view, and writes nothing', cleared.mark === 'waiting' && cleared.actions.join() === 'scan*' && (await b.evalIn(`SelectApp.state.store.rows.length`)) === 0 && !clearedView.sort && !clearedView.show && !clearedView.family && !clearedView.on && clearedView.words === 'Everything|As listed' && !clearedView.flip && !clearedView.marks, { cleared, clearedView });
 
     // -------- folder source, not in the project
     await b.evalIn(`__mock.folderFiles=['A0001.MP4','._A0001.MP4','A0001M01.XML','B0002.mov'];__mock.items=[{id:'p1',path:'/Volumes/Field SSD/f/A0001.MP4',name:'A0001.MP4'}]`);
@@ -815,8 +944,8 @@ async function main() {
     await b.waitFor(`SelectApp.state.scan.state==='Done'`);
     const dirty = await b.evalIn(text('status-unread'));
     check('junk lines and clip errors are counted', /^16 clips could not be read: /.test(dirty) && /engine lines could not be understood/.test(dirty) && (await b.evalIn(`SelectApp.state.store.errors`)) === 16, dirty);
-    await pressPreset(b, 'shoot');
-    await pressPreset(b, 'shoot');
+    await pickSort(b, 'createdAt');
+    await pickSort(b, null);
     await b.shot('10-errors');
     b.engineEnv.FAKE_MODE = '';
     b.engineEnv.FAKE_ERRORS = '';
@@ -873,27 +1002,41 @@ async function main() {
 
     // -------- 620 px, the panel's minimum
     await b.size(620, 420);
-    await b.evalIn(`(function(){var o=document.querySelector('#presets [data-id="colour"]');if(!o.classList.contains('on')){o.click();}})()`);
+    // the longest words the bar can hold at once: the longest show and the longest sort, with its flip button, then a colour too
+    await resetView(b);
+    await pickShow(b, 'onscreen');
+    await pickSort(b, 'clipHighPct');
     await sleep(120);
-    const narrow = await b.evalIn(`(function(){var d=document.documentElement,w=innerWidth,inside=function(sel){var r=document.querySelector(sel).getBoundingClientRect();return r.left>=0&&r.right<=w&&r.bottom<=innerHeight;};
-      var words=Array.from(document.querySelectorAll('#presets .word')).map(function(x){var r=x.getBoundingClientRect();return {t:Math.round(r.top),r:r.right};});
-      return {page:d.scrollWidth,lines:new Set(words.map(function(x){return x.t;})).size,modes:inside('#mode-grid'),search:inside('#search-box'),wordsIn:words.every(function(x){return x.r<=w;}),bins:inside('#do-bins'),label:inside('#do-label'),more:inside('#more'),source:inside('#source'),verdict:document.getElementById('foot-verdict').scrollWidth<=document.getElementById('foot-verdict').clientWidth,table:document.getElementById('grid').scrollWidth,grid:document.getElementById('grid').clientWidth,head:document.getElementById('top').scrollWidth};})()`);
-    check('at 620 px nothing leaves the panel: the sort row is one line, the foot and the header stay whole', narrow.page <= 620 && narrow.lines === 1 && narrow.modes && narrow.search && narrow.wordsIn && narrow.bins && narrow.label && narrow.more && narrow.source && narrow.verdict && narrow.head <= 620, narrow);
+    const narrowNow = () => b.evalIn(`(function(){var d=document.documentElement,w=innerWidth,inside=function(sel){var r=document.querySelector(sel).getBoundingClientRect();return r.left>=0&&r.right<=w&&r.bottom<=innerHeight;};
+      var words=['#show','#sort','#flip','#families','#modes'].map(function(sel){var r=document.querySelector(sel).getBoundingClientRect();return {sel:sel,mid:Math.round(r.top+r.height/2),l:r.left,r:r.right,shown:r.width>0};}),bar=document.getElementById('bar');
+      var cut=Array.from(document.querySelectorAll('.pick .v')).filter(function(x){return x.scrollWidth>x.clientWidth;}).map(function(x){return x.textContent;});
+      return {page:d.scrollWidth,lines:new Set(words.map(function(x){return x.mid;})).size,barOver:bar.scrollWidth-bar.clientWidth,cut:cut,said:document.querySelector('#show .v').textContent+'|'+document.querySelector('#sort .v').textContent,modes:inside('#mode-grid'),search:inside('#search-box'),wordsIn:words.every(function(x){return x.shown&&x.l>=0&&x.r<=w;}),bins:inside('#do-bins'),label:inside('#do-label'),more:inside('#more'),source:inside('#source'),verdict:document.getElementById('foot-verdict').scrollWidth<=document.getElementById('foot-verdict').clientWidth,table:document.getElementById('grid').scrollWidth,grid:document.getElementById('grid').clientWidth,head:document.getElementById('top').scrollWidth};})()`);
+    const narrow = await narrowNow();
+    await b.click('#families [data-family="red"]');
+    await sleep(120);
+    const narrowRed = await narrowNow();
+    check('at 620 px the bar stays one line with a show, a sort and a colour on, its words whole', narrowRed.lines === 1 && narrowRed.barOver <= 0 && !narrowRed.cut.length && narrowRed.wordsIn && narrowRed.modes && narrowRed.page <= 620, narrowRed);
+    check('at 620 px nothing leaves the panel: the bar is one line with its words whole, the foot and the header stay whole', narrow.page <= 620 && narrow.lines === 1 && narrow.barOver <= 0 && !narrow.cut.length && narrow.said === 'Text on screen|Most clipped first' && narrow.modes && narrow.search && narrow.wordsIn && narrow.bins && narrow.label && narrow.more && narrow.source && narrow.verdict && narrow.head <= 620, narrow);
     check('at 620 px the table scrolls inside itself', narrow.table >= narrow.grid, narrow);
     await b.shot('19-620-light');
     await b.size(900, 620);
     await sleep(100);
+    await resetView(b);
 
     // -------- motion
     await b.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
     const still = await b.evalIn(`({spin:getComputedStyle(document.querySelector('#foot-mark .m-arc')).animationName,fade:getComputedStyle(document.getElementById('foot')).transitionDuration})`);
     check('prefers-reduced-motion: the arc stands still and nothing fades', still.spin === 'none' && /^0s/.test(still.fade), still);
-    await b.evalIn(`document.querySelector('#presets [data-id="shoot"]').click()`);
-    check('prefers-reduced-motion: new foot words arrive without a fade', (await b.evalIn(`document.getElementById('foot-verdict').getAnimations().length`)) === 0);
+    const verdictFades = () => b.evalIn(`document.getElementById('foot-verdict').getAnimations().length`);
+    await b.waitFor(`document.getElementById('foot-verdict').getAnimations().length===0`, 'earlier fades to finish');
+    await pickSort(b, 'createdAt');
+    const reducedFades = await verdictFades();
+    check('prefers-reduced-motion: new foot words arrive without a fade', reducedFades === 0 && (await b.evalIn(text('foot-verdict'))) === 'Earliest first', reducedFades);
     await b.send('Emulation.setEmulatedMedia', { features: [] });
-    await b.evalIn(`document.querySelector('#presets [data-id="colour"]').click()`);
-    check('new foot words fade in', (await b.evalIn(`document.getElementById('foot-verdict').getAnimations().length`)) === 1);
-    await b.evalIn(`document.querySelector('#presets [data-id="shoot"]').click()`);
+    await pickSort(b, 'colorName');
+    const fades = await verdictFades();
+    check('new foot words fade in', fades === 1 && (await b.evalIn(text('foot-verdict'))) === 'Rainbow order', fades);
+    await pickSort(b, 'createdAt');
     const box = await b.evalIn(`(function(){var r=document.getElementById('do-bins').getBoundingClientRect();return {x:r.left+r.width/2,y:r.top+r.height/2};})()`);
     await b.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: box.x, y: box.y });
     await b.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: box.x, y: box.y, button: 'left', clickCount: 1 });
@@ -910,21 +1053,33 @@ async function main() {
 
     // -------- search, the three stages, the grid, colour, groups and failures of Tier 2
     await b.evalIn(`__mock.skin={red:35,green:35,blue:35};__mock.listeners['com.adobe.csxs.events.ThemeColorChanged'].forEach(function(f){f();});SelectApp.setMode('list')`);
-    await b.evalIn(`document.getElementById('clear-view').click()`);
+    await resetView(b);
     await setItems(b, 400);
 
     // stage three, live: rows usable, writes usable, the foot calm
     b.engineEnv.FAKE_DELAY_MS = '3';
     await b.click('#source button[data-src="project"]');
     await pressScan(b);
+    // before any clip is looked at closely, what needs that waits with an ellipsis, and what doesn't keeps its count
+    await b.waitFor(`SelectApp.state.scan.handle&&SelectApp.state.store.tier0>20&&SelectApp.state.store.tier2===0`, 'scan before stage three', 30000);
+    const hintOf = (items, id) => (items.find(x => x[0] === id) || [])[2];
+    await b.click('#show');
+    const earlyShow = await b.evalIn(`({items:${pickerItems},tier2:SelectApp.state.store.tier2})`);
+    await b.click('#sort');
+    const earlySort = await b.evalIn(`({items:${pickerItems},tier2:SelectApp.state.store.tier2})`);
+    await press(b, 'Escape');
+    check('while the scan may still send it, the menus wait with an ellipsis: people, sound, text, similar shots, shake, colour', earlyShow.tier2 === 0 && earlySort.tier2 === 0 && ['interviews', 'people', 'nopeople', 'mediums', 'wides', 'speech', 'music', 'onscreen', 'similar'].every(id => hintOf(earlyShow.items, id) === '…') && hintOf(earlyShow.items, 'everything') === '400' && /^\d+$/.test(hintOf(earlyShow.items, 'silent')) && hintOf(earlySort.items, 'shake') === '…' && hintOf(earlySort.items, 'colorName') === '…' && hintOf(earlySort.items, 'sharpness') === 'sharpest first', { show: earlyShow.items.map(x => x[0] + ' ' + x[2]), sort: earlySort.items.map(x => x[0] + ' ' + x[2]) });
     await b.waitFor(`SelectApp.state.scan.handle&&document.getElementById('foot').className==='understanding'`, 'stage three', 30000);
     const stage = await footNow();
-    const menuWait = await (async () => { await b.click('#presets [data-group="people"]'); const t = await b.evalIn(`Array.from(document.querySelectorAll('#sort-menu button')).map(function(x){return x.textContent;})`); await b.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 }); await b.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 }); return t; })();
+    await b.waitFor(`SelectApp.state.store.tier2>5`, 'some clips understood', 30000);
+    await b.click('#show');
+    const midShow = await b.evalIn(`({items:${pickerItems},running:!!SelectApp.state.scan.handle})`);
+    await press(b, 'Escape');
     const legible = await b.evalIn(`(function(){var el=document.getElementById('foot-sentence');return {anims:el.getAnimations().length,opacity:getComputedStyle(el).opacity,w:el.getBoundingClientRect().width};})()`);
     check('the stage-three count changes in place, legible, with no fade restarting', legible.anims === 0 && legible.opacity === '1' && legible.w > 100, legible);
-    check('stage three: the foot says it is still looking closer, and the writes work', /^Still looking closer, on this Mac: \d+ of 392$/.test(stage.sentence) && stage.mark === 'running' && stage.actions.join() === 'stop,do-label,do-columns,do-bins*', stage);
-    check('the group menu counts what has landed so far', menuWait.length === 7 && menuWait.some(t => /^People\d+$/.test(t)), menuWait);
-    await b.evalIn(`document.querySelector('#presets [data-id="colour"]').click()`);
+    check('stage three: the foot says it is finding people, words, sound and colour, and the writes work', /^Finding people, words, sound and colour: \d+ of 392$/.test(stage.sentence) && stage.mark === 'running' && stage.actions.join() === 'stop,do-label,do-columns,do-bins*', stage);
+    check('the Show menu counts what has landed so far, marks a count still climbing, and similar shots wait for the end', midShow.running && midShow.items.length === 11 && /^\d+…$/.test(hintOf(midShow.items, 'people')) && /^\d+$/.test(hintOf(midShow.items, 'silent')) && hintOf(midShow.items, 'similar') === '…', midShow.items.map(x => x[0] + ' ' + x[2]));
+    await pickSort(b, 'colorName');
     await sleep(120);
     const holding = await b.evalIn(`({bins:document.getElementById('do-bins').disabled,label:document.getElementById('do-label').disabled,columns:document.getElementById('do-columns').disabled,shown:!document.getElementById('do-bins').hidden,why:document.getElementById('status-unread').textContent,title:document.getElementById('do-bins').title,running:!!SelectApp.state.scan.handle})`);
     check('in stage three, a Colour write waits: visible, off, with a plain reason', holding.running && holding.shown && holding.bins && holding.label && holding.columns && /^Colour needs every clip looked at/.test(holding.why) && holding.why.startsWith(holding.title), holding);
@@ -938,12 +1093,26 @@ async function main() {
     const turned = await b.evalIn(`({clicked:__mock.calls.length,landed:SelectCore.understandingShare(SelectApp.state.store).landed||!SelectApp.state.scan.handle})`);
     check('and turns on by itself once every clip has landed', turned.landed, turned);
     await b.waitFor(`SelectApp.state.scan.state==='Done'`, 'done', 30000);
-    await b.evalIn(`document.getElementById('clear-view').click()`);
+    await b.click('#show');
+    const lateShow = await b.evalIn(`({items:${pickerItems},want:SelectCore.SHOWS.map(function(s){return [s.id,SelectCore.fmtInt(SelectCore.showCount(SelectApp.state.store.rows,s.id))];})})`);
+    await b.click('#sort');
+    const lateSort = await b.evalIn(pickerItems);
+    await press(b, 'Escape');
+    check('once the scan is done the ellipses turn into counts, each from core.showCount, and shake reads how it sorts', lateShow.want.every(([id, n]) => hintOf(lateShow.items, id) === n) && /^[1-9]/.test(hintOf(lateShow.items, 'similar')) && hintOf(lateSort, 'shake') === 'steadiest first' && hintOf(lateSort, 'colorName') === 'rainbow order', { show: lateShow.items.map(x => x[0] + ' ' + x[2]), shake: hintOf(lateSort, 'shake') });
+    await resetView(b);
 
-    // a Tier 1 write in stage three works, and Add Columns writes only Tier 1 fields
+    // a Tier 1 write in stage three works, and Add Columns writes only Tier 1 fields. Pictures fade in as they arrive.
     await pressScan(b);
+    await b.waitFor(`SelectApp.state.scan.handle&&document.querySelectorAll('#body img.arrive').length>0`, 'pictures arriving', 30000).catch(() => {});
+    const arriving = await b.evalIn(`(function(){var a=document.querySelectorAll('#body img.arrive');return {n:a.length,anim:a.length?getComputedStyle(a[0]).animationName:'',running:!!SelectApp.state.scan.handle};})()`);
     await b.waitFor(`SelectApp.state.scan.handle&&document.getElementById('foot').className==='understanding'`, 'stage three again', 30000);
-    await b.evalIn(`document.querySelector('#presets [data-id="shoot"]').click()`);
+    await b.evalIn(`document.getElementById('grid').scrollTop=1e9`);
+    await sleep(120);
+    await b.evalIn(`document.getElementById('grid').scrollTop=0`);
+    await sleep(120);
+    const scrolledBack = await b.evalIn(`(function(){var r=Array.from(document.querySelectorAll('#body .r')).filter(function(x){return x.style.display!=='none';});return {again:r.filter(function(x){return x.querySelector('img.arrive');}).length,pictures:r.filter(function(x){return x.querySelector('img[src]');}).length,running:!!SelectApp.state.scan.handle};})()`);
+    check('a picture fades in once as it arrives during a scan, and not again when scrolled back into view', arriving.n > 0 && arriving.anim === 'arrive' && arriving.running && scrolledBack.running && scrolledBack.pictures > 5 && scrolledBack.again === 0, { arriving, scrolledBack });
+    await pickSort(b, 'createdAt');
     await sleep(80);
     check('a Tier 1 sort writes during stage three', !(await b.evalIn(`document.getElementById('do-bins').disabled||document.getElementById('do-columns').disabled`)));
     await b.evalIn(`__mock.calls.length=0`);
@@ -955,8 +1124,8 @@ async function main() {
     const earlyCols = (await calls('columns'))[0].args;
     check('Add Columns in stage three writes the 6 Tier 1 fields and says the rest come later', earlyCols.fields.length === 6 && !earlyCols.fields.some(f => f.name === 'SelectColour') && /Adds 6 columns/.test(earlySheet) && /The other 7/.test(earlySheet), earlyCols.fields.map(f => f.name));
     await b.waitFor(`SelectApp.state.scan.state==='Done'`, 'done', 30000);
-    await b.evalIn(`SelectApp.state.outcome=null;document.getElementById('clear-view').click()`);
-    await b.evalIn(`document.getElementById('clear-view').click()`);
+    await b.evalIn(`SelectApp.state.outcome=null;SelectApp.applyView()`);
+    await resetView(b);
 
     // search, real keystrokes
     await b.click('#search');
@@ -975,7 +1144,8 @@ async function main() {
     check('Clear search puts every clip back', (await b.evalIn(`SelectApp.state.order.length`)) === 400 && (await b.evalIn(`document.getElementById('search').value`)) === '');
 
     // the grid
-    await pressPreset(b, 'softest');
+    await pickSort(b, 'sharpness');
+    await b.click('#flip');
     await b.click('#mode-grid');
     await sleep(200);
     const tiles = await b.evalIn(`({shown:document.querySelectorAll('#tiles .t').length,head:document.getElementById('head').hidden,list:document.getElementById('body').hidden,on:document.getElementById('mode-grid').classList.contains('on'),rows:SelectApp.state.L.cols,name:document.querySelector('#tiles .t[data-at="0"] .n').textContent,fact:document.querySelector('#tiles .t[data-at="0"] .f').textContent,w:document.querySelector('#tiles .t').getBoundingClientRect().width,order:SelectApp.state.store.rows[SelectApp.state.order[0]]})`);
@@ -1006,12 +1176,12 @@ async function main() {
     await b.evalIn(`SelectApp.state.selected.clear();SelectApp.applyView()`);
 
     // colour in the grid
-    await pressPreset(b, 'colour');
+    await pickSort(b, 'colorName');
     const rainbow = await b.evalIn(`(function(){var r=${ids},keys=r.map(function(x){return x.rainbow;}).filter(function(k){return typeof k==='number';}),up=keys.every(function(k,i){return !i||keys[i-1]<=k;}),first=r[0].colorName,lastHue=keys.filter(function(k){return k<800;}).length,neutral=r.filter(function(x){return x.colorName==='neutral';}).length;return {up:up,first:first,hued:lastHue,neutral:neutral,chips:!document.querySelector('#tiles .t[data-at="0"] .p').hidden,fact:document.querySelector('#tiles .t[data-at="0"] .f').hidden};})()`);
     check('Colour sorts by hue from red, neutrals after, blanks last, and tiles show their palette', rainbow.up && rainbow.first === 'red' && rainbow.hued > 200 && rainbow.neutral > 10 && rainbow.chips && rainbow.fact, rainbow);
     await b.click('#families [data-family="teal"]');
     const teal = await b.evalIn(`({n:SelectApp.state.order.length,all:${ids}.every(function(r){return r.colorName==='teal';}),verdict:document.getElementById('foot-verdict').textContent,dot:document.querySelector('#families [data-family="teal"]').classList.contains('on')})`);
-    check('a colour family filters, in the grid, with its dot on', teal.n > 5 && teal.all && teal.verdict === 'Teal, colour' && teal.dot, teal);
+    check('a colour family filters, in the grid, with its dot on', teal.n > 5 && teal.all && teal.verdict === 'Teal' && teal.dot, teal);
     await b.evalIn(`__mock.calls.length=0`);
     await b.click('#do-bins');
     await waitModal();
@@ -1036,13 +1206,48 @@ async function main() {
     check('every family has its bin, in rainbow order, and a stray is not green', /01 Red[\s\S]*02 Orange[\s\S]*09 Neutral[\s\S]*10 No value/.test(rainbowSheet) && (await footNow()).background !== GREEN, (await footNow()).verdict);
     await b.evalIn(`__mock.misplaced=0;SelectApp.state.outcome=null;SelectApp.applyView()`);
 
+    // the bins follow the view: a bin per day, a bin per value of a word column, one bin for a show, none for a name sort or nothing
+    const binsSheet = async () => {
+      await b.click('#do-bins');
+      await waitModal();
+      const got = await b.evalIn(`({root:Array.from(document.querySelectorAll('#dialog-body b')).map(function(x){return x.textContent;}).filter(function(t){return /^SELECT /.test(t);})[0],bins:Array.from(document.querySelectorAll('#dialog-body li')).map(function(li){return [li.children[0].textContent,Number(li.children[1].textContent.replace(/,/g,''))];})})`);
+      await b.click('#dialog-cancel');
+      await b.waitFor(`document.getElementById('modal').hidden`);
+      return got;
+    };
+    const today = await b.evalIn(`SelectCore.localDate(new Date())`);
+    const valuesInOrder = of => b.evalIn(`(function(){var seen=[],n={};${ids}.forEach(function(r){var v=(${of})(r)||'No value';if(!(v in n)){seen.push(v);n[v]=0;}n[v]++;});var named=seen.filter(function(v){return v!=='No value';});if(n['No value']){named.push('No value');}return named.map(function(v,i){return [(i<9?'0':'')+(i+1)+' '+v,n[v]];});})()`);
+    await pickSort(b, 'createdAt');
+    const days = await binsSheet(), wantDays = await valuesInOrder(`function(r){return r.createdAt?String(r.createdAt).slice(0,10):null;}`);
+    const dayNames = days.bins.map(x => x[0].slice(3)).filter(x => x !== 'No value');
+    check('Sort into Bins on Shoot order: a bin per day, earliest first', days.root === `SELECT ${today} Earliest first` && JSON.stringify(days.bins) === JSON.stringify(wantDays) && dayNames.length > 3 && dayNames.every(d => /^\d{4}-\d\d-\d\d$/.test(d)) && dayNames.join() === dayNames.slice().sort().join() && days.bins.reduce((n, x) => n + x[1], 0) === 400, days);
+    await b.click('#mode-list');
+    await b.click(`#head .h[data-key="camera"]`);
+    const cams = await binsSheet(), wantCams = await valuesInOrder(`function(r){return r.camera;}`);
+    check('Sort into Bins on a word column: a bin per value', cams.root === `SELECT ${today} Camera A to Z` && JSON.stringify(cams.bins) === JSON.stringify(wantCams) && cams.bins.length > 2 && cams.bins.reduce((n, x) => n + x[1], 0) === 400, cams);
+    await pickSort(b, null);
+    await pickShow(b, 'interviews');
+    const oneShow = await binsSheet(), ivCount = await b.evalIn(`SelectCore.showCount(SelectApp.state.store.rows,'interviews')`);
+    await pickSort(b, 'sharpness');
+    const oneShowSorted = await binsSheet();
+    check('Sort into Bins on a show: one bin named after it, sorted or not', oneShow.root === `SELECT ${today} Interviews` && JSON.stringify(oneShow.bins) === JSON.stringify([['01 Interviews', ivCount]]) && ivCount > 0 && oneShowSorted.root === `SELECT ${today} Interviews, sharpest first` && JSON.stringify(oneShowSorted.bins) === JSON.stringify(oneShow.bins), { oneShow, oneShowSorted });
+    await resetView(b);
+    const binsOff = async () => b.evalIn(`({shown:!document.getElementById('do-bins').hidden,off:document.getElementById('do-bins').disabled,title:document.getElementById('do-bins').title})`);
+    const offNothing = await binsOff();
+    await pickSort(b, 'name');
+    const offName = await binsOff();
+    const BINS_FIRST = 'Choose what to show, or a sort, first. Bins are made from them.';
+    check('with nothing chosen, or only a name sort, Sort into Bins is off and says to choose first', [offNothing, offName].every(x => x.shown && x.off && x.title === BINS_FIRST) && (await footNow()).verdict === 'A to Z', { offNothing, offName });
+    await pickSort(b, 'colorName');
+    await b.click('#mode-grid');
+
     // groups, in both views, arriving last
     b.engineEnv.FAKE_DELAY_MS = '4';
-    await pressPreset(b, 'similar');
+    await pickShow(b, 'similar');
     await pressScan(b);
     await b.waitFor(`SelectApp.state.scan.handle&&SelectApp.state.store.tier1>50`, 'scan under way', 30000);
     const waiting = await b.evalIn(`({text:document.getElementById('empty-words').textContent,hidden:document.getElementById('empty').hidden})`);
-    check('Similar shots waits in plain words until the line arrives', !waiting.hidden && /arrive last/.test(waiting.text), waiting);
+    check('Similar shots waits in plain words until the line arrives', !waiting.hidden && waiting.text === 'Similar shots come last, once every clip has been looked at.', waiting);
     await b.waitFor(`SelectApp.state.scan.state==='Done'&&SelectApp.state.order.length>0`, 'groups', 30000);
     await sleep(120);
     const grouped = await b.evalIn(`({heads:Array.from(document.querySelectorAll('#tiles .gh')).filter(function(h){return !h.hidden;}).map(function(h){return h.textContent;}),count:SelectApp.state.groupCount,top:document.querySelector('#tiles .gh').style.top,foot:document.getElementById('foot-sentence').textContent})`);
@@ -1054,7 +1259,9 @@ async function main() {
     const listed = await b.evalIn(`Array.from(document.querySelectorAll('#body .gh')).filter(function(h){return !h.hidden;}).map(function(h){return h.textContent;})`);
     check('and as groups in the list, with no sideways scroll', listed[0] === 'Group 1 · 3 clips' && listed.length > 1 && (await b.evalIn(`document.getElementById('grid').scrollWidth<=document.getElementById('grid').clientWidth`)), listed.slice(0, 3));
     await b.shot('33-list-groups');
-    await pressPreset(b, 'similar');
+    const groupBins = await binsSheet(), groupSizes = await b.evalIn(`(function(){var n={};${ids}.forEach(function(r){n[r.dupGroup]=(n[r.dupGroup]||0)+1;});return Object.keys(n).sort(function(x,y){return x-y;}).map(function(g){return n[g];});})()`);
+    check('Sort into Bins on similar shots: a bin per group, named by its size', groupBins.root === `SELECT ${today} Similar shots, rainbow order` && groupBins.bins.length === groupSizes.length && groupBins.bins.every((x, i) => x[0] === `${String(i + 1).padStart(2, '0')} Similar, ${groupSizes[i]} clips` && x[1] === groupSizes[i]), { groupBins, groupSizes });
+    await pickShow(b, null);
 
     // what Tier 2 can do wrong
     b.engineEnv.FAKE_DELAY_MS = '0';
@@ -1073,13 +1280,16 @@ async function main() {
     check('the engine dying in Tier 2 keeps every row, and the writes', t2Crash.read === 392 && t2Crash.tier2 > 0 && /What was read stays/.test(t2Crash.foot) && t2Crash.bins, t2Crash);
     b.engineEnv.FAKE_TIER2 = 'off';
     await scanAndWait(b);
-    await pressPreset(b, 'closeups');
+    await pickShow(b, 'mediums');
     const noData = await b.evalIn(`({text:document.getElementById('empty-words').textContent,foot:document.getElementById('foot-sentence').textContent})`);
-    check('a sort on data no clip has says so plainly, not an empty table', /No clip has shot size data/.test(noData.text) && /No clip has shot size data/.test(noData.foot), noData);
-    await b.click('#presets [data-group="people"]');
-    const noHint = await b.evalIn(`document.querySelector('#sort-menu [data-id="closeups"] span').textContent`);
-    check('the group menu says no data', noHint === 'no data', noHint);
-    await b.click('#sort-menu [data-id="closeups"]');
+    check('a show on data no clip has says so plainly, not an empty table', /No clip has shot size data/.test(noData.text) && /No clip has shot size data/.test(noData.foot), noData);
+    await b.click('#show');
+    const noShow = await b.evalIn(pickerItems);
+    await b.click('#sort');
+    const noSort = await b.evalIn(pickerItems);
+    await press(b, 'Escape');
+    check('the menus say when the data will not come: a dash for a show, no data for a sort', ['interviews', 'people', 'nopeople', 'mediums', 'wides', 'speech', 'music', 'onscreen', 'similar'].every(id => hintOf(noShow, id) === '\u2013') && /^\d+$/.test(hintOf(noShow, 'silent')) && hintOf(noSort, 'shake') === 'no data' && hintOf(noSort, 'colorName') === 'no data' && hintOf(noSort, 'sharpness') === 'sharpest first', { show: noShow.map(x => x[0] + ' ' + x[2]), sort: noSort.map(x => x[0] + ' ' + x[2]) });
+    await pickShow(b, null);
     b.engineEnv.FAKE_TIER2 = '';
 
     // 1,000 clips: search, sort and scroll in the grid
@@ -1098,9 +1308,11 @@ async function main() {
     const worstSearch = Math.max(...search1000), meanSearch = search1000.reduce((x, y) => x + y, 0) / search1000.length;
     check('search at 1,000 clips, each keystroke with repaint, 16 ms or less', worstSearch <= 16, `worst ${worstSearch.toFixed(1)} ms, mean ${meanSearch.toFixed(1)} ms over ${search1000.length} keystrokes`);
     const gridSorts = [];
-    for (const id of ['colour', 'softest', 'people', 'shoot', 'shakiest', 'colour']) {
+    const gridViews = [() => pickSort(b, 'colorName'), () => pickSort(b, 'sharpness'), () => b.click('#flip'), () => pickShow(b, 'people'), () => pickSort(b, 'createdAt'), () => pickShow(b, 'speech'),
+      () => pickSort(b, 'shake'), () => b.click('#flip'), () => pickShow(b, null), () => pickSort(b, 'colorName')];
+    for (const go of gridViews) {
       await b.evalIn(`SelectApp.state.sortMs=null`);
-      await pressPreset(b, id);
+      await go();
       gridSorts.push(await b.evalIn('SelectApp.state.sortMs'));
     }
     const worstGrid = Math.max(...gridSorts);
@@ -1123,8 +1335,8 @@ async function main() {
     // the grid at the smallest panel, and in Premiere's light theme
     await b.size(620, 420);
     await sleep(160);
-    const narrowGrid = await b.evalIn(`(function(){var r=document.querySelector('#tiles .t').getBoundingClientRect(),g=document.getElementById('grid'),cols=SelectApp.state.L.cols,last=document.querySelector('#tiles .t[data-at="'+(cols-1)+'"]').getBoundingClientRect();return {cols:cols,w:Math.round(r.width),over:g.scrollWidth-g.clientWidth,right:last.right,page:document.documentElement.scrollWidth,sortLines:document.getElementById('presets').getBoundingClientRect().height};})()`);
-    check('the grid fits 620 px with no sideways scroll, and the sort row stays one line', narrowGrid.cols >= 3 && narrowGrid.over === 0 && narrowGrid.right <= 620 && narrowGrid.page <= 620 && narrowGrid.sortLines <= 20, narrowGrid);
+    const narrowGrid = await b.evalIn(`(function(){var r=document.querySelector('#tiles .t').getBoundingClientRect(),g=document.getElementById('grid'),cols=SelectApp.state.L.cols,last=document.querySelector('#tiles .t[data-at="'+(cols-1)+'"]').getBoundingClientRect();return {cols:cols,w:Math.round(r.width),over:g.scrollWidth-g.clientWidth,right:last.right,page:document.documentElement.scrollWidth,barLines:new Set(['#show','#sort','#flip','#families','#modes'].map(function(sel){var b=document.querySelector(sel).getBoundingClientRect();return Math.round(b.top+b.height/2);})).size,barOver:document.getElementById('bar').scrollWidth-document.getElementById('bar').clientWidth};})()`);
+    check('the grid fits 620 px with no sideways scroll, and the bar stays one line', narrowGrid.cols >= 3 && narrowGrid.over === 0 && narrowGrid.right <= 620 && narrowGrid.page <= 620 && narrowGrid.barLines === 1 && narrowGrid.barOver <= 0, narrowGrid);
     await b.evalIn(`__mock.skin={red:230,green:230,blue:230};__mock.listeners['com.adobe.csxs.events.ThemeColorChanged'].forEach(function(f){f();})`);
     await sleep(100);
     await b.shot('34-grid-620-light');
@@ -1133,7 +1345,7 @@ async function main() {
     await b.size(900, 620);
     await b.evalIn(`__mock.skin={red:35,green:35,blue:35};__mock.listeners['com.adobe.csxs.events.ThemeColorChanged'].forEach(function(f){f();});SelectApp.setMode('list')`);
     await setItems(b, 400);
-    await b.evalIn(`document.getElementById('clear-view').click()`);
+    await resetView(b);
 
     // -------- the panel sends nothing
     const outside = b.requests.filter(u => !/^(file|data|about|blob):/.test(u));
@@ -1162,4 +1374,4 @@ async function main() {
 
 if (require.main === module) { main(); }
 
-module.exports = { pressPreset, launch, setItems, clips, scanAndWait, pressScan, setDeadline, stopEverything, fixture, sleep, foot, OUT };
+module.exports = { pickShow, pickSort, launch, setItems, clips, scanAndWait, pressScan, setDeadline, stopEverything, fixture, sleep, foot, OUT };

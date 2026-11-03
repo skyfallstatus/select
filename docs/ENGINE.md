@@ -73,7 +73,7 @@ In the `done` line, `clips` counts everything with Tier 0 data, `failed` counts 
 | `clipHighPct`, `clipLowPct` | float or null | percent of pixels at the extremes |
 | `saturation` | float 0..1 or null | |
 | `warmth` | float -1..1 or null | red against blue balance |
-| `dhash` | string or null | 64-bit perceptual hash, hex, for near-duplicate grouping |
+| `dhash` | string or null | 64-bit perceptual hash, hex. The panel doesn't use it now: Similar shots groups by feature prints |
 | `audioDb` | float or null | mean level from sampled windows, never a full read |
 | `silent` | bool or null | |
 | `thumb` | string or null | absolute path to a JPEG in the cache, 480 px on the long side, from the middle moment. Log footage is graded so it looks like the shot |
@@ -98,7 +98,7 @@ All of this is worked out on the Mac, with models that ship with macOS. It runs 
 | `moments` | int | frames actually read, up to 3, spread through the clip |
 | `people` | int or null | most people seen in any one moment |
 | `faces` | int or null | most faces seen in any one moment |
-| `shotSize` | `closeup`, `medium`, `wide` or null | from head and body size. null with no person or face |
+| `shotSize` | `medium`, `wide` or null | from head and body size. A tight face is medium: there is no close-up. null with no person or face |
 | `labels` | array of `{"name","conf"}` or null | up to 12, best first |
 | `text` | array of strings or null | up to 12 on-screen words |
 | `sounds` | array of `{"name","conf"}` or null | up to 6. null with no audio, empty when nothing was recognised |
@@ -106,7 +106,6 @@ All of this is worked out on the Mac, with models that ship with macOS. It runs 
 | `iso` | int or null | from the file, not estimated |
 | `shutterS` | float or null | exposure time in seconds |
 | `aperture` | float or null | f-number |
-| `whiteBalanceK` | null | part of the line, and null on every file so far |
 | `shake` | float 0..1 or null | camera movement from the gyro. null when the file has none |
 | `colorHue` | float 0..360 or null | the dominant colour's hue. null when the picture is effectively neutral |
 | `colorChroma` | float 0..1 or null | how colourful |
@@ -130,7 +129,7 @@ With no picture, `moments` is 0 and every picture field is null, while sound and
 
 **People.** The detector sees figures in walls and buildings, so a box counts only when the classifier agrees there are people in the frame, or a face was found.
 
-**Shot size.** Head height against frame height: 0.25 and up is a close-up, 0.12 and up is medium, anything smaller is wide. A person cut off by the bottom of the frame is at least medium. 927 of the 973 clips were portrait, so landscape frames are much less tested.
+**Shot size.** Head height against frame height: 0.12 and up is medium, anything smaller is wide. There is no close-up: on 973 real clips it came up 4 times, so a tight face is medium. A person cut off by the bottom of the frame is at least medium. 927 of the 973 clips were portrait, so landscape frames are much less tested.
 
 **Words.** Language correction on, confidence 0.5 or more, four letters or more, no mixed case, and not mostly strokes like `Illi`.
 

@@ -9,11 +9,13 @@
   // The grid: tiles at least this wide, as many as fit, 16:9 pictures, one line under each.
   var TILE_MIN = 130, TILE_GAP = 10, TILE_ROW_GAP = 12, TILE_CAPTION = 21, TILE_TOP = 12, HEAD_H = 24;
 
+  var BINS_FIRST = 'Choose what to show, or a sort, first. Bins are made from them.';
+  var REDUCED = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
   var $ = function (id) { return document.getElementById(id); };
   var plural = C.plural, fmtInt = C.fmtInt;
   var S = {
     store: C.createStore(),
-    view: { sort: [], preset: null, family: null },
+    view: { show: null, sort: [], family: null },
     history: [],
     order: [],
     hasGroups: false,
@@ -44,7 +46,6 @@
     labelColor: C.DEFAULT_LABEL,
     pool: [],
     lastComputed: 0,
-    beforePreset: null,
     modalOpen: false
   };
 
@@ -153,7 +154,7 @@
       groupCount: S.groupCount,
       query: S.query.trim(),
       needsTier2: C.viewNeedsTier2(S.view, S.tokens),
-      status: C.dataStatus(S.store.rows, S.view.preset, scanRunning())
+      status: C.dataStatus(S.store.rows, S.view.show, scanRunning())
     };
   }
 
@@ -189,7 +190,7 @@
     });
     var held = f.held || [];
     $('do-bins').disabled = !!f.binsOff || !S.order.length || held.indexOf('bins') >= 0;
-    $('do-bins').title = held.length ? f.wait : f.binsOff ? 'Pick a sort first. Bins are built from it.' : 'Move project items into new numbered bins by the active sort. Files on disk stay where they are';
+    $('do-bins').title = held.length ? f.wait : f.binsOff ? BINS_FIRST : 'Moves these clips into new bins in the Project panel, made from what is shown and how it is sorted. Files on disk stay where they are.';
     $('do-label').disabled = !S.order.length || held.indexOf('label') >= 0;
     $('do-columns').disabled = !S.order.length || held.indexOf('columns') >= 0;
     $('do-label').title = held.length ? f.wait : 'Set a colour label on the selected clips, or on the current view';
@@ -208,15 +209,13 @@
     return line;
   }
 
+  // The bar says the view in words: what is shown, how it is sorted, and which colour, if any.
   function renderView() {
-    var v = S.view, p = v.preset;
-    $('clear-view').classList.toggle('off', !v.sort.length && !v.preset && !v.family);     // keeps its place, so the row never reflows
-    Array.prototype.forEach.call(document.querySelectorAll('#presets [data-id], #presets [data-group]'), function (b) {
-      var group = b.dataset.group ? C.GROUPS.filter(function (g) { return g.id === b.dataset.group; })[0] : null;
-      var on = group ? group.presets.indexOf(p) >= 0 : b.dataset.id === p;
-      b.classList.toggle('on', on);
-      b.setAttribute('aria-pressed', on ? 'true' : 'false');
-    });
+    var v = S.view, show = v.show ? C.SHOW[v.show] : null, sort = v.sort[0] || null;
+    setPick('show', show ? show.label : 'Everything', !!show);
+    setPick('sort', sort ? C.sortWords(sort) : 'As listed', !!sort);
+    $('flip').hidden = !sort;
+    $('flip').title = sort ? 'Reverse to ' + C.sortWords({ key: sort.key, dir: -sort.dir }) : '';
     var counts = C.familyCounts(S.store.rows);
     Array.prototype.forEach.call(document.querySelectorAll('#families button'), function (b) {
       var f = C.FAMILY[b.dataset.family], n = counts[f.id] || 0;
@@ -226,7 +225,14 @@
     });
     $('mode-list').classList.toggle('on', S.mode === 'list');
     $('mode-grid').classList.toggle('on', S.mode === 'grid');
+    if (S.picker) { fillPicker(S.picker); }
     renderSearch();
+  }
+
+  function setPick(id, text, on) {
+    var b = $(id), value = b.querySelector('.v');
+    if (value.textContent !== text) { value.textContent = text; }
+    b.classList.toggle('on', on);
   }
 
   function renderSearch() {
@@ -350,6 +356,19 @@
     for (var i = 0; i < chips.length; i++) { chips[i].style.background = colours[i] || 'transparent'; }
   }
 
+  // A picture that arrives while the scan runs fades in once. One that was already there, or comes back into view, doesn't.
+  function setThumb(slot, img, row) {
+    var want = row.thumb || null;
+    if (want === slot.thumbPath) { return; }
+    slot.thumbPath = want;
+    img.hidden = !want;
+    img.classList.remove('arrive');
+    if (!want) { img.removeAttribute('src'); return; }
+    if (!row.thumbSeen && scanRunning() && !REDUCED) { img.classList.add('arrive'); }
+    row.thumbSeen = true;
+    img.src = C.fileUrl(want);
+  }
+
   function paintRow(slot, row) {
     for (var i = 0; i < S.columns.length; i++) {
       var col = S.columns[i];
@@ -371,12 +390,7 @@
       }
       if (cell.textContent !== text) { cell.textContent = text; }
     }
-    var want = row.thumb || null;
-    if (want !== slot.thumbPath) {
-      slot.thumbPath = want;
-      slot.thumb.hidden = !want;
-      if (want) { slot.thumb.src = C.fileUrl(want); } else { slot.thumb.removeAttribute('src'); }
-    }
+    setThumb(slot, slot.thumb, row);
   }
 
   // Where everything sits, for both views. Plain views are arithmetic; a view with groups measures once per change.
@@ -484,7 +498,8 @@
     for (var p = 0; p < S.pool.length; p++) {
       var slot = S.pool[p], at = first + p;
       if (at >= order.length) {
-        if (slot.y !== -2) { slot.el.style.display = 'none'; slot.y = -2; slot.rowId = -1; }
+        // A hidden slot loses its fade: shown again with the same picture, it would play it again.
+        if (slot.y !== -2) { slot.el.style.display = 'none'; slot.y = -2; slot.rowId = -1; slot.thumb.classList.remove('arrive'); }
         continue;
       }
       var row = rows[order[at]], y = yOf(at);
@@ -562,12 +577,7 @@
     slot.el.title = why ? row.path + '\n' + why : row.path;
     // The clip's own colour holds the place until its picture is decoded, so a fast scroll reads as the footage.
     slot.pic.style.background = row.palette && row.palette[0] ? row.palette[0] : '';
-    var want = row.thumb || null;
-    if (want !== slot.thumbPath) {
-      slot.thumbPath = want;
-      slot.img.hidden = !want;
-      if (want) { slot.img.src = C.fileUrl(want); } else { slot.img.removeAttribute('src'); }
-    }
+    setThumb(slot, slot.img, row);
   }
 
   function renderTiles() {
@@ -578,7 +588,7 @@
     for (var s = 0; s < size; s++) {
       var at = first + ((s - first % size) + size) % size, slot = S.tiles[s];
       if (at >= n) {
-        if (slot.y !== -2) { slot.el.style.display = 'none'; slot.y = -2; slot.key = ''; }
+        if (slot.y !== -2) { slot.el.style.display = 'none'; slot.y = -2; slot.key = ''; slot.img.classList.remove('arrive'); }
         continue;
       }
       var row = rows[order[at]], x = 16 + xOf(at), y = yOf(at);
@@ -632,12 +642,13 @@
   // Blank table, plain words. Waiting and nothing-there read differently, because they mean different things.
   function emptyText() {
     if (!S.store.rows.length || S.order.length) { return ''; }
-    var p = S.view.preset ? C.PRESET[S.view.preset] : null, status = C.dataStatus(S.store.rows, S.view.preset, scanRunning());
-    if (S.tokens.length) { return 'Nothing matches ' + C.quoted(S.query.trim()) + '.' + (scanRunning() ? ' Still looking closer, so more may land.' : ''); }
-    if (status === 'waiting') { return (p && p.waiting) || 'Still looking closer at these clips. They land here as they are understood.'; }
-    if (status === 'none') { return p.none; }
-    if (S.view.family) { return 'No ' + C.FAMILY[S.view.family].word.toLowerCase() + ' clips here.'; }
-    if (S.hasGroups) { return p.group === 'engine' ? p.none : 'No clips within ' + C.NEAR_DUP_BITS + ' bits of each other in this scan.'; }
+    var show = S.view.show ? C.SHOW[S.view.show] : null, status = C.dataStatus(S.store.rows, S.view.show, scanRunning());
+    if (S.tokens.length) { return 'Nothing matches ' + C.quoted(S.query.trim()) + '.' + (scanRunning() ? ' Still looking at clips, so more may come.' : ''); }
+    if (status === 'waiting') { return (show && show.waiting) || 'Still looking at these clips. They appear here as they are done.'; }
+    if (status === 'none') { return show.none; }
+    if (S.view.family) { return 'No ' + C.FAMILY[S.view.family].word.toLowerCase() + ' clips' + (show ? ' among ' + show.label.toLowerCase() : '') + '.'; }
+    if (show && show.group) { return show.none; }
+    if (show) { return 'No ' + show.label.toLowerCase() + ' in this scan.'; }
     return 'No clip matches this view.';
   }
 
@@ -708,37 +719,34 @@
     measuredApply();
   }
 
-  function clearView() {
-    changeView({ sort: [], preset: null, family: null });
+  // Show and Sort are separate: changing one keeps the other, and a colour dot stays through both.
+  function pressShow(id) {
+    closePicker();
+    if (S.view.show === id) { return; }
+    changeView({ show: id, sort: S.view.sort, family: S.view.family });
   }
 
-  // Pressing the active preset again puts back the view from before it. A colour family stays through it.
-  function pressPreset(id) {
-    closeSortMenu();
-    if (S.view.preset === id) {
-      var back = S.beforePreset || { sort: [], preset: null };
-      changeView({ sort: back.sort, preset: back.preset, family: S.view.family });
-      S.beforePreset = null;
-      return;
-    }
-    if (!S.view.preset) { S.beforePreset = S.view; }
-    changeView({ sort: C.PRESET[id].sort.slice(), preset: id, family: S.view.family });
+  // Picking the sort that is already on turns it round.
+  function pressSort(key) {
+    closePicker();
+    var now = S.view.sort[0];
+    var sort = key === null ? [] : now && now.key === key && S.view.sort.length === 1 ? [{ key: key, dir: -now.dir }] : [{ key: key, dir: C.naturalDir(key) }];
+    changeView({ show: S.view.show, sort: sort, family: S.view.family });
   }
 
-  // A family narrows whatever is on screen. With no sort yet it brings the rainbow, so Sort into Bins has one to use.
+  function flipSort() {
+    if (!S.view.sort.length) { return; }
+    changeView({ show: S.view.show, sort: S.view.sort.map(function (s, i) { return i ? s : { key: s.key, dir: -s.dir }; }), family: S.view.family });
+  }
+
+  // A colour narrows whatever is on screen. With no sort yet it brings the rainbow, so the colours sit together.
   function pressFamily(id) {
-    var same = S.view.family === id, next = { sort: S.view.sort, preset: S.view.preset, family: same ? null : id };
-    if (!same && !next.sort.length && !next.preset) {
-      next.sort = C.PRESET.colour.sort.slice();
-      next.preset = 'colour';
-    }
-    changeView(next);
+    var same = S.view.family === id;
+    changeView({ show: S.view.show, sort: !same && !S.view.sort.length ? [{ key: 'colorName', dir: 1 }] : S.view.sort, family: same ? null : id });
   }
 
   function headerClick(key, shift) {
-    var p = S.view.preset ? C.PRESET[S.view.preset] : null;
-    var keepPreset = p && (p.filter || p.group) ? S.view.preset : null;
-    changeView({ sort: C.nextSort(S.view.sort, key, shift), preset: keepPreset, family: S.view.family });
+    changeView({ show: S.view.show, sort: C.nextSort(S.view.sort, key, shift), family: S.view.family });
   }
 
   // ---------------------------------------------------------------- search
@@ -759,64 +767,97 @@
     $('search').focus();
   }
 
-  // ---------------------------------------------------------------- the sort row
+  // ---------------------------------------------------------------- Show and Sort
 
-  function closeSortMenu() {
-    $('sort-menu').hidden = true;
-    S.sortMenu = null;
+  function closePicker() {
+    $('picker').hidden = true;
+    if (S.picker) { $(S.picker).setAttribute('aria-expanded', 'false'); }
+    S.picker = null;
   }
 
-  // Counts while there is something to count, waiting while the engine is still on it, and a plain no once it has finished.
-  function menuHint(id) {
+  // A count while there is something to count, a quiet ellipsis while the engine is still on it, a dash once it won't come.
+  // A count still climbing ends in an ellipsis too.
+  function showHint(id) {
     var rows = S.store.rows;
     if (!rows.length) { return ''; }
+    if (id === null) { return fmtInt(rows.length); }
     var status = C.dataStatus(rows, id, scanRunning());
-    if (status === 'waiting') { return 'waiting'; }
-    if (status === 'none') { return 'no data'; }
-    var n = C.presetCount(rows, id);
-    return n === null ? '' : fmtInt(n);
+    if (status === 'waiting') { return '\u2026'; }
+    if (status === 'none') { return '\u2013'; }
+    // A count that can still grow says so, so a 0 mid-scan never reads as an answer.
+    var growing = scanRunning() && (C.SHOW[id].needs || C.SHOW[id].group) && !C.understandingShare(S.store).landed;
+    return fmtInt(C.showCount(rows, id)) + (growing ? '\u2026' : '');
   }
 
-  function openSortMenu(groupId, button) {
-    if (S.sortMenu === groupId) { closeSortMenu(); return; }
-    var group = C.GROUPS.filter(function (g) { return g.id === groupId; })[0], menu = $('sort-menu');
+  function sortHint(entry) {
+    var rows = S.store.rows, now = S.view.sort[0];
+    if (rows.length && C.TIER2_SORT[entry.key]) {
+      var status = C.sortStatus(rows, entry.key, scanRunning());
+      if (status === 'waiting') { return '\u2026'; }
+      if (status === 'none') { return 'no data'; }
+    }
+    var on = now && now.key === entry.key;
+    var way = entry.ways[on && now.dir !== entry.dir ? 1 : 0];
+    return /^[A-Z] /.test(way) ? way : way.toLowerCase();
+  }
+
+  function pickerItem(menu, id, label, hint, on, tip, act) {
+    var b = document.createElement('button'), h = document.createElement('span');
+    b.dataset.id = id;
+    b.setAttribute('role', 'menuitemradio');
+    b.setAttribute('aria-checked', on ? 'true' : 'false');
+    b.className = on ? 'on' : '';
+    b.textContent = label;
+    if (tip) { b.title = tip; }
+    h.textContent = hint;
+    b.appendChild(h);
+    b.onclick = act;
+    menu.appendChild(b);
+    return b;
+  }
+
+  // The menu is rebuilt from the data each time, so its counts climb while a scan runs.
+  function fillPicker(which) {
+    var menu = $('picker'), focused = document.activeElement && document.activeElement.parentNode === menu ? Array.prototype.indexOf.call(menu.children, document.activeElement) : -1;
     menu.textContent = '';
-    group.presets.forEach(function (id) {
-      var p = C.PRESET[id], b = document.createElement('button'), hint = document.createElement('span');
-      b.setAttribute('role', 'menuitem');
-      b.dataset.id = id;
-      b.title = p.tip;
-      b.textContent = p.label;
-      b.classList.toggle('on', S.view.preset === id);
-      hint.textContent = menuHint(id);
-      b.appendChild(hint);
-      b.onclick = function () { pressPreset(id); };
-      menu.appendChild(b);
-    });
-    menu.hidden = false;
-    var rect = button.getBoundingClientRect(), box = $('app').getBoundingClientRect();
-    menu.style.top = rect.bottom - box.top + 6 + 'px';
-    menu.style.left = Math.min(rect.left - box.left - 9, box.width - menu.offsetWidth - 8) + 'px';
-    S.sortMenu = groupId;
-    menu.firstChild.focus();
+    if (which === 'show') {
+      pickerItem(menu, 'everything', 'Everything', showHint(null), !S.view.show, 'Every clip in the scan.', function () { pressShow(null); });
+      var section = null;
+      C.SHOWS.forEach(function (s) {
+        if (s.section !== section) { menu.appendChild(document.createElement('hr')); section = s.section; }
+        pickerItem(menu, s.id, s.label, showHint(s.id), S.view.show === s.id, s.tip, function () { pressShow(s.id); });
+      });
+    } else {
+      var now = S.view.sort[0];
+      pickerItem(menu, 'listed', 'As listed', '', !now, 'The order the clips came in, from the project or the folder.', function () { pressSort(null); });
+      menu.appendChild(document.createElement('hr'));
+      C.SORTS.forEach(function (e) {
+        pickerItem(menu, e.key, e.label, sortHint(e), !!now && now.key === e.key, C.COLUMN[e.key].tip, function () { pressSort(e.key); });
+      });
+    }
+    if (focused >= 0 && menu.children[focused]) { menu.children[focused].focus(); }
   }
 
-  function buildSortRow() {
-    var row = $('presets');
-    var word = function (label, tip) {
-      var b = document.createElement('button');
-      b.className = 'word';
-      b.textContent = label;
-      b.dataset.label = label;
-      b.title = tip;
-      return b;
-    };
-    var colour = word(C.PRESET.colour.label, C.PRESET.colour.tip);
-    colour.dataset.id = 'colour';
-    colour.onclick = function () { pressPreset('colour'); };
-    row.appendChild(colour);
-    var dots = document.createElement('div');
-    dots.id = 'families';
+  function openPicker(which) {
+    if (S.picker === which) { closePicker(); return; }
+    closePicker();
+    var button = $(which), menu = $('picker');
+    S.picker = which;
+    fillPicker(which);
+    menu.hidden = false;
+    button.setAttribute('aria-expanded', 'true');
+    var rect = button.getBoundingClientRect(), box = $('app').getBoundingClientRect();
+    menu.style.top = rect.bottom - box.top + 4 + 'px';
+    menu.style.left = Math.max(8, Math.min(rect.left - box.left - 4, box.width - menu.offsetWidth - 8)) + 'px';
+    var on = menu.querySelector('.on') || menu.querySelector('button');
+    if (on) { on.focus(); }
+  }
+
+  function buildBar() {
+    $('show').onclick = function (e) { e.stopPropagation(); openPicker('show'); };
+    $('sort').onclick = function (e) { e.stopPropagation(); openPicker('sort'); };
+    $('flip').onclick = flipSort;
+    var dots = $('families');
     C.FAMILIES.forEach(function (f) {
       var b = document.createElement('button'), i = document.createElement('i');
       b.dataset.family = f.id;
@@ -826,18 +867,6 @@
       b.onclick = function () { pressFamily(f.id); };
       dots.appendChild(b);
     });
-    row.appendChild(dots);
-    C.GROUPS.forEach(function (g) {
-      var b = word(g.label, g.presets.map(function (id) { return C.PRESET[id].label; }).join(', '));
-      b.dataset.group = g.id;
-      b.setAttribute('aria-haspopup', 'true');
-      b.onclick = function (e) { e.stopPropagation(); openSortMenu(g.id, b); };
-      row.appendChild(b);
-    });
-    var shoot = word(C.PRESET.shoot.label, C.PRESET.shoot.tip);
-    shoot.dataset.id = 'shoot';
-    shoot.onclick = function () { pressPreset('shoot'); };
-    row.appendChild(shoot);
   }
 
   // ---------------------------------------------------------------- selection
@@ -957,8 +986,8 @@
 
   function flushNow() {
     var v = S.view, due = performance.now() - S.lastComputed >= RESORT_EVERY_MS;
-    var grew = S.order.length !== S.store.rows.length && !v.preset && !v.family && !S.tokens.length;
-    if (grew || ((v.sort.length || v.preset || v.family || S.tokens.length) && due)) {
+    var grew = S.order.length !== S.store.rows.length && !v.show && !v.family && !S.tokens.length;
+    if (grew || ((v.sort.length || v.show || v.family || S.tokens.length) && due)) {
       applyView();
     } else {
       renderItems();
@@ -1209,13 +1238,13 @@
   }
 
   function doBins() {
-    var name = C.sortName(S.view);
-    if (!name) { note('Pick a sort first. Bins are built from it.', 'warn'); return Promise.resolve(); }
+    var name = C.viewName(S.view);
+    if (!C.binKind(S.view)) { note(BINS_FIRST, 'warn'); return Promise.resolve(); }
     return runWrite({
       kind: 'bins',
       plan: function (targets) {
         var buckets = C.bucketize(targets.map(function (t) { return t.row; }), S.view);
-        if (!buckets) { note('Pick a sort first. Bins are built from it.', 'warn'); return null; }
+        if (!buckets) { note('Too many different values to make bins from. Choose what to show, or another sort.', 'warn'); return null; }
         var root = 'SELECT ' + C.localDate(new Date()) + ' ' + name;
         var count = targets.length;
         var listed = buckets.map(function (b) { return '<li><span>' + esc(b.name) + '</span><span>' + fmtInt(b.rows.length) + '</span></li>'; }).join('');
@@ -1378,9 +1407,8 @@
     S.store = C.createStore();
     S.scan = null;
     S.outcome = null;
-    S.view = { sort: [], preset: null, family: null };
+    S.view = { show: null, sort: [], family: null };
     S.history = [];
-    S.beforePreset = null;
     S.query = $('search').value = '';
     S.selected.clear();
     S.anchor = null;
@@ -1432,7 +1460,7 @@
 
   function init() {
     applyHostTheme();
-    buildSortRow();
+    buildBar();
 
     var saved = null, folder = null, mode = null;
     try {
@@ -1452,7 +1480,6 @@
     $('folder').addEventListener('input', renderFoot);
     $('scan').onclick = startScan;
     $('stop').onclick = stopScan;
-    $('clear-view').onclick = clearView;
     $('mode-list').onclick = function () { setMode('list'); };
     $('mode-grid').onclick = function () { setMode('grid'); };
     $('search').addEventListener('input', onSearch);
@@ -1480,7 +1507,7 @@
     };
     document.addEventListener('mousedown', function (e) {
       if (!$('menu').hidden && !e.target.closest('#menu') && !e.target.closest('#more')) { closeMenu(); }
-      if (!$('sort-menu').hidden && !e.target.closest('#sort-menu') && !e.target.closest('[data-group]')) { closeSortMenu(); }
+      if (!$('picker').hidden && !e.target.closest('#picker') && !e.target.closest('.pick')) { closePicker(); }
     });
     $('dialog-body').addEventListener('click', function (e) {
       var swatch = e.target.closest('[data-color]'), column = e.target.closest('[data-column]');
@@ -1515,10 +1542,10 @@
 
     document.addEventListener('keydown', function (e) {
       if ((e.metaKey || e.ctrlKey) && e.key === 'f') { e.preventDefault(); $('search').focus(); $('search').select(); return; }
-      if (e.key === 'Escape' && !$('sort-menu').hidden) { closeSortMenu(); return; }
-      if (!$('sort-menu').hidden && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+      if (e.key === 'Escape' && S.picker) { var from = S.picker; closePicker(); $(from).focus(); return; }
+      if (S.picker && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
         e.preventDefault();
-        var inMenu = Array.prototype.slice.call($('sort-menu').children), now = inMenu.indexOf(document.activeElement);
+        var inMenu = Array.prototype.slice.call($('picker').querySelectorAll('button')), now = inMenu.indexOf(document.activeElement);
         inMenu[(now + (e.key === 'ArrowDown' ? 1 : -1) + inMenu.length) % inMenu.length].focus();
         return;
       }

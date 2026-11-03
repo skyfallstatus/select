@@ -14,7 +14,7 @@
     </div>
     <label id="search-box" title="Finds clips by name, what the frames show, words on screen, sounds, camera, lens, shot size and colour. Several words narrow it.">
       <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><circle cx="5" cy="5" r="3.9"/><path d="M8 8l3.1 3.1"/></svg>
-      <input id="search" type="text" spellcheck="false" placeholder="Search" aria-label="Search clips" autocomplete="off">
+      <input id="search" type="text" spellcheck="false" placeholder="Search: guitar, street, Sony" aria-label="Search clips" autocomplete="off">
       <span id="search-count" hidden></span>
       <button id="search-clear" hidden aria-label="Clear search" title="Clear search"><svg width="9" height="9" viewBox="0 0 9 9" aria-hidden="true"><path d="M1 1l7 7M8 1L1 8"/></svg></button>
     </label>
@@ -31,9 +31,11 @@
     <input id="folder" type="text" spellcheck="false" placeholder="Folder to scan" aria-label="Folder to scan">
     <button id="choose" class="link">Choose</button>
   </div>
-  <div id="bar-presets">
-    <div id="presets" role="group" aria-label="Sort"></div>
-    <button id="clear-view" class="link" title="Remove every sort and filter. Changes nothing in the project.">Clear</button>
+  <div id="bar">
+    <button id="show" class="pick" aria-haspopup="menu" aria-expanded="false" title="What to show"><span class="k">Show</span><span class="v">Everything</span><svg class="chev" width="8" height="5" viewBox="0 0 8 5" aria-hidden="true"><path d="M1 1l3 3 3-3"/></svg></button>
+    <button id="sort" class="pick" aria-haspopup="menu" aria-expanded="false" title="How to sort"><span class="k">Sort</span><span class="v">As listed</span><svg class="chev" width="8" height="5" viewBox="0 0 8 5" aria-hidden="true"><path d="M1 1l3 3 3-3"/></svg></button>
+    <button id="flip" class="icon" hidden aria-label="Reverse the sort"><svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M3.5 1.5v9M1 8l2.5 2.5L6 8M8.5 10.5v-9M6 4l2.5-2.5L11 4"/></svg></button>
+    <div id="families" role="group" aria-label="Colour"></div>
     <div id="modes" role="group" aria-label="View">
       <button id="mode-list" class="icon" aria-label="List" title="List"><svg width="14" height="12" viewBox="0 0 14 12" aria-hidden="true"><rect x="0" y="1" width="14" height="1.6" rx=".8"/><rect x="0" y="5.2" width="14" height="1.6" rx=".8"/><rect x="0" y="9.4" width="14" height="1.6" rx=".8"/></svg></button>
       <button id="mode-grid" class="icon" aria-label="Grid" title="Grid"><svg width="14" height="12" viewBox="0 0 14 12" aria-hidden="true"><rect x="0" y="0" width="6" height="5" rx="1.2"/><rect x="8" y="0" width="6" height="5" rx="1.2"/><rect x="0" y="7" width="6" height="5" rx="1.2"/><rect x="8" y="7" width="6" height="5" rx="1.2"/></svg></button>
@@ -61,8 +63,8 @@
         <button id="stop" class="action" hidden>Stop</button>
         <button id="foot-details" class="action" hidden>Details</button>
         <button id="do-label" class="action" hidden title="Set a colour label on the selected rows, or on the current view">Label</button>
-        <button id="do-columns" class="action" hidden title="Write the scores to project metadata, so the Project panel can sort by them">Add Columns</button>
-        <button id="do-bins" class="action" hidden title="Move project items into new numbered bins by the active sort. Files on disk stay where they are">Sort into Bins</button>
+        <button id="do-columns" class="action" hidden title="Writes what Select found into Project panel columns, so Premiere can sort by them">Add Columns</button>
+        <button id="do-bins" class="action" hidden title="Moves these clips into new bins in the Project panel. Files on disk stay where they are.">Sort into Bins</button>
         <button id="undo-write" class="action" hidden>Undo</button>
         <button id="scan" class="action primary" hidden>Scan</button>
       </div>
@@ -74,7 +76,7 @@
     <p id="status-unread" hidden></p>
     <p id="status-note" hidden></p>
   </footer>
-  <div id="sort-menu" role="menu" hidden></div>
+  <div id="picker" role="menu" hidden></div>
   <div id="menu" role="menu" hidden>
     <button role="menuitem" data-menu="rescan">Rescan</button>
     <button role="menuitem" data-menu="columns">Columns…</button>

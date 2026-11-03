@@ -1,6 +1,6 @@
 import Foundation
 
-let schemaVersion = 2
+let schemaVersion = 3
 
 struct CacheEntry {
     var size: Int64

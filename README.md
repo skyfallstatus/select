@@ -6,7 +6,7 @@ A Premiere Pro panel that ranks hundreds of clips in seconds, so you know where 
   <img src="docs/media/demo.png" width="760" alt="An animated illustration of the Select panel with invented clips. The grid of clips sorts itself by colour into rainbow order, a search narrows it down, and a write to the project ends with the bottom of the panel turning green.">
 </p>
 
-Select lives in a panel inside Premiere. Choose your clips, press **Scan**, and every clip gets looked at: three moments for picture, a few short stretches for sound, and the file's own details. Then sort or search. Softest first, darkest, most clipped, people, close-ups, speech, music, steadiest, similar shots, and every clip by colour.
+Select lives in a panel inside Premiere. Choose your clips, press **Scan**, and every clip gets looked at: three moments for picture, a few short stretches for sound, and the file's own details. Then two menus do the rest. **Show** picks which clips: interviews, people, no people, mediums, wides, speech, music, silent, text on screen or similar shots. **Sort** puts them in order: by shoot time, length, sharpness, brightness, highlights, motion, camera shake, loudness, colour or name. The two work together, so *Interviews, longest first* or *People, softest first* is two clicks. A colour dot narrows it again, and search finds what's in the clips.
 
 Everything happens on your Mac. No clip, frame or word leaves it.
 
@@ -22,7 +22,7 @@ Sorting changes nothing. Your project only changes when you press a button that 
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/media/panel-dark.png">
-    <img src="docs/media/panel.png" width="760" alt="The Select panel after a scan, listing clips in rows with columns for their scores, and the sorts along the top.">
+    <img src="docs/media/panel.png" width="760" alt="The Select panel after a scan, listing clips in rows with columns for their scores, sorted softest first, with the Show and Sort menus along the top.">
   </picture>
 </p>
 
@@ -50,25 +50,31 @@ You don't need the Terminal, and you don't need to turn on Adobe's debug mode.
 
 To remove Select, quit Premiere and delete the `com.skyfallstatus.select` folder from `/Library/Application Support/Adobe/CEP/extensions`. macOS asks for your password. Select also remembers its results in `~/Library/Caches/com.skyfallstatus.select`, including thumbnails, file paths and any camera location, so delete that folder too.
 
-## What each sort means
+## Show and Sort
 
 All of these are places to look first. None of them is a verdict on a clip.
 
-- **Softest first, Sharpest first.** Good at finding soft clips. It doesn't rank in-focus clips against each other, so the top of Sharpest first isn't "your best shot". It reads one frame per clip, so a clip that's soft for a moment can slip past, and a plain wall scores low because it has no fine detail.
-- **Darkest.** The average brightness of that one frame. Log footage and night scenes sit low on purpose.
-- **Most clipped.** How much of that one frame hits the top of the range. It can do little on log footage, because log rarely clips. A window or a lamp can account for all of it.
-- **Most motion, Static.** A stand-in, not real motion tracking. It reads how much the compressed frame sizes change along the clip, without looking at a single frame. It's weak on all-intra footage, where every frame is stored whole, and busy detail or a change of light can read as motion.
-- **Silent.** Clips with no audio track, or where the sampled moments are silent. Sound is sampled, not read in full, so sound elsewhere in a clip can be missed.
-- **Interviews.** Speech and a face, and steady where the camera recorded that. It finds likely interviews, not certain ones.
-- **People, No people.** How many people Select saw in the busiest of three moments. It misses people in the dark and undercounts crowds. On 60 real clips it was right about whether anyone was there on 57.
-- **Close-ups, Mediums, Wides.** From the size of the head or body in the frame, on tall frames as well as wide ones. A statue can get a face. On 30 real clips with someone in them it agreed with a person's call on 27. Close-ups are the weak end: it called only 4 of 973. Nearly all of those clips were tall frames, so wide frames are less tested.
-- **Speech, Music.** From six seconds of sound sampled across the clip, so a word or a song elsewhere in it can be missed. Crowd noise can read as speech. We've checked this less than the rest.
-- **Steadiest, Shakiest.** From the camera's own gyro, on the Sony clips that record one. Other clips stay blank. It's measured over about a second and a half of the clip.
+**Show** picks which clips are on screen.
+
+- **Interviews.** Speech heard and a face seen, 15 seconds or longer, and steady where the camera recorded that. Shorter clips with someone talking were nearly always not interviews. On a real event shoot it found 20 clips, and 19 were interviews. It finds likely interviews, not certain ones.
+- **People, No people.** Whether Select saw anyone in three moments of the clip. It misses people in the dark and undercounts crowds. On 60 real clips it was right about whether anyone was there on 57.
+- **Mediums, Wides.** From the size of the head or body in the frame, on tall frames as well as wide ones: medium is someone from about the waist up, or closer; wide is people small in the frame. A statue can get a face. On 30 real clips with someone in them it agreed with a person's call on 27. Nearly all of those clips were tall frames, so wide frames are less tested.
+- **Speech, Music, Silent.** From six seconds of sound sampled across the clip, so a word or a song elsewhere in it can be missed. Crowd noise can read as speech. Silent is clips with no audio track, or silence wherever it was sampled. We've checked sound less than the rest.
 - **Text on screen.** Words on signs and titles. It found about half of what was readable, mostly big clear lettering, and about two words in five are misreads. It's good for finding the shot of the sign.
-- **Colour.** Clips in rainbow order by their main colour, with neutral clips last. It reads log footage through its own curve, so S-Log has real colours here. On 60 real clips it matched what a person would say on 57.
-- **Similar shots.** Groups clips that show the same setup, such as repeated takes, among the clips in one folder. On 973 real clips it made 45 groups. Of 33 we checked, 31 were true repeats, and the two misses were flat textures. The same place from another angle usually stays apart.
-- **Near duplicates.** A strict match on one frame. On those same 973 clips it found only 2 pairs, so Similar shots is the one for repeated takes.
+- **Similar shots.** Groups clips that show the same setup, such as repeated takes, among the clips in one folder, and keeps each group together. On 973 real clips it made 45 groups. Of 33 we checked, 31 were true repeats, and the two misses were flat textures. The same place from another angle usually stays apart.
+
+**Sort** puts them in order. Each starts the useful way round, and the arrows beside it turn it round.
+
 - **Shoot order.** By the time written in the file, then by name. It trusts the camera's clock.
+- **Duration, Loudness.** Longest first, loudest first. Loudness is the average level of the sampled sound.
+- **Sharpness.** Sharpest first, or softest first turned round. Good at finding soft clips. It doesn't rank in-focus clips against each other, so the top isn't "your best shot". It reads one frame per clip, so a clip that's soft for a moment can slip past, and a plain wall scores low because it has no fine detail.
+- **Brightness.** The average brightness of that one frame. Log footage and night scenes sit low on purpose.
+- **Highlights.** How much of that one frame hits the top of the range. It can do little on log footage, because log rarely clips. A window or a lamp can account for all of it.
+- **Motion.** A stand-in, not real motion tracking. It reads how much the compressed frame sizes change along the clip, without looking at a single frame. It's weak on all-intra footage, where every frame is stored whole, and busy detail or a change of light can read as motion.
+- **Camera shake.** Steadiest first, from the camera's own gyro, on the Sony clips that record one. Other clips stay blank at the end. It's measured over about a second and a half of the clip.
+- **Colour.** Clips in rainbow order by their main colour, with neutral clips last. It reads log footage through its own curve, so S-Log has real colours here. On 60 real clips it matched what a person would say on 57. The colour dots show one colour at a time.
+
+**Sort into Bins** follows what's on screen: a bin per colour when sorted by colour, a bin per day in shoot order, a bin per group of similar shots, one bin for a Show such as Interviews, and five bins from top to bottom for the other sorts.
 
 <p align="center">
   <img src="docs/media/panel-sorted.png" width="760" alt="The Select panel after Sort into Bins, with clips sorted softest first. The bottom of the panel is green and says Sorted into 5 bins, 301 clips moved, your files were not touched, with an Undo button.">

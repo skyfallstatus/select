@@ -106,28 +106,34 @@ button:focus-visible, input:focus-visible, #grid:focus-visible { outline: 1.5px 
 #folder::placeholder { color: var(--ink3); }
 #folder:focus { color: var(--ink); }
 
-/* ---- sort row */
-#bar-presets { display: flex; align-items: center; gap: 14px; padding: 6px 11.5px 7px var(--side); flex: none; }
-#presets { display: flex; flex-wrap: wrap; align-items: center; gap: 3px 14px; flex: 1 1 auto; min-width: 0; }
-#clear-view { line-height: 16px; }
-#clear-view.off { visibility: hidden; }
-#modes { display: flex; gap: 0; flex: none; }
+/* ---- the bar: two questions, Show and Sort, then colour. Each reads as words; the menu is under the word. */
+#bar { display: flex; align-items: center; gap: 4px; padding: 3px 11.5px 6px calc(var(--side) - 7px); flex: none; min-width: 0; }
+.pick { display: inline-flex; align-items: baseline; gap: 5px; height: 24px; padding: 4px 7px 0; border-radius: 6px; white-space: nowrap; flex: 0 1 auto; min-width: 0; color: var(--ink2); }
+.pick .k { font-size: 12px; color: var(--ink2); flex: none; }
+.pick .v { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.pick.on .v { color: var(--ink); font-weight: 600; }
+.pick .chev { flex: none; align-self: center; margin-top: -3px; fill: none; stroke: var(--ink2); stroke-width: 1.3; stroke-linecap: round; stroke-linejoin: round; }
+.pick:hover, .pick[aria-expanded="true"] { background: var(--foot); }
+.pick:active { opacity: .7; }
+#flip { margin-left: -4px; }
+#flip svg { fill: none; stroke: var(--ink2); stroke-width: 1.2; stroke-linecap: round; stroke-linejoin: round; }
+#flip:hover { background: var(--foot); }
+#modes { display: flex; gap: 0; flex: none; margin-left: auto; }
 #modes .icon { color: var(--ink2); opacity: .55; }
 #modes .icon.on { color: var(--ink); opacity: 1; }
-/* Colour is data, so it is the one row of colour outside the pictures. An empty family steps back. */
-#families { display: flex; align-items: center; gap: 4px; margin-left: -6px; flex: none; }
+/* Colour is data, so it is the one row of colour outside the pictures. A colour not found yet stays faint, and fills in
+   as the scan finds it. */
+#families { display: flex; align-items: center; gap: 4px; margin-left: 8px; flex: none; }
 #families button { width: 13px; height: 16px; display: flex; align-items: center; justify-content: center; flex: none; }
-#families i { display: block; width: 9px; height: 9px; border-radius: 50%; transition: transform .08s ease-out; }
-#families button.empty i { opacity: .28; }
+#families i { display: block; width: 9px; height: 9px; border-radius: 50%; transition: transform .08s ease-out, opacity .4s ease-out; }
+#families button.empty i { opacity: .24; }
 #families button.on i { box-shadow: 0 0 0 1.5px var(--surface), 0 0 0 2.6px var(--ink2); }
 #families button:active i { transform: scale(.85); }
 @media (max-width: 680px) {
-  #presets { column-gap: 10px; }
-  #presets .word { font-size: 12px; }
-  #bar-presets { gap: 8px; }
-  #families { gap: 1px; margin-left: -4px; }
+  #families { gap: 1px; margin-left: 4px; }
   #families button { width: 10px; }
   #families i { width: 8px; height: 8px; }
+  .pick .k { display: none; }
   #source { gap: 8px; }
   #top { gap: 10px; }
   #subtitle { display: none; }
@@ -177,6 +183,9 @@ button:focus-visible, input:focus-visible, #grid:focus-visible { outline: 1.5px 
 .c-thumb img { display: block; width: 56px; height: 32px; object-fit: cover; border-radius: 4px; outline: .5px solid var(--line); outline-offset: -.5px; }  /* a pale picture keeps its edge */
 .c-thumb::before { content: ""; position: absolute; left: var(--side); top: 4px; width: 56px; height: 32px; border-radius: 4px; background: var(--track); }
 .c-thumb img { position: relative; }
+/* A picture fades in the first time it arrives during a scan. Scrolled back into view, it is simply there. */
+img.arrive { animation: arrive .45s ease-out; }
+@keyframes arrive { from { opacity: 0; } }
 #empty { position: absolute; left: 0; right: 0; top: 72px; text-align: center; color: var(--ink2); font-size: 12px; padding: 0 20px; }
 
 /* ---- grid: a contact sheet. The pictures do the talking, and everything else stays out of their way. */
@@ -188,7 +197,7 @@ button:focus-visible, input:focus-visible, #grid:focus-visible { outline: 1.5px 
 .t.sel .pic { box-shadow: 0 0 0 1.5px var(--surface), 0 0 0 3px var(--ink2); }
 .t .cap { display: flex; align-items: center; gap: 6px; height: 16px; margin-top: 5px; font-size: 12px; white-space: nowrap; color: var(--ink); }
 .t .n { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.t .f { flex: 0 1 auto; min-width: 0; margin-left: auto; overflow: hidden; text-overflow: ellipsis; color: var(--ink2); }
+.t .f { flex: 0 0 auto; max-width: 62%; margin-left: auto; overflow: hidden; text-overflow: ellipsis; color: var(--ink2); }   /* the name gives way first */
 .t .p { flex: 0 0 auto; display: flex; gap: 1px; width: 44px; margin-left: auto; }
 .t.pending .n { color: var(--ink2); }
 .gh { position: absolute; left: var(--side); right: var(--side); height: 24px; text-overflow: ellipsis; padding-top: 8px; font-size: 10.5px; line-height: 14px; letter-spacing: 0; color: var(--ink2); white-space: nowrap; overflow: hidden; }
@@ -239,11 +248,14 @@ button:focus-visible, input:focus-visible, #grid:focus-visible { outline: 1.5px 
 #foot.green #status-note { color: #fff; }
 
 /* ---- the menu hanging from its button */
-#sort-menu { position: absolute; z-index: 8; min-width: 188px; padding: 5px; border-radius: 9px; background: var(--surface); box-shadow: var(--shadow), 0 0 0 .5px var(--line); }
-#sort-menu button { display: flex; align-items: center; justify-content: space-between; gap: 18px; width: 100%; height: 24px; padding: 0 9px; text-align: left; border-radius: 5px; color: var(--ink); white-space: nowrap; }
-#sort-menu button.on { font-weight: 600; }
-#sort-menu button span { color: var(--ink2); font-weight: 400; font-size: 12px; }
-#sort-menu button:hover, #sort-menu button:focus-visible { background: var(--disc); outline: none; }
+#picker { position: absolute; z-index: 8; min-width: 236px; max-height: calc(100% - 90px); overflow: auto; padding: 5px; border-radius: 9px; background: var(--surface); box-shadow: var(--shadow), 0 0 0 .5px var(--line); animation: drop .12s ease-out; }
+#picker button { display: flex; align-items: center; justify-content: space-between; gap: 18px; width: 100%; height: 24px; padding: 0 9px 0 22px; text-align: left; border-radius: 5px; color: var(--ink); white-space: nowrap; position: relative; }
+#picker button.on { font-weight: 600; }
+#picker button.on::before { content: ""; position: absolute; left: 8px; top: 8px; width: 7px; height: 4px; border-left: 1.5px solid var(--ink); border-bottom: 1.5px solid var(--ink); transform: rotate(-45deg); }
+#picker button span { color: var(--ink2); font-weight: 400; font-size: 12px; }
+#picker button:hover, #picker button:focus-visible { background: var(--disc); outline: none; }
+#picker hr { margin: 4px 9px; border: 0; border-top: .5px solid var(--line); }
+@keyframes drop { from { opacity: 0; transform: translateY(-3px); } }
 #menu { position: absolute; top: 34px; right: var(--side); z-index: 8; min-width: 176px; padding: 5px; border-radius: 9px; background: var(--surface); box-shadow: var(--shadow), 0 0 0 .5px var(--line); }
 #menu button { display: block; width: 100%; height: 24px; padding: 0 9px; text-align: left; border-radius: 5px; color: var(--ink); white-space: nowrap; }
 #menu button:hover:not(:disabled), #menu button:focus-visible { background: var(--disc); outline: none; }

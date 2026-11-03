@@ -189,14 +189,14 @@ function familyOf(hue) {
 function tier2Of(plan, shoot, gear, rand, o) {
   const pick = list => list[Math.floor(rand() * list.length)], conf = () => round(.4 + rand() * .59, 2);
   const nothing = { moments: 0, people: null, faces: null, shotSize: null, labels: [], text: [], sounds: o.hasAudio ? [] : null, speech: o.hasAudio ? false : null, music: o.hasAudio ? false : null,
-    iso: null, shutterS: null, aperture: null, whiteBalanceK: null, shake: null, colorHue: null, colorChroma: 0, colorLight: .5, colorName: 'neutral', palette: [] };
+    iso: null, shutterS: null, aperture: null, shake: null, colorHue: null, colorChroma: 0, colorLight: .5, colorName: 'neutral', palette: [] };
   if (o.lost) { return { moments: 0 }; }    // how the engine reports a clip it could not look at
   // With no picture, every picture field is null and sound and camera values stay, as the engine sends it.
   const noPicture = { ...nothing, labels: null, text: null, palette: null, colorHue: null, colorChroma: null, colorLight: null, colorName: null };
   if (o.blank) { return { ...noPicture, sounds: o.hasAudio ? [{ name: 'room tone', conf: .6 }] : null }; }
   if (o.slow) { return { ...noPicture, people: null, faces: null, moments: 0, reason: 'Looking closer at this clip took too long, so it was left out. Its file details and picture scores stand.' }; }
   const figure = plan.kind === 'figure', crowd = plan.kind === 'bokeh' && rand() < .5;
-  const shot = figure ? pick(['closeup', 'closeup', 'medium', 'medium', 'wide']) : (crowd ? 'wide' : null);
+  const shot = figure ? pick(['medium', 'medium', 'medium', 'medium', 'wide']) : (crowd ? 'wide' : null);
   plan.shot = shot;
   const people = figure ? 1 + Math.floor(rand() * rand() * 4) : (crowd ? 5 + Math.floor(rand() * 20) : 0);
   const faces = figure ? (shot === 'wide' ? Math.min(people, 1) : people) : (crowd ? Math.floor(rand() * 4) : 0);
@@ -208,7 +208,7 @@ function tier2Of(plan, shoot, gear, rand, o) {
     labels: [...shoot.labels.slice().sort(() => rand() - .5).slice(0, 3), ...(figure ? ['person'] : [])].map(name => ({ name, conf: conf() })),
     text: rand() < .14 ? [pick(shoot.text)] : [], sounds, speech: o.hasAudio ? voices : null, music: o.hasAudio ? tune : null,
     iso: gear.camera ? pick([100, 400, 800, 1600, 3200, 6400, 12800]) : null, shutterS: gear.camera ? pick([1 / 50, 1 / 100, 1 / 60, 1 / 200]) : null, aperture: gear.lens ? pick([1.4, 2, 2.8, 4, 5.6]) : null,
-    whiteBalanceK: null, shake: gyro ? round(Math.min(1, rand() ** 2.2), 3) : null,
+    shake: gyro ? round(Math.min(1, rand() ** 2.2), 3) : null,
     colorHue: plan.neutral ? null : round(oklabHue(hsl(plan.hue, .8, .5)), 1), colorChroma: round(plan.neutral ? .02 : (plan.log ? .05 + rand() * .08 : .25 + rand() * .55), 3),
     colorLight: round(.25 + rand() * .55, 3), colorName: plan.neutral ? 'neutral' : familyOf(oklabHue(hsl(plan.hue, .8, .5))), palette: []
   };

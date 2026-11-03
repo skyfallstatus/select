@@ -5,7 +5,7 @@
 'use strict';
 const fs = require('fs');
 const path = require('path');
-const { launch, fixture, setDeadline, sleep, OUT, pressPreset } = require('./harness.js');
+const { launch, fixture, setDeadline, sleep, OUT, pickShow, pickSort } = require('./harness.js');
 const { ensureThumbs } = require('./build_fixture.js');
 
 const MEDIA = path.join(__dirname, '../../docs/media');
@@ -57,24 +57,26 @@ async function main() {
   await b.size(STAGE.width, STAGE.height);
 
   await panel(b, 'dark', spread, 'selection');
-  await pressPreset(b, 'colour');
+  await pickSort(b, 'colorName');
   await b.click('#mode-grid');
   await pictures(b);
   await shot(b, 'panel-grid-dark.png');
 
   await panel(b, 'light', spread, 'selection');
-  await pressPreset(b, 'colour');
+  await pickSort(b, 'colorName');
   await b.click('#mode-grid');
   await pictures(b);
   await shot(b, 'panel-grid.png');
 
   await panel(b, 'dark');
   await b.evalIn(`SelectApp.setMode('list')`);
-  await pressPreset(b, 'softest');
+  await pickSort(b, 'sharpness');
+  await b.click('#flip');
   await shot(b, 'panel-dark.png');
 
   await panel(b, 'light');
-  await pressPreset(b, 'softest');
+  await pickSort(b, 'sharpness');
+  await b.click('#flip');
   await shot(b, 'panel.png');
   await b.click('#do-bins');
   await b.waitFor(`!document.getElementById('modal').hidden`);

@@ -27,6 +27,30 @@ function storeFromFixture(records) {
 
 function byOrder(rows, order) { return order.map(i => rows[i]); }
 
+// A view is two questions and a colour: what to show, and in what order.
+const V = over => ({ show: null, sort: [], family: null, ...over });
+const by = (key, dir) => ({ key, dir });
+
+// The engine's similar-shot groups for fixture records, made the way the fake engine makes them.
+function fixtureGroups(records) {
+  const looks = new Map();
+  for (const r of records) {
+    if (!r.error && r.index % 11 <= 2 && r.tier2 && r.tier2.moments) {
+      if (!looks.has(r.look)) { looks.set(r.look, []); }
+      looks.get(r.look).push(r.path);
+    }
+  }
+  return [...looks.values()].filter(g => g.length > 1).map((g, i) => ({ id: i + 1, paths: g }));
+}
+
+// A verdict word may appear in a tip only to deny it, as in "It does not pick the best take."
+const VERDICT = /\b(bad|blurry|out of focus|unusable|ruined|best|better|worst|good|nice|quality)\b/i;
+function noVerdict(text, what) {
+  for (const sentence of String(text).split(/(?<=\.)\s+/)) {
+    if (VERDICT.test(sentence)) { assert.match(sentence, /\b(not|never|no|nothing)\b/, what + ': ' + sentence); }
+  }
+}
+
 function run(env, paths, extra) {
   return new Promise(resolve => {
     const lines = [], bad = [];
@@ -139,7 +163,7 @@ test('re-sort of 1,000 rows, every column, stays inside 16 ms (Node)', () => {
     if (c.sortable === false) { continue; }
     for (const dir of [1, -1]) {
       const t0 = performance.now();
-      const v = C.computeView(s.rows, { sort: [{ key: c.key, dir }, { key: 'name', dir: 1 }], preset: null });
+      const v = C.computeView(s.rows, V({ sort: [{ key: c.key, dir }, { key: 'name', dir: 1 }] }));
       const ms = performance.now() - t0;
       assert.equal(v.order.length, 1000);
       if (ms > worst) { worst = ms; worstKey = c.key; }
@@ -149,107 +173,134 @@ test('re-sort of 1,000 rows, every column, stays inside 16 ms (Node)', () => {
   assert.ok(worst <= 16, `worst sort ${worst} ms on ${worstKey}`);
 });
 
-test('presets on the synthetic fixture', () => {
+test('sorts on the synthetic fixture: every Sort entry, both ways, keeps every clip with empty values last', () => {
   const s = storeFromFixture(fixture), rows = s.rows;
-  const view = id => {
-    const r = C.computeView(rows, { sort: C.PRESET[id].sort, preset: id });
-    return { ...r, list: byOrder(rows, r.order) };
-  };
-  const ascending = (list, key) => { const v = list.map(r => r[key]).filter(x => x !== null && x !== undefined); return v.every((x, i) => !i || v[i - 1] <= x); };
-  const descending = (list, key) => { const v = list.map(r => r[key]).filter(x => x !== null && x !== undefined); return v.every((x, i) => !i || v[i - 1] >= x); };
-  const nullsLast = (list, key) => { const n = list.map(r => r[key] === null || r[key] === undefined); return n.lastIndexOf(false) < (n.indexOf(true) === -1 ? Infinity : n.indexOf(true)); };
+  const field = key => (key === 'createdAt' ? 'time' : key === 'colorName' ? 'rainbow' : key);
+  const known = v => v !== null && v !== undefined && v === v;
+  const collator = new Intl.Collator('en', { numeric: true, sensitivity: 'base' });
+  for (const e of C.SORTS) {
+    for (const dir of [e.dir, -e.dir]) {
+      const list = byOrder(rows, C.computeView(rows, V({ sort: [by(e.key, dir)] })).order);
+      assert.equal(list.length, rows.length, e.key + ' keeps every clip');
+      const f = field(e.key), has = list.map(r => known(r[f]));
+      assert.ok(has.lastIndexOf(true) < (has.indexOf(false) === -1 ? Infinity : has.indexOf(false)), `${e.key} ${dir}: empty values last`);
+      const vals = list.map(r => r[f]).filter(known);
+      assert.ok(vals.length > 10, e.key + ' has values in the fixture');
+      const cmp = e.key === 'name' ? (a, b) => collator.compare(a, b) : (a, b) => a - b;
+      assert.ok(vals.every((x, i) => !i || cmp(vals[i - 1], x) * dir <= 0), `${e.key} ${dir}: in order`);
+    }
+  }
+  const shoot = byOrder(rows, C.computeView(rows, V({ sort: [by('createdAt', 1)] })).order);
+  assert.ok(isNaN(shoot[shoot.length - 1].time), 'undated clips last');
+  // Choosing nothing leaves nothing behind: every row, in the order listed, and no group numbers.
+  const plain = C.computeView(rows, V());
+  assert.deepStrictEqual(plain.order, rows.map((r, i) => i));
+  assert.ok(rows.every(r => r.dupGroup === null));
+});
 
-  assert.ok(ascending(view('softest').list, 'sharpness') && nullsLast(view('softest').list, 'sharpness'));
-  assert.ok(descending(view('sharpest').list, 'sharpness'));
-  assert.ok(ascending(view('darkest').list, 'luma'));
-  assert.ok(descending(view('overexposed').list, 'clipHighPct'));
-  assert.ok(descending(view('motion').list, 'motionProxy'));
-  assert.ok(ascending(view('static').list, 'motionProxy'));
+test('shows on the synthetic fixture: each keeps exactly what it says, in the order listed', () => {
+  const s = storeFromFixture(fixture), rows = s.rows;
+  C.ingest(s, { type: 'groups', groups: fixtureGroups(fixture) });
+  const view = (show, sort) => { const r = C.computeView(rows, V({ show, sort: sort || [] })); return { ...r, list: byOrder(rows, r.order) }; };
+  const descending = (list, key) => { const v = list.map(r => r[key]).filter(x => x !== null && x !== undefined); return v.every((x, i) => !i || v[i - 1] >= x); };
 
   const silent = view('silent').list;
   assert.ok(silent.length > 0 && silent.length < rows.length);
   assert.ok(silent.every(r => r.hasAudio === false || r.silent === true));
   assert.equal(silent.length, rows.filter(r => r.hasAudio === false || r.silent === true).length);
 
-  const iv = view('interviews').list;
-  assert.ok(iv.length > 0);
   const shakes = rows.map(r => r.shake).filter(v => typeof v === 'number').sort((a, b) => a - b);
   const limit = shakes[Math.ceil(shakes.length * 0.6) - 1];
-  assert.ok(iv.every(r => r.speech === true && r.faces > 0 && (typeof r.shake !== 'number' || r.shake <= limit)), 'speech, a face, and steady when shake is known');
+  const interview = r => r.speech === true && r.faces > 0 && r.durationS >= C.INTERVIEW_MIN_S && (typeof r.shake !== 'number' || r.shake <= limit);
+  const iv = view('interviews', [by('durationS', -1)]).list;
+  assert.ok(iv.length > 0);
+  assert.ok(iv.every(interview), 'speech, a face, 15 s or longer, and steady when shake is known');
+  assert.equal(iv.length, rows.filter(interview).length, 'and nothing that qualifies is lost');
   assert.ok(iv.some(r => r.shake === null), 'an unknown shake does not rule a clip out');
+  assert.ok(rows.some(r => r.speech === true && r.faces > 0 && r.durationS < C.INTERVIEW_MIN_S && !iv.includes(r)), 'short talking clips are left out');
   assert.ok(descending(iv, 'durationS'));
 
-  const dup = view('duplicates');
-  assert.ok(dup.groupCount > 0);
-  assert.ok(dup.list.every(r => r.dupGroup !== null));
-  for (let g = 1; g <= dup.groupCount; g++) {
-    const members = dup.list.filter(r => r.dupGroup === g);
-    assert.ok(members.length >= 2);
-    assert.ok(descending(members, 'sharpness'), 'sharpest first in a group');
+  for (const sh of C.SHOWS.filter(x => !x.group)) {
+    const v = view(sh.id);
+    assert.ok(v.order.length > 0, sh.id + ' finds something in the fixture');
+    assert.equal(v.order.length, C.showCount(rows, sh.id), sh.id);
+    assert.ok(v.order.every((x, i) => !i || v.order[i - 1] < x), sh.id + ' keeps the listed order');
+    assert.ok(!v.hasGroups && v.groupCount === 0 && !v.breaks.length, sh.id);
   }
-  const shoot = view('shoot').list;
-  const stamps = shoot.map(r => r.time).filter(t => !isNaN(t));
-  assert.ok(stamps.every((t, i) => !i || stamps[i - 1] <= t));
-  assert.ok(isNaN(shoot[shoot.length - 1].time), 'undated clips last');
 
-  // Leaving a preset leaves nothing behind: the plain view has every row and no group numbers.
-  const plain = C.computeView(rows, { sort: [], preset: null });
-  assert.equal(plain.order.length, rows.length);
-  assert.ok(rows.every(r => r.dupGroup === null));
+  const sim = view('similar', [by('sharpness', -1)]);
+  assert.ok(sim.hasGroups && sim.groupCount > 1);
+  assert.equal(sim.groupCount, s.groups.length);
+  assert.equal(sim.order.length, C.showCount(rows, 'similar'));
+  assert.ok(sim.list.every(r => r.dupGroup !== null));
+  for (let g = 1; g <= sim.groupCount; g++) {
+    const at = sim.list.map((r, i) => (r.dupGroup === g ? i : -1)).filter(i => i >= 0);
+    assert.ok(at.length >= 2);
+    assert.equal(at[at.length - 1] - at[0], at.length - 1, 'a group stays whole');
+    assert.ok(descending(at.map(i => sim.list[i]), 'sharpness'), 'sharpest first in a group');
+    const sent = new Set(s.groups[g - 1].paths);
+    assert.ok(at.every(i => sent.has(sim.list[i].path)), 'groups keep the engine\'s order');
+  }
+  C.computeView(rows, V({ sort: [by('sharpness', -1)] }));
+  assert.ok(rows.every(r => r.dupGroup === null), 'leaving Similar shots leaves no group numbers');
 });
 
-test('presets stay honest: relative words, no verdicts, every tip says what it measures', () => {
-  for (const p of C.PRESETS) {
-    assert.ok(p.tip.length > 40, p.id);
-    assert.ok(p.says, p.id);
-    assert.ok(!/\b(bad|blurry|out of focus|unusable|ruined|best|better|worst|good|nice|quality)\b/i.test(p.tip + p.label + p.says), p.id);
+test('shows and sorts stay honest: relative words, no verdicts, every tip says what it measures', () => {
+  for (const s of C.SHOWS) {
+    assert.ok(s.tip.length > 40, s.id);
+    assert.ok(s.label && s.says, s.id);
+    assert.ok(!VERDICT.test([s.label, s.says, s.none || '', s.waiting || ''].join(' ')), s.id);
+    noVerdict(s.tip, s.id);
+  }
+  for (const e of C.SORTS) {
+    assert.ok(!VERDICT.test(e.label + ' ' + e.ways.join(' ')), e.key);
+    for (const w of e.ways) { assert.match(w, / first$|^Rainbow |^[A-Z] to [A-Z]$/, e.key + ' reads as an order: ' + w); }
+    noVerdict(C.COLUMN[e.key].tip || '', e.key);
   }
   for (const c of C.COLUMNS) {
     assert.ok(!/\b(bad|blurry)\b/i.test((c.tip || '') + (c.words || []).join(' ')), c.key);
   }
+  assert.match(C.SHOW.similar.tip, /does not pick the best take/, 'Similar shots says outright that it picks nothing');
 });
 
-test('hamming and near-duplicate groups', () => {
-  assert.equal(C.hamming('0000000000000000', '0000000000000000'), 0);
-  assert.equal(C.hamming('ffffffffffffffff', '0000000000000000'), 64);
-  assert.equal(C.hamming('8000000000000001', '0000000000000000'), 2);
-  assert.equal(C.hamming(null, '00'), null);
-  const rows = [
-    { dhash: 'ffffffff00000000' }, { dhash: 'ffffffff000000ff' }, { dhash: '00000000ffffffff' }, { dhash: null }, { dhash: 'not hex' },
-    { dhash: '00000000fffffff0' }, { dhash: 'aaaaaaaaaaaaaaaa' }
-  ];
-  assert.deepStrictEqual(C.nearDuplicateGroups(rows, 8), [[0, 1], [2, 5]]);
-  assert.deepStrictEqual(C.nearDuplicateGroups(rows, 0), []);
-  const chain = [{ dhash: '0000000000000000' }, { dhash: '00000000000000ff' }, { dhash: '000000000000ffff' }];
-  assert.deepStrictEqual(C.nearDuplicateGroups(chain, 8), [[0, 1]], 'no chaining through the second clip');
+test('removed: presets, near duplicates, close-ups and white balance are gone, not left half-wired', () => {
+  for (const name of ['PRESETS', 'PRESET', 'GROUPS', 'nearDuplicateGroups', 'hamming', 'NEAR_DUP_BITS', 'sortName', 'viewWords', 'presetCount']) {
+    assert.equal(C[name], undefined, name);
+  }
+  assert.ok(!C.SHOWS.some(s => /close|dup/i.test(s.id + s.label)));
+  assert.ok(!C.SORTS.some(s => s.key === 'dupGroup' || s.key === 'dhash'));
+  assert.equal(C.COLUMN.whiteBalanceK, undefined);
+  const words = C.COLUMNS.map(c => (c.tip || '') + ' ' + c.label).concat(C.SHOWS.map(s => [s.label, s.tip, s.says, s.none, s.waiting].join(' ')), C.SORTS.map(s => s.label + ' ' + s.ways.join(' '))).join(' ');
+  assert.ok(!/near.?duplicate|dhash|close-?up|hamming/i.test(words), 'nothing still speaks of them');
+  assert.equal(C.cellText({ shotSize: 'medium' }, C.COLUMN.shotSize), 'Medium');
+  assert.equal(C.cellText({ shotSize: 'wide' }, C.COLUMN.shotSize), 'Wide');
 });
 
-test('bins: quintiles of the active sort, words follow direction, no value kept apart, every row once', () => {
+test('bins: fifths of a number sort, words follow direction, no value kept apart, every row once', () => {
   const s = storeFromFixture(fixture);
-  const view = { sort: [{ key: 'sharpness', dir: -1 }], preset: null };
+  const view = V({ sort: [by('sharpness', -1)] });
   const v = C.computeView(s.rows, view);
   const list = byOrder(s.rows, v.order);
   const b = C.bucketize(list, view);
   assert.equal(b[0].name, '01 Sharpest');
   assert.equal(b[4].name, '05 Softest');
+  assert.equal(b[5].name, '06 No value');
   assert.equal(b.reduce((n, x) => n + x.rows.length, 0), list.length);
   assert.ok(b.slice(0, 5).every(x => Math.abs(x.rows.length - b[0].rows.length) <= 1));
   assert.ok(Math.min(...b[0].rows.map(r => r.sharpness)) >= Math.max(...b[4].rows.map(r => r.sharpness)));
-  const up = C.bucketize(list, { sort: [{ key: 'sharpness', dir: 1 }], preset: null });
-  assert.equal(up[0].name, '01 Softest');
+  const upView = V({ sort: [by('sharpness', 1)] });
+  const up = C.bucketize(byOrder(s.rows, C.computeView(s.rows, upView).order), upView);
+  assert.deepStrictEqual(up.map(x => x.name), ['01 Softest', '02 Softer', '03 Middle', '04 Sharper', '05 Sharpest', '06 No value']);
   const empties = C.bucketize([{ name: 'a', sharpness: null }, { name: 'b', sharpness: 0.2 }], view);
   assert.deepStrictEqual(empties.map(x => x.name), ['01 Sharpest', '06 No value']);
-  assert.equal(C.bucketize(list, { sort: [], preset: null }), null);
-  assert.equal(C.bucketize(list, { sort: [{ key: 'camera', dir: 1 }], preset: null })[0].name, '01 First fifth');
-  const dv = { sort: C.PRESET.duplicates.sort, preset: 'duplicates' };
-  const d = C.computeView(s.rows, dv);
-  const dups = C.bucketize(byOrder(s.rows, d.order), dv);
-  assert.equal(dups.length, d.groupCount);
-  assert.match(dups[0].name, /^001 Group of \d+$/);
-  assert.equal(C.sortName({ sort: [{ key: 'luma', dir: 1 }], preset: null }), 'Darkest first');
-  assert.equal(C.sortName({ sort: [{ key: 'sharpness', dir: 1 }], preset: null }), 'Softest first');
-  assert.equal(C.sortName({ sort: [{ key: 'camera', dir: 1 }], preset: null }), 'Camera A to Z');
-  assert.equal(C.sortName(dv), 'Near duplicates');
+  const steadyView = V({ sort: [by('shake', C.naturalDir('shake'))] });
+  const steady = C.bucketize(byOrder(s.rows, C.computeView(s.rows, steadyView).order), steadyView);
+  assert.deepStrictEqual(steady.map(x => x.name), ['01 Steadiest', '02 Steadier', '03 Middle', '04 Shakier', '05 Shakiest', '06 No value'], 'shake starts steadiest');
+  assert.equal(C.bucketize(list, V()), null);
+  assert.equal(C.bucketize(list, V({ sort: [by('name', 1)] })), null, 'a name order has nothing to bin by');
+  assert.equal(C.sortWords(by('luma', 1)), 'Darkest first');
+  assert.equal(C.sortWords(by('sharpness', 1)), 'Softest first');
+  assert.equal(C.sortWords(by('camera', 1)), 'Camera A to Z');
 });
 
 test('column values: text order equals number order, and null stays empty', () => {
@@ -264,8 +315,8 @@ test('column values: text order equals number order, and null stays empty', () =
   }
   const v = C.columnValues({ sharpness: null, luma: null, clipHighPct: null, motionProxy: null, audioDb: null }, 7, 4);
   assert.deepStrictEqual(v, { SelectRank: '0007', SelectSharpness: '', SelectLuma: '', SelectClipHigh: '', SelectMotion: '', SelectAudio: '', SelectPeople: '', SelectFaces: '', SelectShot: '', SelectColour: '', SelectSound: '', SelectLabels: '', SelectText: '' });
-  const full = C.columnValues({ people: 12, faces: 0, shotSize: 'closeup', colorName: 'teal', sounds: [{ name: 'speech', conf: 1 }, { name: 'wind', conf: .5 }], labels: [{ name: 'oven', conf: .9 }], text: ['Fresh today'] }, 1, 4);
-  assert.deepStrictEqual([full.SelectPeople, full.SelectFaces, full.SelectShot, full.SelectColour, full.SelectSound, full.SelectLabels, full.SelectText], ['012', '000', 'Close-up', 'Teal', 'speech, wind', 'oven', 'Fresh today']);
+  const full = C.columnValues({ people: 12, faces: 0, shotSize: 'medium', colorName: 'teal', sounds: [{ name: 'speech', conf: 1 }, { name: 'wind', conf: .5 }], labels: [{ name: 'oven', conf: .9 }], text: ['Fresh today'] }, 1, 4);
+  assert.deepStrictEqual([full.SelectPeople, full.SelectFaces, full.SelectShot, full.SelectColour, full.SelectSound, full.SelectLabels, full.SelectText], ['012', '000', 'Medium', 'Teal', 'speech, wind', 'oven', 'Fresh today']);
   assert.equal(C.columnValues({ audioDb: -9 }, 1, 4).SelectAudio, '091.0');
   assert.equal(C.columnValues({ audioDb: -30 }, 1, 4).SelectAudio, '070.0');
   assert.equal(C.columnValues({ clipHighPct: 12.5 }, 1, 4).SelectClipHigh, '012.50');
@@ -490,7 +541,7 @@ test('no picture: Tier 0 stands, it is not an error, and the row says why in qui
   assert.equal(s.noPicture.clips, 1);
   C.ingest(s, { type: 'clip', tier: 1, path: '/v/C0001.MP4', reason });
   assert.equal(s.noPicture.clips, 1, 'one clip counts once');
-  assert.deepStrictEqual(C.computeView(s.rows, { sort: C.PRESET.softest.sort, preset: 'softest' }).order, [0]);
+  assert.deepStrictEqual(C.computeView(s.rows, V({ sort: [by('sharpness', 1)] })).order, [0], 'blank scores still list');
 });
 
 test('no picture: the foot explains it once, and calmly', () => {
@@ -503,10 +554,10 @@ test('no picture: the foot explains it once, and calmly', () => {
   assert.equal(C.noPictureSummary(tally(["This Mac has no decoder for X, and ffmpeg couldn't read it either. Rest.", noDecoder])), "2 clips are listed with blank picture scores: this Mac couldn't decode them.");
   const store = { total: 301, tier0: 301, tier1: 301, errors: 0, bad: 0, noPicture: tally([noDecoder, noDecoder]) };
   const f = C.footState(facts({ store }));
-  assert.equal(f.sentence, "301 clips in 1.8 s. Softest at the top. 2 clips are listed with blank picture scores: this Mac has no decoder for them, and ffmpeg isn't installed.");
+  assert.equal(f.sentence, "301 clips in 1.8 s. 2 clips are listed with blank picture scores: this Mac has no decoder for them, and ffmpeg isn't installed.");
   assert.equal(f.mark, 'done', 'a finished scan, not a failed one');
   assert.equal(f.verdict, 'Softest first');
-  assert.match(C.footState(facts({ store, view: { sort: [], preset: null } })).sentence, /^Took 1\.8 s\. Pick a sort above\. 2 clips are listed/);
+  assert.match(C.footState(facts({ store, view: V() })).sentence, /^Took 1\.8 s\. Choose what to show, or how to sort, above\. 2 clips are listed/);
   assert.equal(C.footState(facts({ store, selected: 4 })).sentence.indexOf('blank'), -1, 'a selection has its own line');
 });
 
@@ -529,12 +580,12 @@ function facts(over) {
   const store = { total: 301, tier0: 301, tier1: 301, errors: 0, bad: 0 };
   return {
     source: 'project', project: { name: 'x', path: '/x' }, connected: true, listing: false, busy: null, outcome: null, store, rows: 301, shown: 301, selected: 0, groupCount: 0,
-    view: { sort: C.PRESET.softest.sort, preset: 'softest' }, scan: { state: 'Done', failure: null, seconds: 1.84, stopping: false }, ...over
+    view: V({ sort: [by('sharpness', 1)] }), scan: { state: 'Done', failure: null, seconds: 1.84, stopping: false }, ...over
   };
 }
 
 test('foot: before scanning', () => {
-  const f = C.footState(facts({ scan: null, rows: 0, shown: 0, view: { sort: [], preset: null } }));
+  const f = C.footState(facts({ scan: null, rows: 0, shown: 0, view: V() }));
   assert.equal(f.kind, 'empty');
   assert.equal(f.mark, 'waiting');
   assert.equal(f.verdict, 'Nothing scanned yet');
@@ -560,19 +611,25 @@ test('foot: finished, with Scan gone from the foot', () => {
   const f = C.footState(facts());
   assert.equal(f.mark, 'done');
   assert.equal(f.verdict, 'Softest first');
-  assert.equal(f.sentence, '301 clips in 1.8 s. Softest at the top.');
+  assert.equal(f.sentence, '301 clips in 1.8 s.');
   assert.deepStrictEqual(f.actions, ['label', 'columns', 'bins']);
   assert.equal(f.primary, 'bins');
   assert.ok(!f.binsOff && !f.green);
-  const unsorted = C.footState(facts({ view: { sort: [], preset: null } }));
+  const unsorted = C.footState(facts({ view: V() }));
   assert.equal(unsorted.verdict, '301 clips read');
-  assert.ok(unsorted.binsOff, 'bins need a sort');
+  assert.equal(unsorted.sentence, 'Took 1.8 s. Choose what to show, or how to sort, above.');
+  assert.ok(unsorted.binsOff, 'bins need a show, a sort or a colour');
   assert.equal(C.footState(facts({ selected: 4 })).sentence, '4 of 301 clips selected. Label, Add Columns and Sort into Bins use these.');
-  const filtered = C.footState(facts({ shown: 12, view: { sort: C.PRESET.silent.sort, preset: 'silent' } }));
-  assert.equal(filtered.sentence, '12 of 301 clips. No audio track, or sampled audio reads as silent.');
-  const groups = C.footState(facts({ shown: 90, groupCount: 30, view: { sort: C.PRESET.duplicates.sort, preset: 'duplicates' } }));
-  assert.equal(groups.sentence, '30 groups, 90 of 301 clips. Similar frames grouped, sharpest first in each.');
-  assert.equal(C.footState(facts({ view: { sort: [{ key: 'luma', dir: -1 }], preset: null } })).sentence, '301 clips in 1.8 s. Brightest at the top.');
+  const filtered = C.footState(facts({ shown: 12, view: V({ show: 'silent' }) }));
+  assert.equal(filtered.verdict, 'Silent');
+  assert.equal(filtered.sentence, '12 of 301 clips. No audio, or silence wherever it was sampled.');
+  assert.ok(!filtered.binsOff);
+  const groups = C.footState(facts({ shown: 90, groupCount: 30, view: V({ show: 'similar', sort: [by('sharpness', -1)] }) }));
+  assert.equal(groups.verdict, 'Similar shots, sharpest first');
+  assert.equal(groups.sentence, '30 groups, 90 of 301 clips. Clips that look alike, side by side.');
+  const bright = C.footState(facts({ view: V({ sort: [by('luma', -1)] }) }));
+  assert.equal(bright.verdict, 'Brightest first');
+  assert.equal(bright.sentence, '301 clips in 1.8 s.');
 });
 
 test('foot: a new source brings Scan back, and the old results stay', () => {
@@ -873,32 +930,36 @@ test('colour: rainbow order, red first, flat clips after vivid ones, neutral las
   list.push({ path: '/v/grey.mp4', colorHue: null, colorName: 'neutral', colorChroma: .01, colorLight: .4 }, { path: '/v/white.mp4', colorHue: null, colorName: 'neutral', colorChroma: .01, colorLight: .9 }, { path: '/v/dark.mp4', colorHue: null, colorName: 'neutral', colorChroma: .01, colorLight: .1 });
   list.push({ path: '/v/later.mp4', skip: true });
   const s = t2Store(list), names = order => order.map(i => s.rows[i].name.replace('.mp4', ''));
-  const v = C.computeView(s.rows, { sort: C.PRESET.colour.sort, preset: 'colour' });
+  const v = C.computeView(s.rows, V({ sort: [by('colorName', 1)] }));
   assert.deepStrictEqual(names(v.order), ['red', 'redhigh', 'orange', 'green', 'blue', 'pink', 'pinklow', 'logred', 'logblue', 'white', 'grey', 'dark', 'later']);
-  const fam = C.computeView(s.rows, { sort: C.PRESET.colour.sort, preset: 'colour', family: 'blue' });
+  const fam = C.computeView(s.rows, V({ sort: [by('colorName', 1)], family: 'blue' }));
   assert.deepStrictEqual(names(fam.order), ['blue', 'logblue'], 'a family filter keeps flat clips of that family');
   assert.deepStrictEqual(C.familyCounts(s.rows).neutral, 3);
   assert.equal(C.cellText(s.rows[s.rows.length - 1], C.COLUMN.colorName), '', 'unknown stays blank');
   assert.equal(C.nextSort([], 'colorName', false)[0].dir, 1, 'the natural way round is the rainbow');
-  assert.equal(C.sortName({ sort: [{ key: 'colorName', dir: 1 }], preset: null }), 'Colour');
+  assert.equal(C.viewName(V({ sort: [by('colorName', 1)] })), 'Rainbow order');
+  assert.equal(C.viewName(V({ sort: [by('colorName', 1)], family: 'blue' })), 'Blue', 'a colour sorted by colour is just the colour');
+  const back = C.computeView(s.rows, V({ sort: [by('colorName', -1)] }));
+  assert.deepStrictEqual(names(back.order), ['dark', 'grey', 'white', 'logblue', 'logred', 'pinklow', 'pink', 'blue', 'green', 'orange', 'redhigh', 'red', 'later'], 'reversed, unknown still last');
+  assert.equal(C.viewName(V({ sort: [by('colorName', -1)] })), 'Rainbow reversed');
 });
 
 test('colour: an all-log shoot is one muted rainbow, not one grey heap', () => {
   const s = t2Store(hues.map(([path, colorHue, colorName]) => ({ path, colorHue, colorName, colorChroma: .06, colorLight: .4 })));
-  const v = C.computeView(s.rows, { sort: C.PRESET.colour.sort, preset: 'colour' });
+  const v = C.computeView(s.rows, V({ sort: [by('colorName', 1)] }));
   assert.deepStrictEqual(v.order.map(i => s.rows[i].colorName), ['red', 'red', 'orange', 'green', 'blue', 'pink', 'pink']);
-  const f = C.bucketize(v.order.map(i => s.rows[i]), { sort: C.PRESET.colour.sort, preset: 'colour' });
+  const f = C.bucketize(v.order.map(i => s.rows[i]), V({ sort: [by('colorName', 1)] }));
   assert.deepStrictEqual(f.map(b => b.name), ['01 Red', '02 Orange', '03 Green', '04 Blue', '05 Pink']);
 });
 
 test('search: every field, several words narrow it, accents and case fold, and a word must start where it says', () => {
   const s = t2Store([
-    { path: '/v/C0148.MP4', camera: 'SONY ILME-FX3', lens: 'FE 24-70mm', labels: [{ name: 'sourdough loaf', conf: .9 }], text: ['Café Lumière'], sounds: [{ name: 'speech', conf: .8 }], shotSize: 'closeup', colorName: 'orange', colorHue: 30, colorChroma: .5, colorLight: .5 },
+    { path: '/v/C0148.MP4', camera: 'SONY ILME-FX3', lens: 'FE 24-70mm', labels: [{ name: 'sourdough loaf', conf: .9 }], text: ['Café Lumière'], sounds: [{ name: 'speech', conf: .8 }], shotSize: 'medium', colorName: 'orange', colorHue: 30, colorChroma: .5, colorLight: .5 },
     { path: '/v/C0200.MP4', camera: 'Canon EOS R5', labels: [{ name: 'harbour', conf: .9 }], text: [], sounds: [{ name: 'water', conf: .8 }], shotSize: 'wide', colorName: 'blue', colorHue: 210, colorChroma: .5, colorLight: .5 },
     { path: '/v/not-yet.MP4', skip: true }
   ]);
-  const find = q => C.computeView(s.rows, { sort: [], preset: null }, null, { tokens: C.searchTokens(q) }).order.map(i => s.rows[i].name);
-  for (const q of ['0148', 'c0148.mp4', 'sourdough', 'loaf', 'cafe', 'LUMIERE', 'speech', 'sony', 'fx3', '24', 'close-up', 'closeup', 'orange']) { assert.deepStrictEqual(find(q), ['C0148.MP4'], q); }
+  const find = q => C.computeView(s.rows, V(), null, { tokens: C.searchTokens(q) }).order.map(i => s.rows[i].name);
+  for (const q of ['0148', 'c0148.mp4', 'sourdough', 'loaf', 'cafe', 'LUMIERE', 'speech', 'sony', 'fx3', '24', 'medium', 'MED', 'orange']) { assert.deepStrictEqual(find(q), ['C0148.MP4'], q); }
   for (const q of ['harbour', 'water', 'canon', 'wide', 'blue']) { assert.deepStrictEqual(find(q), ['C0200.MP4'], q); }
   assert.deepStrictEqual(find('orange speech'), ['C0148.MP4'], 'both words');
   assert.deepStrictEqual(find('orange water'), [], 'several words narrow, they never widen');
@@ -918,7 +979,7 @@ test('search: 1,000 clips, keystroke by keystroke, inside 16 ms, with sort and f
   const s = storeFromFixture(recs);
   let worst = 0;
   for (const word of ['b', 'br', 'bre', 'brea', 'bread', 'bread s', 'bread so', 'sony', 'water wind']) {
-    for (const view of [{ sort: [], preset: null }, { sort: C.PRESET.colour.sort, preset: 'colour' }, { sort: C.PRESET.people.sort, preset: 'people' }]) {
+    for (const view of [V(), V({ sort: [by('colorName', 1)] }), V({ show: 'people', sort: [by('people', -1)] }), V({ show: 'interviews', sort: [by('sharpness', -1)], family: 'red' })]) {
       const t0 = performance.now();
       C.computeView(s.rows, view, null, { tokens: C.searchTokens(word) });
       worst = Math.max(worst, performance.now() - t0);
@@ -930,25 +991,24 @@ test('search: 1,000 clips, keystroke by keystroke, inside 16 ms, with sort and f
 
 test('bins by category: named, numbered in the category\'s order, no value kept apart, every clip once', () => {
   const s = storeFromFixture(fixture);
-  const view = { sort: C.PRESET.colour.sort, preset: 'colour' };
+  const view = V({ sort: [by('colorName', 1)] });
   const list = byOrder(s.rows, C.computeView(s.rows, view).order);
   const b = C.bucketize(list, view);
   assert.deepStrictEqual(b.map(x => x.name.slice(3)), ['Red', 'Orange', 'Yellow', 'Green', 'Teal', 'Blue', 'Purple', 'Pink', 'Neutral', 'No value']);
   assert.ok(b.every((x, i) => x.name.startsWith(String(i + 1).padStart(2, '0') + ' ')));
   assert.equal(b.reduce((n, x) => n + x.rows.length, 0), list.length);
   assert.ok(b[0].rows.every(r => r.colorName === 'red'));
-  const shot = { sort: C.PRESET.shot.sort, preset: 'shot' };
+  const shot = V({ sort: [by('shotSize', C.naturalDir('shotSize'))] });
   const sb = C.bucketize(byOrder(s.rows, C.computeView(s.rows, shot).order), shot);
-  assert.deepStrictEqual(sb.map(x => x.name), ['01 Close-ups', '02 Mediums', '03 Wides', '04 No people', '05 No value']);
+  assert.deepStrictEqual(sb.map(x => x.name), ['01 Medium', '02 Wide', '03 No value'], 'a word column: a bin per value, in sort order');
   assert.deepStrictEqual(C.bucketize([{ colorName: 'blue' }], view).map(x => x.name), ['01 Blue'], 'numbered among what is there');
-  const close = { sort: C.PRESET.closeups.sort, preset: 'closeups' };
-  assert.deepStrictEqual(C.bucketize(byOrder(s.rows, C.computeView(s.rows, close).order), close).map(x => x.name), ['01 Close-ups']);
-  const words = { sort: C.PRESET.onscreen.sort, preset: 'onscreen' };
+  const words = V({ show: 'onscreen' });
   assert.deepStrictEqual(C.bucketize(byOrder(s.rows, C.computeView(s.rows, words).order), words).map(x => x.name), ['01 Text on screen']);
-  const quint = { sort: C.PRESET.people.sort, preset: 'people' };
-  assert.equal(C.bucketize(byOrder(s.rows, C.computeView(s.rows, quint).order), quint)[0].name, '01 Most people', 'a count keeps its quintiles');
-  const header = { sort: [{ key: 'colorName', dir: 1 }], preset: null };
-  assert.equal(C.bucketize(list, header)[0].name, '01 Red', 'a column sort does the same');
+  const quint = V({ sort: [by('people', -1)] });
+  assert.equal(C.bucketize(byOrder(s.rows, C.computeView(s.rows, quint).order), quint)[0].name, '01 Most people', 'a count keeps its fifths');
+  const header = V({ sort: [by('colorName', -1)] });
+  const reversed = C.bucketize(byOrder(s.rows, C.computeView(s.rows, header).order), header);
+  assert.deepStrictEqual(reversed.map(x => x.name), b.map(x => x.name), 'colours keep the rainbow\'s order whichever way the rows run');
 });
 
 test('host: category bins go through the same write, with the same read-back, and a stray stays unproved', () => {
@@ -962,22 +1022,55 @@ test('host: category bins go through the same write, with the same read-back, an
 });
 
 test('groups: arrive last, once, and only for rows the scan knows', () => {
-  const s = t2Store([{ path: '/v/a.mp4' }, { path: '/v/b.mp4' }, { path: '/v/c.mp4' }, { path: '/v/d.mp4' }]);
-  const view = { sort: C.PRESET.similar.sort, preset: 'similar' };
+  const harbour = { labels: [{ name: 'harbour', conf: .9 }] };
+  const s = t2Store([{ path: '/v/a.mp4', ...harbour }, { path: '/v/b.mp4' }, { path: '/v/c.mp4' }, { path: '/v/d.mp4' }, { path: '/v/e.mp4', ...harbour }]);
+  const view = V({ show: 'similar' });
   assert.equal(C.computeView(s.rows, view).order.length, 0, 'nothing before the line');
   assert.equal(C.dataStatus(s.rows, 'similar', true), 'waiting');
   assert.equal(C.dataStatus(s.rows, 'similar', false), 'none');
-  assert.ok(C.ingest(s, { type: 'groups', groups: [{ id: 7, paths: ['/v/c.mp4', '/v/a.mp4'] }, { id: 9, paths: ['/v/b.mp4', '/v/gone.mp4'] }] }));
-  assert.equal(s.rows.length, 4, 'a path the scan does not know adds no row');
+  assert.equal(C.showCount(s.rows, 'similar'), 0);
+  assert.ok(C.ingest(s, { type: 'groups', groups: [{ id: 7, paths: ['/v/c.mp4', '/v/a.mp4', '/v/e.mp4'] }, { id: 9, paths: ['/v/b.mp4', '/v/gone.mp4'] }] }));
+  assert.equal(s.rows.length, 5, 'a path the scan does not know adds no row');
   const v = C.computeView(s.rows, view);
-  assert.deepStrictEqual(v.order.map(i => s.rows[i].name), ['a.mp4', 'c.mp4', 'b.mp4']);
-  assert.equal(v.groupCount, 2);
-  assert.deepStrictEqual(v.breaks.map(b => [b.at, b.count, b.number]), [[0, 2, 1], [2, 1, 2]]);
+  assert.deepStrictEqual(v.order.map(i => s.rows[i].name), ['a.mp4', 'c.mp4', 'e.mp4']);
+  assert.equal(v.groupCount, 1, 'a group the scan knows only one clip of is no group');
+  assert.deepStrictEqual(v.breaks.map(b => [b.at, b.count, b.number]), [[0, 3, 1]]);
   assert.equal(C.dataStatus(s.rows, 'similar', true), 'ok');
-  assert.deepStrictEqual(C.bucketize(v.order.map(i => s.rows[i]), view).map(b => b.name), ['001 Group of 2', '002 Group of 1']);
-  assert.equal(C.presetCount(s.rows, 'similar'), 3);
-  const searched = C.computeView(s.rows, view, null, { tokens: C.searchTokens('c.mp4') });
-  assert.deepStrictEqual(searched.breaks.map(b => b.count), [1], 'a search narrows inside a group');
+  assert.deepStrictEqual(C.bucketize(v.order.map(i => s.rows[i]), view).map(b => b.name), ['01 Similar, 3 clips']);
+  assert.equal(C.showCount(s.rows, 'similar'), 3);
+  const searched = C.computeView(s.rows, view, null, { tokens: C.searchTokens('harbour') });
+  assert.deepStrictEqual(searched.order.map(i => s.rows[i].name), ['a.mp4', 'e.mp4'], 'a search narrows inside a group');
+  assert.deepStrictEqual(searched.breaks.map(b => b.count), [2]);
+  assert.equal(C.computeView(s.rows, view, null, { tokens: C.searchTokens('c.mp4') }).order.length, 0, 'a group searched down to one clip is dropped');
+});
+
+test('similar shots: groups stay whole in engine order, the sort orders inside each, and a colour renumbers what is left', () => {
+  const clip = (n, colorName, sharpness) => ({ path: `/v/s${n}.mp4`, colorName, colorHue: colorName === 'red' ? 25 : 250, colorChroma: .5, colorLight: .5, sharpness });
+  const s = t2Store([clip(1, 'red', .2), clip(2, 'blue', .9), clip(3, 'red', .5), clip(4, 'blue', .1), clip(5, 'blue', .8), clip(6, 'red', .3), clip(7, 'red', .7), clip(8, 'red', .6)]);
+  C.ingest(s, { type: 'groups', groups: [{ id: 1, paths: ['/v/s1.mp4', '/v/s2.mp4', '/v/s3.mp4'] }, { id: 2, paths: ['/v/s4.mp4', '/v/s5.mp4'] }, { id: 3, paths: ['/v/s6.mp4', '/v/s7.mp4'] }] });
+  const run = view => { const v = C.computeView(s.rows, view); return { ...v, names: v.order.map(i => s.rows[i].name.replace('.mp4', '')), groups: v.order.map(i => s.rows[i].dupGroup) }; };
+
+  const sharp = run(V({ show: 'similar', sort: [by('sharpness', -1)] }));
+  assert.deepStrictEqual(sharp.names, ['s2', 's3', 's1', 's5', 's4', 's7', 's6'], 'groups in engine order, sharpest first inside each');
+  assert.deepStrictEqual(sharp.groups, [1, 1, 1, 2, 2, 3, 3]);
+  assert.deepStrictEqual(sharp.breaks.map(b => [b.at, b.count, b.number]), [[0, 3, 1], [3, 2, 2], [5, 2, 3]]);
+  assert.equal(s.rows[7].dupGroup, null, 'a clip in no group is not shown');
+  const soft = run(V({ show: 'similar', sort: [by('sharpness', 1)] }));
+  assert.deepStrictEqual(soft.names, ['s1', 's3', 's2', 's4', 's5', 's6', 's7'], 'flipping the sort flips inside groups, never the groups');
+  assert.deepStrictEqual(run(V({ show: 'similar' })).names, ['s1', 's2', 's3', 's4', 's5', 's6', 's7'], 'no sort: listed order inside each');
+
+  const red = run(V({ show: 'similar', sort: [by('sharpness', -1)], family: 'red' }));
+  assert.deepStrictEqual(red.names, ['s3', 's1', 's7', 's6'], 'the blue group is gone');
+  assert.deepStrictEqual(red.groups, [1, 1, 2, 2], 'and the rest are numbered 1 to n');
+  assert.equal(red.groupCount, 2);
+  assert.deepStrictEqual(red.breaks.map(b => b.number), [1, 2]);
+  assert.equal(s.rows[1].dupGroup, null, 'a clip filtered out has no group number');
+  assert.deepStrictEqual(C.bucketize(red.order.map(i => s.rows[i]), V({ show: 'similar', family: 'red' })).map(b => b.name), ['01 Similar, 2 clips', '02 Similar, 2 clips']);
+  const blue = run(V({ show: 'similar', family: 'blue' }));
+  assert.deepStrictEqual(blue.names, ['s4', 's5'], 'a group filtered down to one clip is dropped');
+  assert.deepStrictEqual(blue.groups, [1, 1]);
+  assert.equal(C.viewName(V({ show: 'similar', sort: [by('sharpness', -1)], family: 'red' })), 'Red, similar shots, sharpest first');
+  assert.equal(C.showCount(s.rows, 'similar'), 7, 'the menu counts every clip in a group, before any colour');
 });
 
 test('tier 2 failure: a line with no moments, as the engine sends it, leaves the clip whole', () => {
@@ -1022,19 +1115,20 @@ test('null stays blank, never 0: every Tier 2 column', () => {
   assert.equal(C.cellText({ shutterS: .02 }, C.COLUMN.shutterS), '1/50');
   assert.equal(C.cellText({ aperture: 2.8 }, C.COLUMN.aperture), 'f/2.8');
   assert.equal(C.cellText({ aperture: 2 }, C.COLUMN.aperture), 'f/2');
-  assert.equal(C.cellText({ shotSize: 'closeup' }, C.COLUMN.shotSize), 'Close-up');
+  assert.equal(C.cellText({ shotSize: 'medium' }, C.COLUMN.shotSize), 'Medium');
   const s = t2Store([{ path: '/v/a.mp4', people: null, faces: null }]);
-  assert.equal(C.computeView(s.rows, { sort: C.PRESET.nopeople.sort, preset: 'nopeople' }).order.length, 0, 'unknown is not no people');
+  assert.equal(C.computeView(s.rows, V({ show: 'nopeople' })).order.length, 0, 'unknown is not no people');
+  assert.equal(C.computeView(s.rows, V({ show: 'people' })).order.length, 0, 'nor people');
 });
 
 test('three stages: rows usable from Tier 1, then the foot says the rest is still running', () => {
   const store = { total: 301, tier0: 301, tier1: 301, errors: 1, tier2: 120, tier2Failed: 0, bad: 0 };
   const scan = { state: 'Scanning', failure: null, seconds: 2, stopping: false };
-  const u = C.footState(facts({ store, scan, view: { sort: C.PRESET.softest.sort, preset: 'softest' } }));
+  const u = C.footState(facts({ store, scan, view: V({ sort: [by('sharpness', 1)] }) }));
   assert.equal(u.kind, 'understanding');
   assert.equal(u.mark, 'running');
   assert.equal(u.verdict, 'Softest first');
-  assert.equal(u.sentence, 'Still looking closer, on this Mac: 120 of 300');
+  assert.equal(u.sentence, 'Finding people, words, sound and colour: 120 of 300');
   assert.ok(u.meter > .39 && u.meter < .41);
   assert.deepStrictEqual(u.actions, ['stop', 'label', 'columns', 'bins'], 'the writes work now, because Tier 1 is in');
   assert.equal(u.primary, 'bins');
@@ -1042,37 +1136,65 @@ test('three stages: rows usable from Tier 1, then the foot says the rest is stil
   assert.equal(C.footState(facts({ store, scan: { ...scan, stopping: true } })).verdict, 'Stopping');
 });
 
-test('a sort with no data says so plainly, a waiting one says waiting', () => {
-  const s = t2Store([{ path: '/v/a.mp4', shake: null }]);
-  assert.equal(C.dataStatus(s.rows, 'steadiest', false), 'none');
-  assert.equal(C.dataStatus(s.rows, 'steadiest', true), 'waiting');
-  assert.equal(C.dataStatus(s.rows, 'softest', false), 'ok');
+test('a choice with no data says so plainly, a waiting one says waiting', () => {
+  const s = t2Store([{ path: '/v/a.mp4', shake: null, people: null, speech: null }]);
+  assert.equal(C.sortStatus(s.rows, 'shake', false), 'none');
+  assert.equal(C.sortStatus(s.rows, 'shake', true), 'waiting');
+  assert.equal(C.sortStatus(s.rows, 'sharpness', false), 'ok');
+  assert.equal(C.sortStatus(s.rows, 'sharpness', true), 'ok');
+  assert.equal(C.sortStatus(s.rows, 'name', false), 'ok');
+  assert.equal(C.sortStatus(s.rows, 'createdAt', false), 'none', 'no date read');
+  assert.equal(C.sortStatus(s.rows, 'colorName', true), 'waiting');
+  assert.equal(C.sortStatus(s.rows, 'nothing-like-it', false), 'ok');
+  C.ingest(s, clipLine('/v/a.mp4', 2, { shake: 0 }));
+  assert.equal(C.sortStatus(s.rows, 'shake', false), 'ok', 'a real 0 is a value');
+  assert.ok(C.TIER2_SORT.shake && C.TIER2_SORT.colorName && !C.TIER2_SORT.sharpness && !C.TIER2_SORT.createdAt && !C.TIER2_SORT.name, 'the Sort menu waits only on what Tier 2 sends');
+
+  assert.equal(C.dataStatus(s.rows, 'people', false), 'none');
+  assert.equal(C.dataStatus(s.rows, 'people', true), 'waiting');
+  assert.equal(C.dataStatus(s.rows, 'interviews', false), 'none');
+  assert.equal(C.dataStatus(s.rows, 'silent', false), 'ok', 'Silent listens to what Tiers 0 and 1 read');
   assert.equal(C.dataStatus(s.rows, null, false), 'ok');
-  const f = C.footState(facts({ status: 'none', view: { sort: C.PRESET.steadiest.sort, preset: 'steadiest' } }));
-  assert.match(f.sentence, /No clip here has gyro data, so there is no shake to sort by\./);
-  assert.equal(C.presetCount(s.rows, 'softest'), null, 'a sort keeps every clip, so it has no count');
+  const f = C.footState(facts({ status: 'none', shown: 0, view: V({ show: 'people' }) }));
+  assert.equal(f.sentence, '0 of 301 clips. No clip has people data, so there is nothing to go on.');
+  assert.equal(C.footState(facts({ status: 'waiting', shown: 0, view: V({ show: 'people' }) })).sentence, '0 of 301 clips. Someone seen in the frames looked at.');
 });
 
 test('foot and tiles: a search says how many and why, and a tile keeps one fact', () => {
-  const q = C.footState(facts({ shown: 12, query: 'red', view: { sort: C.PRESET.softest.sort, preset: 'softest' } }));
-  assert.equal(q.sentence, '12 of 301 clips match “red”. Softest at the top.');
-  assert.equal(C.footState(facts({ shown: 9, view: { sort: C.PRESET.colour.sort, preset: 'colour', family: 'teal' } })).verdict, 'Teal, colour');
+  const q = C.footState(facts({ shown: 12, query: 'red' }));
+  assert.equal(q.sentence, '12 of 301 clips match “red”.');
+  assert.equal(C.footState(facts({ shown: 12, query: 'red', view: V({ show: 'speech' }) })).sentence, '12 of 301 clips match “red”. Speech heard in the audio sampled.');
+  assert.equal(C.footState(facts({ shown: 9, view: V({ sort: [by('colorName', 1)], family: 'teal' }) })).verdict, 'Teal');
   const row = { path: '/v/a.mp4', name: 'a.mp4', durationS: 75, sharpness: .123, labels: [{ name: 'oven', conf: .9 }], nameFold: 'a mp4', error: null };
-  assert.equal(C.tileFact(row, { sort: [], preset: null }), '1:15.0', 'length, with nothing else to say');
-  assert.equal(C.tileFact(row, { sort: C.PRESET.softest.sort, preset: 'softest' }), '0.123', 'what the view is about');
-  assert.equal(C.tileFact(row, { sort: [], preset: null }, ['oven']), 'oven', 'why a search found it');
-  assert.equal(C.tileFact({ ...row, reason: 'x', durationS: null }, { sort: [], preset: null }), 'No picture');
-  assert.equal(C.tileFact({ ...row, path: '/v/a.r3d', error: 'x' }, { sort: [], preset: null }), '.r3d isn\'t supported yet');
+  assert.equal(C.tileFact(row, V()), '1:15.0', 'length, with nothing else to say');
+  assert.equal(C.tileFact(row, V({ sort: [by('sharpness', 1)] })), '0.123', 'what the view is about');
+  assert.equal(C.tileFact(row, V({ show: 'speech' })), '1:15.0', 'a Show alone says the length');
+  assert.equal(C.tileFact(row, V(), ['oven']), 'oven', 'why a search found it');
+  assert.equal(C.tileFact({ ...row, reason: 'x', durationS: null }, V()), 'No picture');
+  assert.equal(C.tileFact({ ...row, path: '/v/a.r3d', error: 'x' }, V()), '.r3d isn\'t supported yet');
 });
 
-test('sort row: every preset has one place, and people and faces are said to be counts', () => {
-  const placed = C.GROUPS.flatMap(g => g.presets).concat(['colour', 'shoot']);
-  assert.equal(new Set(placed).size, placed.length);
-  assert.deepStrictEqual(placed.slice().sort(), C.PRESETS.map(p => p.id).sort());
-  assert.ok(C.GROUPS.length <= 6, 'a short line');
+test('menus: every Show and Sort has one place, sections stay together, and people and faces are said to be counts', () => {
+  assert.deepStrictEqual(C.SHOWS.map(s => s.id), ['interviews', 'people', 'nopeople', 'mediums', 'wides', 'speech', 'music', 'silent', 'onscreen', 'similar']);
+  assert.deepStrictEqual(C.SORTS.map(s => s.key), ['createdAt', 'durationS', 'sharpness', 'luma', 'clipHighPct', 'motionProxy', 'shake', 'audioDb', 'colorName', 'name']);
+  for (const s of C.SHOWS) {
+    assert.equal(C.SHOW[s.id], s);
+    assert.equal(typeof s.filter, s.group ? 'undefined' : 'function', s.id + (s.group ? ' keeps the engine\'s groups, not a filter' : ''));
+    if (s.id !== 'silent') { assert.ok(typeof s.needs === 'function' && s.none, s.id + ' says when there is nothing to go on'); }
+  }
+  assert.deepStrictEqual(C.SHOWS.filter(s => s.group).map(s => s.id), ['similar'], 'only Similar shots groups');
+  assert.ok(C.SHOW.similar.waiting);
+  const sections = C.SHOWS.map(s => s.section).filter((x, i, a) => !i || a[i - 1] !== x);
+  assert.deepStrictEqual(sections, ['people', 'sound', 'picture'], 'each section in one run, so the menu has one rule between each');
+  for (const e of C.SORTS) {
+    assert.equal(C.SORT[e.key], e);
+    assert.ok(C.COLUMN[e.key] && C.COLUMN[e.key].sortable !== false, e.key);
+    assert.ok(e.dir === 1 || e.dir === -1, e.key);
+    assert.ok(e.label, e.key);
+  }
   assert.match(C.COLUMN.people.tip, /count/i);
   assert.match(C.COLUMN.faces.tip, /never who/i);
-  assert.match(C.PRESET.people.tip, /never says who/);
+  assert.ok(!/identif|recogni|\bwho (is|it is)\b/i.test(C.SHOW.people.tip + C.SHOW.people.says), 'People never claims to know who');
   for (const c of C.COLUMNS) { if (c.key !== 'codec' && c.key !== 'thumb') { assert.ok(c.tip, c.key + ' says what it measures'); } }
 });
 
@@ -1087,24 +1209,29 @@ test('fixture: invented Tier 2 with its nulls, flat clips, groups and failures',
 test('writes that need Tier 2 wait for it in stage three, turn on by themselves, and the rest keep working', () => {
   const store = { total: 301, tier0: 301, tier1: 301, errors: 1, tier2: 120, tier2Failed: 0, bad: 0 };
   const scan = { state: 'Scanning', failure: null, seconds: 2, stopping: false };
-  const colour = { sort: C.PRESET.colour.sort, preset: 'colour' };
+  const colour = V({ sort: [by('colorName', 1)] });
   const held = C.footState(facts({ store, scan, view: colour, needsTier2: C.viewNeedsTier2(colour) }));
   assert.deepStrictEqual(held.held, ['label', 'columns', 'bins'], 'held, but still there');
   assert.deepStrictEqual(held.actions, ['stop', 'label', 'columns', 'bins']);
   assert.equal(held.wait, 'Colour needs every clip looked at, so Label, Add Columns and Sort into Bins wait until it is done. They turn on by themselves.');
-  const soft = { sort: C.PRESET.softest.sort, preset: 'softest' };
+  const soft = V({ sort: [by('sharpness', 1)] });
   assert.deepStrictEqual(C.footState(facts({ store, scan, view: soft, needsTier2: C.viewNeedsTier2(soft) })).held, [], 'a Tier 1 sort writes now');
   const landed = { ...store, tier2: 290, tier2Failed: 10 };
   assert.deepStrictEqual(C.footState(facts({ store: landed, scan, view: colour, needsTier2: true })).held, [], 'every clip has landed, so it turns on with nothing pressed');
   assert.ok(C.understandingShare(landed).landed && !C.understandingShare(store).landed);
-  for (const view of [colour, { sort: C.PRESET.people.sort, preset: 'people' }, { sort: C.PRESET.similar.sort, preset: 'similar' }, { sort: [], preset: null, family: 'teal' }, { sort: [{ key: 'shotSize', dir: 1 }], preset: null }]) {
+  for (const view of [colour, V({ show: 'people' }), V({ show: 'interviews', sort: [by('sharpness', -1)] }), V({ show: 'similar' }), V({ family: 'teal' }), V({ sort: [by('shotSize', 1)] }), V({ sort: [by('shake', 1)] })]) {
     assert.ok(C.viewNeedsTier2(view), JSON.stringify(view));
   }
-  assert.ok(C.viewNeedsTier2({ sort: [], preset: null }, ['bread']), 'a search reads Tier 2');
-  for (const view of [soft, { sort: [], preset: null }, { sort: C.PRESET.shoot.sort, preset: 'shoot' }, { sort: [{ key: 'luma', dir: 1 }], preset: null }]) {
+  assert.ok(C.viewNeedsTier2(V(), ['bread']), 'a search reads Tier 2');
+  for (const view of [soft, V(), V({ sort: [by('createdAt', 1)] }), V({ sort: [by('luma', 1)] }), V({ show: 'silent', sort: [by('audioDb', -1)] })]) {
     assert.ok(!C.viewNeedsTier2(view), JSON.stringify(view));
   }
-  assert.match(C.footState(facts({ store, scan, view: { sort: [], preset: null }, query: 'bread', needsTier2: true })).wait, /^This search needs every clip/);
+  const wait = view => C.footState(facts({ store, scan, view, needsTier2: true })).wait;
+  assert.match(C.footState(facts({ store, scan, view: V(), query: 'bread', needsTier2: true })).wait, /^This search needs every clip/);
+  assert.match(wait(V({ show: 'people', sort: [by('sharpness', -1)] })), /^People needs every clip/, 'the Show is named, not the sort');
+  assert.match(wait(V({ show: 'similar', family: 'teal' })), /^Similar shots needs every clip/, 'a Show before a colour');
+  assert.match(wait(V({ family: 'teal' })), /^Teal needs every clip/);
+  assert.match(wait(V({ sort: [by('shake', 1)] })), /^Shake needs every clip/);
 });
 
 test('Add Columns writes Tier 2 fields only once they have landed', () => {
@@ -1126,7 +1253,7 @@ test('a Tier 2 reason is kept apart from Tier 1, shown quietly, and never called
   assert.equal(C.cellText(row, C.COLUMN.colorName), '');
   assert.equal(row.rainbow, null);
   assert.equal(C.matches(row, C.searchTokens('a.mp4')), true, 'null lists do not break search');
-  assert.equal(C.tileFact(row, { sort: [], preset: null }), '0:05.0');
+  assert.equal(C.tileFact(row, V()), '0:05.0');
   assert.ok(C.ingest(s, { type: 'groups', groups: [] }), 'an empty groups line is fine');
   assert.deepStrictEqual(s.groups, []);
   assert.equal(C.dataStatus(s.rows, 'similar', false), 'none');
@@ -1134,13 +1261,294 @@ test('a Tier 2 reason is kept apart from Tier 1, shown quietly, and never called
 
 test('tooltips say only what the engine does', () => {
   assert.equal(C.COLUMN.whiteBalanceK, undefined, 'no white balance: Sony records a mode, not kelvin');
-  const words = C.COLUMNS.map(c => c.tip || '').concat(C.PRESETS.map(p => p.tip + p.says)).join(' ');
+  const words = C.COLUMNS.map(c => c.tip || '').concat(C.SHOWS.map(s => [s.tip, s.says, s.none || ''].join(' ')), C.SORTS.map(s => s.label + ' ' + s.ways.join(' '))).join(' ');
   assert.ok(!/white balance|kelvin|\bWB\b/i.test(words));
   assert.ok(!/less certain|reads flat/i.test(words), 'S-Log is graded before colour is read');
   assert.ok(!/most (cameras|do not)|record none/i.test(words), 'most files carry gyro data');
   assert.match(C.COLUMN.colorName.tip, /S-Log3/);
   assert.match(C.COLUMN.shotSize.tip, /head/);
   assert.match(C.COLUMN.screenText.tip, /four letters/);
+});
+
+test('show and sort combine freely, whichever is chosen first; a colour narrows further, and a search again', () => {
+  const s = storeFromFixture(fixture), rows = s.rows;
+  C.ingest(s, { type: 'groups', groups: fixtureGroups(fixture) });
+  const isSubsequence = (small, big) => { let at = 0; for (const x of big) { if (x === small[at]) { at++; } } return at === small.length; };
+  const sorts = [[by('sharpness', -1)], [by('shake', 1)], [by('colorName', -1)], [by('createdAt', 1)], [by('name', -1)], [by('camera', 1), by('luma', -1)]];
+  for (const sh of C.SHOWS.filter(x => !x.group)) {
+    const kept = C.computeView(rows, V({ show: sh.id })).order;
+    const keep = new Set(kept);
+    for (const sort of sorts) {
+      const both = C.computeView(rows, V({ show: sh.id, sort })).order;
+      const showFirst = C.sortOrder(rows, kept.slice(), sort);
+      const sortFirst = C.computeView(rows, V({ sort })).order.filter(i => keep.has(i));
+      const what = sh.id + ' ' + JSON.stringify(sort);
+      assert.deepStrictEqual(both, showFirst, what + ': show, then sort');
+      assert.deepStrictEqual(both, sortFirst, what + ': sort, then show');
+    }
+  }
+  // Colour, then search, each narrows what the Show and Sort left, and never reorders it.
+  const view = V({ show: 'speech', sort: [by('sharpness', -1)] });
+  const base = C.computeView(rows, view).order;
+  const red = C.computeView(rows, { ...view, family: 'red' }).order;
+  assert.ok(red.length > 0 && red.length < base.length);
+  assert.ok(red.every(i => rows[i].colorName === 'red' && rows[i].speech === true));
+  assert.ok(isSubsequence(red, base), 'a colour keeps the order');
+  const tokens = C.searchTokens('sony');
+  const searched = C.computeView(rows, { ...view, family: 'red' }, null, { tokens }).order;
+  assert.ok(searched.length > 0 && searched.length < red.length, 'the fixture has red speech both on and off the Sony');
+  assert.ok(searched.every(i => C.matches(rows[i], tokens)));
+  assert.ok(isSubsequence(searched, red), 'a search keeps the order');
+  assert.deepStrictEqual(searched, red.filter(i => C.matches(rows[i], tokens)), 'and loses nothing that matches');
+});
+
+test('sort words: each Sort entry starts its own way, and flipping reads the other way', () => {
+  for (const e of C.SORTS) {
+    assert.equal(e.ways.length, 2, e.key);
+    assert.notEqual(e.ways[0], e.ways[1], e.key);
+    assert.equal(C.sortWords(by(e.key, e.dir)), e.ways[0], e.key);
+    assert.equal(C.sortWords(by(e.key, -e.dir)), e.ways[1], e.key);
+    const first = C.nextSort([], e.key, false), flipped = C.nextSort(first, e.key, false);
+    assert.equal(C.sortWords(first[0]), e.ways[0], e.key + ' starts the way the menu says');
+    assert.equal(C.sortWords(flipped[0]), e.ways[1], e.key + ' flips');
+    assert.equal(C.sortWords(C.nextSort(flipped, e.key, false)[0]), e.ways[0], e.key + ' flips back');
+  }
+  const reads = (key, dir) => C.sortWords(by(key, dir));
+  assert.equal(reads('sharpness', -1), 'Sharpest first');
+  assert.equal(reads('sharpness', 1), 'Softest first');
+  assert.equal(reads('shake', 1), 'Steadiest first');
+  assert.equal(reads('shake', -1), 'Shakiest first');
+  assert.equal(reads('colorName', 1), 'Rainbow order');
+  assert.equal(reads('colorName', -1), 'Rainbow reversed');
+  assert.equal(reads('createdAt', 1), 'Earliest first');
+  assert.equal(reads('createdAt', -1), 'Latest first');
+  assert.equal(reads('durationS', -1), 'Longest first');
+  assert.equal(reads('clipHighPct', 1), 'Least clipped first');
+  assert.equal(reads('audioDb', 1), 'Quietest first');
+  assert.equal(reads('name', 1), 'A to Z');
+  assert.equal(reads('name', -1), 'Z to A');
+  // Columns sorted from their header, outside the menu.
+  assert.equal(reads('people', -1), 'Most people first');
+  assert.equal(reads('people', 1), 'Fewest people first');
+  assert.equal(reads('clipLowPct', -1), 'Most crushed first');
+  assert.equal(reads('camera', 1), 'Camera A to Z');
+  assert.equal(reads('camera', -1), 'Camera Z to A');
+  assert.equal(reads('pixels', -1), 'Largest first');
+  assert.equal(reads('pixels', 1), 'Smallest first');
+  assert.equal(reads('iso', -1), 'ISO high to low');
+  assert.equal(reads('iso', 1), 'ISO low to high');
+  for (const c of C.COLUMNS) {
+    if (c.sortable === false) { continue; }
+    const one = reads(c.key, 1), other = reads(c.key, -1);
+    assert.ok(one && other && one !== other, c.key + ' reads both ways');
+    if (c.kind === 'number') { assert.ok(!/A to Z|Z to A/.test(one + other), c.key + ' is a number, so never A to Z'); }
+  }
+});
+
+test('naturalDir: where each column starts, and a header click starts there too', () => {
+  const starts = { shake: 1, createdAt: 1, colorName: 1, sharpness: -1, durationS: -1, luma: -1, clipHighPct: -1, motionProxy: -1, audioDb: -1, people: -1, faces: -1, iso: -1, pixels: -1, clipLowPct: -1, camera: 1, lens: 1, codec: 1, name: 1, shotSize: 1, labelText: 1 };
+  for (const [key, dir] of Object.entries(starts)) { assert.equal(C.naturalDir(key), dir, key); }
+  for (const e of C.SORTS) { assert.equal(C.naturalDir(e.key), e.dir, e.key + ' starts the way the Sort menu does'); }
+  for (const c of C.COLUMNS) {
+    if (c.sortable === false) { continue; }
+    assert.deepStrictEqual(C.nextSort([], c.key, false), [by(c.key, C.naturalDir(c.key))], c.key);
+    assert.deepStrictEqual(C.nextSort([by('name', 1)], c.key === 'name' ? 'luma' : c.key, true)[1], by(c.key === 'name' ? 'luma' : c.key, C.naturalDir(c.key === 'name' ? 'luma' : c.key)), c.key + ' added with shift');
+  }
+  assert.equal(C.sortWords(C.nextSort([], 'shake', false)[0]), 'Steadiest first', 'steadiest is where shake starts');
+  assert.equal(C.sortWords(C.nextSort([], 'createdAt', false)[0]), 'Earliest first', 'shoot order starts at the start');
+  assert.deepStrictEqual(C.nextSort([by('sharpness', -1)], 'shake', false), [by('shake', 1)], 'a new column starts its own way, whatever the last one did');
+});
+
+test('viewName: the whole view in a few words', () => {
+  const name = over => C.viewName(V(over));
+  assert.equal(name({}), '');
+  assert.equal(name({ show: 'interviews' }), 'Interviews');
+  assert.equal(name({ sort: [by('sharpness', -1)] }), 'Sharpest first');
+  assert.equal(name({ family: 'red' }), 'Red');
+  assert.equal(name({ family: 'red', show: 'interviews', sort: [by('sharpness', -1)] }), 'Red, interviews, sharpest first');
+  assert.equal(name({ show: 'speech', sort: [by('name', 1)] }), 'Speech, A to Z');
+  assert.equal(name({ show: 'speech', sort: [by('name', -1)] }), 'Speech, Z to A');
+  assert.equal(name({ family: 'red', sort: [by('colorName', 1)] }), 'Red', 'a colour sorted by colour is just the colour');
+  assert.equal(name({ family: 'red', sort: [by('colorName', -1)] }), 'Red');
+  assert.equal(name({ family: 'red', show: 'interviews', sort: [by('colorName', 1)] }), 'Red, interviews');
+  assert.equal(name({ show: 'interviews', sort: [by('colorName', 1)] }), 'Interviews, rainbow order');
+  assert.equal(name({ sort: [by('colorName', -1)] }), 'Rainbow reversed');
+  assert.equal(name({ family: 'blue', show: 'onscreen' }), 'Blue, text on screen');
+  assert.equal(name({ show: 'speech', sort: [by('camera', 1)] }), 'Speech, camera A to Z');
+  assert.equal(name({ show: 'similar', sort: [by('shake', 1)] }), 'Similar shots, steadiest first');
+  assert.equal(name({ family: 'neutral', sort: [by('createdAt', -1)] }), 'Neutral, latest first');
+  assert.equal(name({ family: 'red', sort: [by('iso', -1)] }), 'Red, ISO high to low', 'a short name in capitals stays in capitals');
+  assert.equal(name({ show: 'people', sort: [by('people', -1)] }), 'People, most people first');
+  assert.equal(name({ sort: [by('sharpness', 1), by('luma', -1)] }), 'Softest first', 'only the first key is named');
+});
+
+test('binKind: what Sort into Bins would make, for every kind of view, and the foot agrees', () => {
+  const cases = [
+    [{ show: 'similar' }, 'groups'],
+    [{ show: 'similar', sort: [by('colorName', 1)] }, 'groups'],
+    [{ show: 'similar', sort: [by('sharpness', -1)], family: 'red' }, 'groups'],
+    [{ sort: [by('colorName', 1)] }, 'colours'],
+    [{ sort: [by('colorName', -1)], show: 'speech' }, 'colours'],
+    [{ sort: [by('colorName', 1)], family: 'red' }, 'colours'],
+    [{ sort: [by('createdAt', 1)] }, 'days'],
+    [{ sort: [by('createdAt', -1)], show: 'people' }, 'days'],
+    [{ sort: [by('camera', 1)] }, 'values'],
+    [{ sort: [by('lens', -1)], show: 'wides' }, 'values'],
+    [{ sort: [by('shotSize', 1)] }, 'values'],
+    [{ show: 'interviews' }, 'one'],
+    [{ show: 'speech', sort: [by('sharpness', -1)] }, 'one'],
+    [{ show: 'speech', sort: [by('name', 1)] }, 'one'],
+    [{ show: 'music', sort: [by('iso', -1)] }, 'one'],
+    [{ family: 'red' }, 'one'],
+    [{ show: 'interviews', family: 'red' }, 'one'],
+    [{ sort: [by('sharpness', -1)] }, 'fifths'],
+    [{ sort: [by('shake', 1)], family: 'red' }, 'fifths'],
+    [{ sort: [by('people', -1)] }, 'fifths'],
+    [{}, null],
+    [{ sort: [by('name', 1)] }, null],
+    [{ sort: [by('iso', -1)] }, null]
+  ];
+  for (const [over, kind] of cases) {
+    const view = V(over), what = JSON.stringify(over);
+    assert.equal(C.binKind(view), kind, what);
+    assert.equal(C.footState(facts({ view })).binsOff, !kind, 'binsOff follows binKind: ' + what);
+  }
+});
+
+test('bucketize: a bin per similar group, per colour in rainbow order, per day, per value', () => {
+  const total = b => b.reduce((n, x) => n + x.rows.length, 0);
+  const g = [1, 1, 1, 2, 2].map((dupGroup, i) => ({ name: 'g' + i, dupGroup }));
+  const groups = C.bucketize(g, V({ show: 'similar', sort: [by('sharpness', -1)] }));
+  assert.deepStrictEqual(groups.map(b => [b.name, b.rows.map(r => r.name)]), [['01 Similar, 3 clips', ['g0', 'g1', 'g2']], ['02 Similar, 2 clips', ['g3', 'g4']]]);
+  const wide = C.bucketize(Array.from({ length: 240 }, (_, i) => ({ name: 'w' + i, dupGroup: 1 + (i >> 1) })), V({ show: 'similar' }));
+  assert.equal(wide.length, 120);
+  assert.equal(wide[0].name, '001 Similar, 2 clips', 'numbers keep one width, so the bins list in order');
+  assert.equal(wide[119].name, '120 Similar, 2 clips');
+
+  const cs = ['blue', 'red', null, 'neutral', 'red', 'teal'].map((colorName, i) => ({ name: 'c' + i, colorName }));
+  for (const dir of [1, -1]) {
+    for (const list of [cs, cs.slice().reverse()]) {
+      const b = C.bucketize(list, V({ sort: [by('colorName', dir)] }));
+      assert.deepStrictEqual(b.map(x => x.name), ['01 Red', '02 Teal', '03 Blue', '04 Neutral', '05 No value'], 'rainbow order whichever way the rows run');
+      assert.ok(b[0].rows.length === 2 && b[0].rows.every(r => r.colorName === 'red'));
+      assert.equal(total(b), cs.length);
+    }
+  }
+  assert.deepStrictEqual(C.bucketize(cs, V({ show: 'speech', sort: [by('colorName', 1)] })).map(x => x.name).slice(0, 1), ['01 Red'], 'a Show sorted by colour bins by colour');
+
+  const day = (name, createdAt) => ({ name, createdAt });
+  const days = [day('a', '2026-10-12T09:00:00Z'), day('b', '2026-10-12T17:30:00Z'), day('c', '2026-10-13T08:00:00Z'), day('d', null)];
+  assert.deepStrictEqual(C.bucketize(days, V({ sort: [by('createdAt', 1)] })).map(b => [b.name, b.rows.length]), [['01 2026-10-12', 2], ['02 2026-10-13', 1], ['03 No value', 1]]);
+  const latest = [days[2], days[1], days[0], days[3]];
+  assert.deepStrictEqual(C.bucketize(latest, V({ sort: [by('createdAt', -1)] })).map(b => b.name), ['01 2026-10-13', '02 2026-10-12', '03 No value'], 'days come in sort order');
+
+  const cams = [{ camera: 'Canon EOS R5' }, { camera: 'SONY ILME-FX3' }, { camera: 'SONY ILME-FX3' }, { camera: null }];
+  assert.deepStrictEqual(C.bucketize(cams, V({ sort: [by('camera', 1)] })).map(b => [b.name, b.rows.length]), [['01 Canon EOS R5', 1], ['02 SONY ILME-FX3', 2], ['03 No value', 1]]);
+  const shots = [{ shotSize: 'medium' }, { shotSize: 'medium' }, { shotSize: 'wide' }, { shotSize: null }];
+  assert.deepStrictEqual(C.bucketize(shots, V({ sort: [by('shotSize', 1)] })).map(b => b.name), ['01 Medium', '02 Wide', '03 No value']);
+
+  const many = n => Array.from({ length: n }, (_, i) => ({ name: 'm' + i, camera: 'Cam ' + (i + 1) }));
+  const twenty = C.bucketize(many(20).concat({ name: 'x', camera: null }), V({ sort: [by('camera', 1)] }));
+  assert.equal(twenty.length, 21, 'twenty values make twenty bins, and no value one more');
+  assert.equal(twenty[0].name, '01 Cam 1');
+  assert.equal(twenty[19].name, '20 Cam 20');
+  assert.equal(twenty[20].name, '21 No value');
+  assert.equal(C.bucketize(many(21), V({ sort: [by('camera', 1)] })), null, 'more than twenty values make no bins');
+  assert.equal(C.bucketize(many(21), V({ sort: [by('camera', 1)], family: 'red' })), null, 'a colour does not rescue them');
+  const fallback = C.bucketize(many(21), V({ show: 'speech', sort: [by('camera', 1)] }));
+  assert.deepStrictEqual(fallback.map(b => [b.name, b.rows.length]), [['01 Speech', 21]], 'with a Show on, they make one bin of it');
+});
+
+test('bucketize: one bin for a Show or a colour alone, fifths for a number sort, none for a name or nothing', () => {
+  const rows = [{ name: 'a', durationS: 3 }, { name: 'b', durationS: 9 }, { name: 'c', durationS: 1 }];
+  for (const [over, name] of [[{ show: 'interviews' }, '01 Interviews'], [{ show: 'onscreen', sort: [by('sharpness', -1)] }, '01 Text on screen'], [{ show: 'interviews', family: 'red' }, '01 Interviews'], [{ family: 'red' }, '01 Red'], [{ show: 'silent', sort: [by('name', 1)] }, '01 Silent']]) {
+    const b = C.bucketize(rows, V(over));
+    assert.equal(b.length, 1, JSON.stringify(over));
+    assert.equal(b[0].name, name);
+    assert.deepStrictEqual(b[0].rows, rows, 'every clip, in view order');
+  }
+  const durations = [10, 9, 8, 7, 6, 5, 4, 3, 2, 1].map(d => ({ name: 'd' + d, durationS: d })).concat([{ name: 'n1', durationS: null }, { name: 'n2', durationS: null }]);
+  const longest = C.bucketize(durations, V({ sort: [by('durationS', -1)] }));
+  assert.deepStrictEqual(longest.map(b => [b.name, b.rows.map(r => r.durationS)]), [['01 Longest', [10, 9]], ['02 Longer', [8, 7]], ['03 Middle', [6, 5]], ['04 Shorter', [4, 3]], ['05 Shortest', [2, 1]], ['06 No value', [null, null]]]);
+  const shortest = C.bucketize(durations.slice(0, 10).reverse().concat(durations.slice(10)), V({ sort: [by('durationS', 1)] }));
+  assert.deepStrictEqual(shortest.map(b => b.name), ['01 Shortest', '02 Shorter', '03 Middle', '04 Longer', '05 Longest', '06 No value']);
+  assert.deepStrictEqual(C.bucketize([{ durationS: 9 }, { durationS: 5 }, { durationS: 1 }], V({ sort: [by('durationS', -1)] })).map(b => b.name), ['01 Longest', '02 Longer', '04 Shorter'], 'with fewer clips than bins, each keeps its own word and number');
+  assert.equal(C.bucketize(rows, V()), null);
+  assert.equal(C.bucketize(rows, V({ sort: [by('name', 1)] })), null);
+  assert.equal(C.bucketize(rows, V({ sort: [by('iso', -1)] })), null, 'a number with no words has no fifths to name');
+});
+
+test('interviews: speech and a face for 15 seconds or more; a shorter talking clip is not an interview', () => {
+  assert.equal(C.INTERVIEW_MIN_S, 15);
+  const clip = (name, over) => ({ name, speech: true, faces: 1, durationS: 60, shake: null, ...over });
+  const rows = [clip('at14.9', { durationS: 14.9 }), clip('at15', { durationS: 15 }), clip('long', { durationS: 600 }), clip('nospeech', { speech: false }), clip('unheard', { speech: null }),
+    clip('noface', { faces: 0 }), clip('unseen', { faces: null }), clip('nolength', { durationS: null })];
+  const names = view => C.computeView(rows, view).order.map(i => rows[i].name);
+  assert.deepStrictEqual(names(V({ show: 'interviews' })), ['at15', 'long']);
+  assert.equal(C.showCount(rows, 'interviews'), 2);
+  assert.deepStrictEqual(names(V({ show: 'speech' })).slice(0, 3), ['at14.9', 'at15', 'long'], 'a short clip with speech is still speech');
+  // Steadier where the camera recorded its movement: the steadiest 60 percent of known shakes, and unknown shake stays.
+  const steady = [.1, .2, .3, .4, .5].map((shake, i) => clip('s' + i, { shake })).concat(clip('nogyro', { shake: null }), clip('short-steady', { shake: 0, durationS: 14.9 }));
+  assert.deepStrictEqual(C.computeView(steady, V({ show: 'interviews' })).order.map(i => steady[i].name), ['s0', 's1', 's2', 'nogyro']);
+  assert.match(C.SHOW.interviews.says, /15 seconds or longer/);
+  assert.match(C.SHOW.interviews.tip, /15 seconds or longer/);
+});
+
+test('showCount: what each Show would leave, Similar shots included', () => {
+  const rows = [
+    { name: 'iv', speech: true, faces: 1, people: 1, durationS: 30, shake: null, shotSize: 'medium', music: false, hasAudio: true, silent: false, text: ['OPEN'], similar: 1 },
+    { name: 'short', speech: true, faces: 1, people: 2, durationS: 5, shotSize: 'wide', music: true, hasAudio: true, silent: false, text: [], similar: 1 },
+    { name: 'empty', speech: false, faces: 0, people: 0, durationS: 30, shotSize: null, music: false, hasAudio: false, silent: null, text: [], similar: 2 },
+    { name: 'quiet', speech: false, faces: 0, people: 0, durationS: 30, shotSize: null, music: false, hasAudio: true, silent: true, text: null },
+    { name: 'unknown', speech: null, faces: null, people: null, durationS: 30, shotSize: null, music: null, hasAudio: true, silent: null, text: null, similar: 3 },
+    { name: 'pair', speech: false, faces: 0, people: 0, durationS: 30, shotSize: null, music: false, hasAudio: true, silent: false, text: [], similar: 3 }
+  ];
+  const expected = { interviews: 1, people: 2, nopeople: 3, mediums: 1, wides: 1, speech: 2, music: 1, silent: 2, onscreen: 1, similar: 4 };
+  assert.deepStrictEqual(Object.keys(expected).sort(), C.SHOWS.map(s => s.id).sort(), 'every Show is counted here');
+  for (const [id, n] of Object.entries(expected)) {
+    assert.equal(C.showCount(rows, id), n, id);
+    assert.equal(C.computeView(rows, V({ show: id })).order.length, n, id + ': the count is what the Show then shows');
+  }
+  assert.equal(C.showCount([], 'similar'), 0);
+  assert.equal(C.showCount([], 'interviews'), 0);
+});
+
+test('foot wording: the verdict names the view, and a finished sentence says what a Show keeps', () => {
+  const say = over => C.footState(facts(over));
+  assert.equal(say({ view: V() }).verdict, '301 clips read');
+  assert.equal(say({ view: V() }).sentence, 'Took 1.8 s. Choose what to show, or how to sort, above.');
+  assert.equal(say({ view: V(), scan: { state: 'Done', failure: null, seconds: 12.4, stopping: false } }).sentence, 'Took 12 s. Choose what to show, or how to sort, above.');
+  const sorted = say({ view: V({ sort: [by('shake', 1)] }), scan: { state: 'Done', failure: null, seconds: 3.21, stopping: false } });
+  assert.equal(sorted.verdict, 'Steadiest first');
+  assert.equal(sorted.sentence, '301 clips in 3.2 s.', 'a sort alone keeps every clip, so the head is all there is to say');
+  const all = say({ view: V({ show: 'speech' }) });
+  assert.equal(all.sentence, '301 clips in 1.8 s. Speech heard in the audio sampled.');
+  const full = say({ shown: 4, view: V({ show: 'interviews', sort: [by('sharpness', -1)], family: 'red' }) });
+  assert.equal(full.verdict, 'Red, interviews, sharpest first');
+  assert.equal(full.sentence, '4 of 301 clips. Speech and a face, 15 seconds or longer.');
+  for (const s of C.SHOWS.filter(x => !x.group)) {
+    assert.equal(say({ shown: 7, view: V({ show: s.id }) }).sentence, '7 of 301 clips. ' + s.says, s.id);
+    if (s.none) { assert.equal(say({ shown: 7, view: V({ show: s.id }), status: 'none' }).sentence, '7 of 301 clips. ' + s.none, s.id + ' with nothing to go on'); }
+    assert.equal(say({ shown: 7, view: V({ show: s.id }) }).verdict, s.label);
+  }
+  assert.equal(say({ shown: 0, groupCount: 0, view: V({ show: 'similar' }), status: 'none' }).sentence, '0 groups, 0 of 301 clips. No similar shots in this scan.');
+  assert.equal(say({ shown: 7, groupCount: 3, view: V({ show: 'similar', family: 'teal' }) }).sentence, '3 groups, 7 of 301 clips. Clips that look alike, side by side.');
+  const teal = say({ shown: 9, view: V({ family: 'teal' }) });
+  assert.equal(teal.verdict, 'Teal');
+  assert.equal(teal.sentence, '9 of 301 clips.');
+  assert.ok(!teal.binsOff);
+  assert.ok(say({ view: V({ sort: [by('name', 1)] }) }).binsOff, 'a name order makes no bins');
+  assert.equal(say({ view: V({ sort: [by('name', 1)] }) }).verdict, 'A to Z');
+
+  const store = { total: 301, tier0: 301, tier1: 301, errors: 1, tier2: 120, tier2Failed: 0, bad: 0 };
+  const scan = { state: 'Scanning', failure: null, seconds: 2, stopping: false };
+  const stage3 = view => C.footState(facts({ store, scan, view }));
+  assert.equal(stage3(V()).verdict, '301 clips read');
+  assert.ok(stage3(V()).binsOff);
+  assert.equal(stage3(V()).sentence, 'Finding people, words, sound and colour: 120 of 300');
+  assert.equal(stage3(V({ show: 'similar', family: 'teal' })).verdict, 'Teal, similar shots');
+  assert.ok(!stage3(V({ show: 'similar' })).binsOff);
+  assert.match(stage3(V({ show: 'interviews' })).sentence, /^Finding people, words, sound and colour: /);
 });
 
 test('public: the panel carries nothing private, and asks nothing of the network', () => {

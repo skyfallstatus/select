@@ -243,7 +243,6 @@ func blankTier2Fields(_ reason: String?) -> String {
     f.add("speech", nil as Bool?)
     f.add("music", nil as Bool?)
     for k in ["shutterS", "aperture", "shake", "colorHue", "colorChroma", "colorLight"] { f.add(k, nil as Double?) }
-    f.add("whiteBalanceK", nil as Int?)
     f.add("colorName", nil as String?)
     if let reason { f.add("reason", reason) }
     return f.joined

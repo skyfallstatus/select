@@ -243,7 +243,6 @@ func tier2(path: String, plan: ClipPlan, pool: DecoderPool, worker: Tier2Worker,
     out.add("iso", rtmd.iso)
     out.add("shutterS", rtmd.shutterS, 6)
     out.add("aperture", rtmd.aperture, 2)
-    out.add("whiteBalanceK", nil as Int?)
     out.add("shake", rtmd.shakeDegPerS.map(shakeScore), 3)
 
     // Colour.
@@ -280,8 +279,8 @@ func peopleBoxes(_ v: FrameVision) -> [CGRect] {
 func countPeople(_ v: FrameVision) -> Int { max(peopleBoxes(v).count, countFaces(v) > 0 ? 1 : 0) }
 
 /// Head height against frame height, in the display orientation, which reads the same on a tall frame as a wide one. Calibrated
-/// on real clips, most of them portrait: this puts head-to-knee framing in medium.
-private let closeupFace: CGFloat = 0.25
+/// on real clips, most of them portrait: this puts head-to-knee framing in medium. There is no close-up: on real footage it
+/// almost never came up, so a tight face is medium too.
 private let mediumFace: CGFloat = 0.12
 private let smallestMediumFace: CGFloat = 0.07
 private let mediumBody: CGFloat = 0.75
@@ -293,7 +292,6 @@ private func shotSize(_ v: FrameVision) -> String? {
     let bodies = peopleBoxes(v)
     let cutOff = bodies.contains { $0.minY <= frameBottom && $0.height >= cutOffBody }
     if let face = v.faces.map(\.height).filter({ $0 >= smallestFace }).max() {
-        if face >= closeupFace { return "closeup" }
         return face >= mediumFace || (cutOff && face >= smallestMediumFace) ? "medium" : "wide"
     }
     guard let body = bodies.map(\.height).max() else { return nil }
@@ -304,7 +302,7 @@ private func shotSize(_ v: FrameVision) -> String? {
 func shotSize(_ seen: [FrameVision]) -> String? {
     var votes: [String: Int] = [:]
     for v in seen { if let s = shotSize(v) { votes[s, default: 0] += 1 } }
-    return ["closeup", "medium", "wide"].max { votes[$0, default: 0] < votes[$1, default: 0] }.flatMap { votes[$0] == nil ? nil : $0 }
+    return ["medium", "wide"].max { votes[$0, default: 0] < votes[$1, default: 0] }.flatMap { votes[$0] == nil ? nil : $0 }
 }
 
 func chooseLabels(_ seen: [FrameVision]) -> [(name: String, conf: Double)] {
