@@ -19,7 +19,20 @@ Select is in beta. Sorting changes nothing, but try the buttons that write to yo
 
 ## Install
 
-Get **Select.pkg** from the [latest release](https://github.com/skyfallstatus/select/releases/latest). You need macOS 13 or later and Premiere Pro 2023 or later.
+### Requirements
+
+- **macOS** 13 Ventura or later
+- **Mac** with Apple silicon, or Intel (untested so far)
+- **Premiere Pro** 2023 (version 23) or later
+- **Footage:** MP4 and MOV. MXF needs [ffmpeg](https://ffmpeg.org).
+- **Windows** isn't supported.
+
+So far it has been tested on Premiere 26.5 with an Apple silicon Mac.
+
+### Steps
+
+Get **Select.pkg** from the [latest release](https://github.com/skyfallstatus/select/releases/latest).
+
 
 1. Open `Select.pkg`. macOS says it can't be opened. Click **Done**.
 2. Go to **System Settings › Privacy & Security**, scroll down, and click **Open Anyway** next to Select.
