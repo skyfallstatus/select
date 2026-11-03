@@ -51,7 +51,7 @@ Then create the repository, and push. The Mac's git name and email go into every
    export ZXPSIGNCMD=/path/to/ZXPSignCmd
    ```
 
-   `ZXPSignCmd` takes the password on its command line, so it's visible to other processes on the Mac while it runs. `ZXP_TSA` picks another timestamp server if the default fails.
+   `ZXPSignCmd` takes the password on its command line, so it's visible to other processes on the Mac while it runs. `ZXP_TSA` picks another timestamp server if the default, Apple's, fails. `http://timestamp.identrust.com` also works. DigiCert, Sectigo, GlobalSign, SSL.com, Entrust and Microsoft were all refused by `ZXPSignCmd` 4.1.3 on 3 Nov 2026: it couldn't verify their timestamps.
 
 4. Rehearse:
 

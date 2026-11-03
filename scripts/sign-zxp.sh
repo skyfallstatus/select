@@ -13,7 +13,9 @@ source ./product.conf
 IN=dist/$BUNDLE_ID
 ZXP=dist/$NAME.zxp
 SIGNED=dist/signed/$BUNDLE_ID
-TSA=${ZXP_TSA:-http://timestamp.digicert.com}
+# ZXPSignCmd 4.1.3 checks the timestamp against the Mac's own trust store. On 3 Nov 2026 it refused DigiCert, Sectigo,
+# GlobalSign, SSL.com, Entrust and Microsoft, and accepted Apple and IdenTrust (http://timestamp.identrust.com).
+TSA=${ZXP_TSA:-http://timestamp.apple.com/ts01}
 
 TOOL=${ZXPSIGNCMD:-$(command -v ZXPSignCmd || true)}
 [[ -n $TOOL && -x $TOOL ]] || refuse "ZXPSignCmd isn't here, so nothing was signed. Get it from https://github.com/Adobe-CEP/CEP-Resources/tree/master/ZXPSignCMD and set ZXPSIGNCMD to its path. docs/RELEASING.md has the steps."
