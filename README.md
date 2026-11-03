@@ -33,7 +33,6 @@ So far it has been tested on Premiere 26.5 with an Apple silicon Mac.
 
 Get **Select.pkg** from the [latest release](https://github.com/skyfallstatus/select/releases/latest).
 
-
 1. Open `Select.pkg`. macOS says it can't be opened. Click **Done**.
 2. Go to **System Settings › Privacy & Security**, scroll down, and click **Open Anyway** next to Select.
 3. Follow the installer.
