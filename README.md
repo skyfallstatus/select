@@ -15,7 +15,7 @@ Press **Scan** and Select looks at every clip: the picture, the sound and the ca
   </picture>
 </p>
 
-Select is in beta. Sorting changes nothing, but try the buttons that write to your project on a copy first.
+Select is in beta, so try it on a copy of your project first.
 
 ## Install
 
