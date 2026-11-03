@@ -264,7 +264,7 @@
 
   // ---------------------------------------------------------------- the status tucks away while the clips scroll
 
-  var lastTop = 0, tuckedAt = 0;
+  var lastTop = 0, tuckedAt = 0, tuckLater = null;
   function tuck(on) {
     if (!!S.tucked === on) { return; }
     S.tucked = on;
@@ -275,9 +275,15 @@
   // Down through the clips tucks a calm status away; any way up brings it back. Nothing tucks while a scan or a write
   // has something to say, and a short list never tucks, so the grid's own resize can't bounce it.
   function onScrollTuck() {
-    var grid = $('grid'), top = grid.scrollTop, delta = top - lastTop;
+    var grid = $('grid'), top = grid.scrollTop, delta = top - lastTop, since = performance.now() - tuckedAt;
     lastTop = top;
-    if (performance.now() - tuckedAt < 320) { return; }
+    // Too soon after the last change, which also lets the grid's own resize settle. A quick flick back to the top
+    // would leave the status away with no scroll left to bring it back, so the top is looked at again after the wait.
+    if (since < 320) {
+      clearTimeout(tuckLater);
+      tuckLater = setTimeout(function () { if ($('grid').scrollTop < 8) { tuck(false); } }, 320 - since);
+      return;
+    }
     if (top < 8 || delta < -6) { tuck(false); return; }
     if (S.calm && delta > 4 && top > 48 && grid.scrollHeight - grid.clientHeight > 240) { tuck(true); }
   }
@@ -853,6 +859,13 @@
 
   function closeSearchIfEmpty() {
     if (!S.query) { $('search-box').classList.remove('open'); $('toolbar').classList.remove('searching'); }
+  }
+
+  // Closing the search brings the toolbar's small words back and moves its buttons, so it waits for a press to end: the
+  // click that closes it still lands on what was under the pointer when it went down.
+  var pressing = false, closeAfterPress = false;
+  function closeSearchSoon() {
+    if (pressing) { closeAfterPress = true; } else { closeSearchIfEmpty(); }
   }
 
   function clearSearch() {
@@ -1711,7 +1724,7 @@
       var root = document.documentElement, t = C.skinTokens(color);
       root.dataset.theme = C.themeFor(color);
       // The panel's ground is Premiere's own grey, whatever brightness the editor chose.
-      ['surface', 'foot', 'disc', 'track', 'ring', 'ink2'].forEach(function (k) { if (t) { root.style.setProperty('--' + k, t[k]); } else { root.style.removeProperty('--' + k); } });
+      ['surface', 'foot', 'disc', 'track', 'ring', 'ink2', 'bad'].forEach(function (k) { if (t) { root.style.setProperty('--' + k, t[k]); } else { root.style.removeProperty('--' + k); } });
     } catch (e) {}
   }
 
@@ -1832,7 +1845,12 @@
     $('search-box').addEventListener('mousedown', function (e) {
       if (!$('search-box').classList.contains('open')) { e.preventDefault(); openSearch(false); }
     });
-    $('search').addEventListener('blur', function () { setTimeout(closeSearchIfEmpty, 120); });
+    $('search').addEventListener('blur', function () { setTimeout(closeSearchSoon, 120); });
+    document.addEventListener('mousedown', function () { pressing = true; }, true);
+    document.addEventListener('mouseup', function () {
+      pressing = false;
+      if (closeAfterPress) { closeAfterPress = false; setTimeout(closeSearchIfEmpty, 0); }
+    }, true);
     $('foot-close').onclick = function () { moveOn(); renderFoot(); };
     $('empty-clear').onclick = clearSearch;
     $('do-label').onclick = doLabel;
@@ -1855,7 +1873,7 @@
     document.addEventListener('mousedown', function (e) {
       if (!$('menu').hidden && !e.target.closest('#menu') && !e.target.closest('#more')) { closeMenu(); }
       if (!$('picker').hidden && !e.target.closest('#picker') && !e.target.closest('.pick')) { closePicker(); }
-      if (!e.target.closest('#search-box')) { closeSearchIfEmpty(); }
+      if (!e.target.closest('#search-box')) { closeSearchSoon(); }
     });
     $('dialog-body').addEventListener('click', function (e) {
       var swatch = e.target.closest('[data-color]'), column = e.target.closest('[data-column]');
@@ -1872,13 +1890,18 @@
       var h = e.target.closest('.h');
       if (h && C.COLUMN[h.dataset.key].sortable !== false) { headerClick(h.dataset.key, e.shiftKey); }
     };
+    // A click can change the status above the clips by a line (a note goes, a green result gives way), which moves the
+    // clips under the pointer. So the second press of a double-click keeps the clip the first one picked, and opens it.
+    var pressed = null;
     $('grid').addEventListener('mousedown', function (e) {
+      if (e.detail > 1 && pressed !== null) { return; }
       var at = rowAt(e.target);
+      pressed = at >= 0 ? S.order[at] : null;
       if (at >= 0) { clickRow(at, e); }
     });
     $('grid').addEventListener('dblclick', function (e) {
-      var at = rowAt(e.target);
-      if (at >= 0) { openRow(S.store.rows[S.order[at]]); }
+      var at = rowAt(e.target), id = pressed !== null ? pressed : (at >= 0 ? S.order[at] : null);
+      if (id !== null && id !== undefined) { openRow(S.store.rows[id]); }
     });
     $('grid').addEventListener('scroll', scheduleRows, { passive: true });
     $('grid').addEventListener('scroll', onScrollTuck, { passive: true });

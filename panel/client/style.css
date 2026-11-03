@@ -142,12 +142,19 @@ button:focus-visible, input:focus-visible, #grid:focus-visible { outline: 1.5px 
 #families button.on i { transform: scale(1.15); box-shadow: 0 0 0 1.5px var(--surface), 0 0 0 2.6px var(--ink2); }
 #families.chosen button:not(.on) i { opacity: .35; }
 #families button:active i { transform: scale(.85); }
+/* Narrow: the small words, the rule and some air go, so From Selection, the longest show and the longest sort, with
+   its flip, still read whole in one row at the panel's 620 px. */
 @media (max-width: 760px) {
   .pick .k { display: none; }
-  #families { gap: 0; margin-left: 4px; }
+  .pick { padding: 5px 6px 0; }
+  #toolbar { padding-right: 6px; }
+  #toolbar .rule { display: none; }
+  #flip { width: 22px; }
+  #families { gap: 0; margin: 0 4px; }
   #families button { width: 12px; }
   #families i { width: 8px; height: 8px; }
   #search-box.open { width: 160px; }
+  #modes, #more { margin-left: 2px; }
 }
 @media (max-width: 560px) {
   #toolbar .rule, #modes { display: none; }
@@ -257,7 +264,7 @@ img.arrive { animation: arrive .45s ease-out; }
 
 /* The verdict and its sentence share one line; the sentence gives way first. */
 #foot-words { flex: 1 1 auto; min-width: 0; display: flex; align-items: baseline; gap: 7px; white-space: nowrap; }
-#foot-verdict { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: 13px; font-weight: 600; letter-spacing: -.12px; }
+#foot-verdict { flex: 0 0 auto; max-width: 100%; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: 13px; font-weight: 600; letter-spacing: -.12px; }
 #foot-sentence { flex: 0 100 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: 12px; color: var(--ink2); }
 #foot.green #foot-sentence { color: rgba(255, 255, 255, .86); }
 #foot-actions { display: flex; align-items: center; gap: 5px; margin-left: auto; padding-left: 8px; flex: none; }

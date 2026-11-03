@@ -568,6 +568,7 @@ test('no picture: the foot explains it once, and calmly', () => {
   assert.equal(f.verdict, 'Softest first');
   assert.match(C.footState(facts({ store, view: V() })).sentence, /^2 clips have no picture scores/);
   assert.equal(C.footState(facts({ store, selected: 4 })).sentence.indexOf('blank'), -1, 'a selection has its own line');
+  assert.equal(C.footState(facts({ store, shown: 12, view: V({ show: 'silent' }) })).sentence, "12 of 301 clips. 2 clips have no picture scores: this Mac has no decoder for them, and ffmpeg isn't installed.", 'a count and the reason stay two sentences');
 });
 
 test('ffmpeg: the engine\'s own words still read as needing ffmpeg', () => {
@@ -784,9 +785,17 @@ test('the ground is Premiere\'s own grey at every brightness, and secondary text
     for (const bg of [t.surface, t.foot]) {
       assert.ok(contrast(t.ink2, bg) >= 4.5, `ink2 ${t.ink2} on ${bg}: ${contrast(t.ink2, bg).toFixed(2)}`);
       assert.ok(contrast(ink, bg) >= 4.5, `ink on ${bg}: ${contrast(ink, bg).toFixed(2)}`);
+      assert.ok(contrast(t.bad, bg) >= 4.5, `bad ${t.bad} on ${bg}: ${contrast(t.bad, bg).toFixed(2)}`);
     }
+    // A selected row is --plate-sel over the ground, and a menu item under the pointer is disc. Both hold ink2.
+    const plate = '#' + [1, 3, 5].map(i => parseInt(t.surface.slice(i, i + 2), 16)).map(c => Math.round(t.theme === 'dark' ? c + (255 - c) * 0.11 : c * 0.925).toString(16).padStart(2, '0')).join('').toUpperCase();
+    for (const bg of [t.disc, plate]) { assert.ok(contrast(t.ink2, bg) >= 4.5, `${v}: ink2 ${t.ink2} on ${bg}: ${contrast(t.ink2, bg).toFixed(2)}`); }
   }
+  const css = fs.readFileSync(path.join(__dirname, '../client/style.css'), 'utf8');
+  assert.match(css, /:root \{[^}]*--plate-sel: rgba\(0, 0, 0, \.075\);/, 'the light plate skinTokens measures against');
+  assert.match(css, /:root\[data-theme="dark"\] \{[^}]*--plate-sel: rgba\(255, 255, 255, \.11\);/, 'the dark plate skinTokens measures against');
   assert.equal(C.skinTokens({ red: 35, green: 35, blue: 35 }).ink2, '#ADADB1');
+  assert.equal(C.skinTokens({ red: 35, green: 35, blue: 35 }).bad, '#FF6A5F', 'Premiere\'s default grey keeps Ingest\'s red');
   assert.equal(C.skinTokens(null), null);
 });
 

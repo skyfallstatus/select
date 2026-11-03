@@ -882,7 +882,8 @@
   }
 
   // Premiere's own panel colour, as the panel's ground, with the few greys around it moved by the same step as in
-  // Ingest's tokens. Secondary text darkens or lightens until it still reads at 4.5:1 on both greys.
+  // Ingest's tokens. Secondary text darkens or lightens until it still reads at 4.5:1 on every grey it sits on, and the
+  // red of a refusal until it reads on the status.
   function skinTokens(color) {
     var theme = themeFor(color);
     if (!color) { return null; }
@@ -895,16 +896,23 @@
         .reduce(function (sum, c, i) { return sum + c * [0.2126, 0.7152, 0.0722][i]; }, 0);
     };
     var contrast = function (a, b) { var x = lum(a), y = lum(b); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); };
+    var reads = function (c, grounds) { return grounds.every(function (g) { return contrast(c, g) >= 4.5; }); };
+    // Text sits on the ground, the foot grey, a menu item under the pointer (disc), and a selected row or tile, which is
+    // --plate-sel over the ground: white at 11% on dark, black at 7.5% on light.
+    var grounds = function () {
+      return [step(0), step(dark ? -10 : -11), step(dark ? 20 : -24), hex(base.map(function (v) { return dark ? v + (255 - v) * 0.11 : v * 0.925; }))];
+    };
     // A mid grey that no text can read on moves, a step at a time, toward the end its theme belongs to.
-    for (var n = 0; n < 128 && (contrast(hex(ink), step(0)) < 4.5 || contrast(hex(ink), step(dark ? -10 : -11)) < 4.5); n++) {
+    for (var n = 0; n < 128 && !reads(hex(ink), grounds()); n++) {
       base = base.map(function (v) { return v + (dark ? -1 : 1); });
     }
-    var surface = hex(base), foot = step(dark ? -10 : -11);
+    var on = grounds(), surface = on[0], foot = on[1], disc = on[2];
+    var toward = function (from, k) { return hex(from.map(function (v, i) { return v + (ink[i] - v) * k / 20; })); };
     var second = hex(ink2);
-    for (var k = 1; k <= 20 && (contrast(second, surface) < 4.5 || contrast(second, foot) < 4.5); k++) {
-      second = hex(ink2.map(function (v, i) { return v + (ink[i] - v) * k / 20; }));
-    }
-    return { theme: theme, surface: surface, foot: foot, disc: step(dark ? 20 : -24), track: step(dark ? 20 : -22), ring: step(dark ? 50 : -54), ink2: second };
+    for (var k = 1; k <= 20 && !reads(second, on); k++) { second = toward(ink2, k); }
+    var red = dark ? [255, 106, 95] : [201, 40, 28], bad = hex(red);
+    for (var j = 1; j <= 20 && !reads(bad, [surface, foot]); j++) { bad = toward(red, j); }
+    return { theme: theme, surface: surface, foot: foot, disc: disc, track: step(dark ? 20 : -22), ring: step(dark ? 50 : -54), ink2: second, bad: bad };
   }
 
   // ---------------------------------------------------------------- clips the engine could not read
@@ -1298,7 +1306,7 @@
     }
     var clips = plural(total, 'clip');
     var blank = st.noPicture ? noPictureSummary(st.noPicture) : '';
-    var withBlank = function (line) { return blank ? (line ? line + ' ' : '') + blank : line; };
+    var withBlank = function (line) { return blank ? (line ? line + (/[.!?]$/.test(line) ? ' ' : '. ') : '') + blank : line; };
     var count = f.shown === total ? clips : fmtInt(f.shown) + ' of ' + clips;
     if (sc.state === 'Stopped') {
       return { kind: 'stopped', mark: 'skipped', verdict: 'Stopped', sentence: withBlank(fmtInt(progress(st).finished) + ' of ' + clips + ' read.'), actions: writes.concat('scan'), primary: 'scan', binsOff: !sorted };
