@@ -106,7 +106,8 @@ if git('rev-parse', '--verify', '-q', 'HEAD').strip():
     commits = git('rev-list', '--all').split()
     history = len(commits)
     # Patches cover what every commit added or removed, and the format line covers who and why.
-    log = git('log', '--all', '--full-history', '-p', '--binary', '--no-color',
+    # No --binary: compressed pixels match short patterns by chance. Every image blob's metadata is checked below.
+    log = git('log', '--all', '--full-history', '-p', '--no-color',
               '--format=commit %H%nauthor %an <%ae>%ncommitter %cn <%ce>%n%B')
     current = '?'
     for chunk in re.split(rb'(?m)^(?=commit [0-9a-f]{40}$)', log):
@@ -117,6 +118,16 @@ if git('rev-parse', '--verify', '-q', 'HEAD').strip():
     scan_text('branch names', git('branch', '-a'))
     names = git('rev-list', '--objects', '--all')
     scan_text('file names in history', names)
+    for line in names.decode('utf8', 'replace').splitlines():
+        sha, _, name = line.partition(' ')
+        if not name.lower().endswith('.png'):
+            continue
+        data = git('cat-file', 'blob', sha)
+        if data[:8] != b'\x89PNG\r\n\x1a\n':
+            problems.append(f'history {name}: not a PNG, so it can\'t be checked')
+            continue
+        for kind, body in png_metadata(data):
+            problems.append(f'history {name}: {kind.decode("latin1")} metadata')
 
 unique = sorted(set(problems))
 for p in unique:
