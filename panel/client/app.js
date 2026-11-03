@@ -6,8 +6,10 @@
   var ISSUES_URL = 'https://github.com/skyfallstatus/select/issues/new';
   var THEME_EVENT = 'com.adobe.csxs.events.ThemeColorChanged';
   var SOURCE_NAMES = { selection: 'Selection', project: 'Project', folder: 'Folder' };
+  var SOURCE_HINTS = { selection: 'picked in the Project panel', project: 'every clip in it', folder: 'video files on disk' };
+  var SOURCE_TIPS = { selection: 'The clips or bins selected in the Project panel', project: 'Every clip in the project', folder: 'Video files in a folder on disk' };
   // The grid: tiles at least this wide, as many as fit, 16:9 pictures, one line under each.
-  var TILE_MIN = 130, TILE_GAP = 10, TILE_ROW_GAP = 12, TILE_CAPTION = 21, TILE_TOP = 12, HEAD_H = 24;
+  var TILE_MIN = 130, TILE_GAP = 14, TILE_ROW_GAP = 16, TILE_CAPTION = 21, TILE_TOP = 12, HEAD_H = 24;
 
   var BINS_FIRST = 'Choose what to show, or a sort, first. Bins are made from them.';
   var REDUCED = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -153,12 +155,14 @@
     return project.name.replace(/\.prproj$/i, '');
   }
 
+  // The project's name is Premiere's to show. Here it is in From's tip and at the head of its menu.
   function renderHeader() {
     var name = S.project ? projectTitle(S.project) : (S.connected ? 'No project open' : 'Not connected to Premiere');
-    var rows = S.store.rows.length, source = SOURCE_NAMES[S.scan ? S.scan.source : S.source];
+    var rows = S.store.rows.length;
     $('project-name').textContent = name;
-    $('project-name').title = name;
-    $('subtitle').textContent = rows ? plural(rows, 'clip') + ' · ' + source : source;
+    setPick('source', SOURCE_NAMES[S.source], true);
+    $('source').title = name + '\n' + SOURCE_TIPS[S.source] + (rows ? '\n' + plural(rows, 'clip') + ' scanned' : '');
+    $('search').placeholder = rows ? 'Search ' + plural(rows, 'clip') : 'Search';
   }
 
   // ---------------------------------------------------------------- notes and the foot
@@ -229,16 +233,10 @@
   // Everything the foot shows comes from core.footState, so this only puts it on the page.
   function renderFoot() {
     var f = C.footState(footFacts()), foot = $('foot');
-    foot.className = f.kind + (f.green ? ' green' : '');
+    foot.className = f.kind + (f.green ? ' green' : '') + (S.tucked ? ' tucked' : '');
     $('foot-mark').dataset.kind = f.mark;
     setFootWords('foot-verdict', f.verdict, f.kind);
     setFootWords('foot-sentence', f.sentence, f.kind);
-    var meter = typeof f.meter === 'number';
-    $('foot-meter').hidden = !meter;
-    if (meter) {
-      $('foot-meter-fill').style.width = (f.meter * 100).toFixed(1) + '%';
-      $('foot-meter').setAttribute('aria-valuenow', Math.round(f.meter * 100));
-    }
     Object.keys(ACTIONS).forEach(function (a) {
       var b = $(ACTIONS[a]), on = f.actions.indexOf(a) >= 0;
       b.hidden = !on;
@@ -253,10 +251,35 @@
     $('do-columns').title = held.length ? f.wait : 'Write the scores to project metadata, so the Project panel can sort by them';
     var u = undoState();
     $('undo-write').title = u.top ? C.undoWords(u.top) : '';
-    var tail = S.scan && f.kind !== 'scanning' && !f.green ? [f.wait || '', statusLine()].filter(Boolean).join(' ') : '';
+    var tail = S.scan && !scanRunning() && !f.green ? statusLine() : '';
     $('status-unread').textContent = tail;
+    $('status-unread').title = tail;
     $('status-unread').hidden = !tail;
+    $('foot-close').hidden = !S.outcome || !!S.busy;
+    $('foot-words').title = f.verdict + (f.sentence ? '. ' + f.sentence : '');
+    S.calm = (f.kind === 'finished' || f.kind === 'stopped') && !S.outcome && !S.busy;
+    if (!S.calm) { tuck(false); }
     renderHeader();
+  }
+
+  // ---------------------------------------------------------------- the status tucks away while the clips scroll
+
+  var lastTop = 0, tuckedAt = 0;
+  function tuck(on) {
+    if (!!S.tucked === on) { return; }
+    S.tucked = on;
+    $('foot').classList.toggle('tucked', on);
+    tuckedAt = performance.now();
+  }
+
+  // Down through the clips tucks a calm status away; any way up brings it back. Nothing tucks while a scan or a write
+  // has something to say, and a short list never tucks, so the grid's own resize can't bounce it.
+  function onScrollTuck() {
+    var grid = $('grid'), top = grid.scrollTop, delta = top - lastTop;
+    lastTop = top;
+    if (performance.now() - tuckedAt < 320) { return; }
+    if (top < 8 || delta < -6) { tuck(false); return; }
+    if (S.calm && delta > 4 && top > 48 && grid.scrollHeight - grid.clientHeight > 240) { tuck(true); }
   }
 
   // Clips that could not be read, and why, in one plain sentence.
@@ -280,6 +303,7 @@
       b.classList.toggle('empty', !n);
       b.title = n ? f.word + ': ' + plural(n, 'clip') : f.word + ': none yet';
     });
+    $('families').classList.toggle('chosen', !!v.family);
     $('mode-list').classList.toggle('on', S.mode === 'list');
     $('mode-grid').classList.toggle('on', S.mode === 'grid');
     if (S.picker) { fillPicker(S.picker); }
@@ -294,6 +318,7 @@
 
   function renderSearch() {
     var on = !!S.query.trim();
+    if (S.query) { $('search-box').classList.add('open'); $('toolbar').classList.add('searching'); }
     $('search-count').hidden = !on;
     $('search-clear').hidden = !S.query;
     if (on) { $('search-count').textContent = fmtInt(S.order.length) + ' of ' + fmtInt(S.store.rows.length); }
@@ -700,8 +725,8 @@
   function emptyText() {
     if (!S.store.rows.length || S.order.length) { return ''; }
     var show = S.view.show ? C.SHOW[S.view.show] : null, status = C.dataStatus(S.store.rows, S.view.show, scanRunning());
-    if (S.tokens.length) { return 'Nothing matches ' + C.quoted(S.query.trim()) + '.' + (scanRunning() ? ' Still looking at clips, so more may come.' : ''); }
-    if (status === 'waiting') { return (show && show.waiting) || 'Still looking at these clips. They appear here as they are done.'; }
+    if (S.tokens.length) { return 'Nothing matches ' + C.quoted(S.query.trim()) + (scanRunning() ? ' yet.' : '.'); }
+    if (status === 'waiting') { return (show && show.waiting) || 'Still looking at these clips.'; }
     if (status === 'none') { return show.none; }
     if (S.view.family) { return 'No ' + C.FAMILY[S.view.family].word.toLowerCase() + ' clips' + (show ? ' among ' + show.label.toLowerCase() : '') + '.'; }
     if (show && show.group) { return show.none; }
@@ -818,6 +843,18 @@
     S.searchMs = performance.now() - t0;
   }
 
+  // The glass opens into a field, and closes again when it's left empty.
+  function openSearch(select) {
+    $('search-box').classList.add('open');
+    $('toolbar').classList.add('searching');
+    $('search').focus();
+    if (select) { $('search').select(); }
+  }
+
+  function closeSearchIfEmpty() {
+    if (!S.query) { $('search-box').classList.remove('open'); $('toolbar').classList.remove('searching'); }
+  }
+
   function clearSearch() {
     $('search').value = '';
     onSearch();
@@ -876,7 +913,15 @@
   function fillPicker(which) {
     var menu = $('picker'), focused = document.activeElement && document.activeElement.parentNode === menu ? Array.prototype.indexOf.call(menu.children, document.activeElement) : -1;
     menu.textContent = '';
-    if (which === 'show') {
+    if (which === 'source') {
+      var title = document.createElement('div');
+      title.className = 'title';
+      title.textContent = $('project-name').textContent;
+      menu.appendChild(title);
+      Object.keys(SOURCE_NAMES).forEach(function (src) {
+        pickerItem(menu, src, SOURCE_NAMES[src], SOURCE_HINTS[src], S.source === src, SOURCE_TIPS[src], function () { closePicker(); setSource(src); if (src === 'folder') { $('folder').focus(); } });
+      });
+    } else if (which === 'show') {
       var counts = C.showCounts(S.store.rows);
       pickerItem(menu, 'everything', 'Everything', showHint(null, counts), !S.view.show, 'Every clip in the scan.', function () { pressShow(null); });
       var section = null;
@@ -911,6 +956,7 @@
   }
 
   function buildBar() {
+    $('source').onclick = function (e) { e.stopPropagation(); openPicker('source'); };
     $('show').onclick = function (e) { e.stopPropagation(); openPicker('show'); };
     $('sort').onclick = function (e) { e.stopPropagation(); openPicker('sort'); };
     $('flip').onclick = flipSort;
@@ -1018,7 +1064,7 @@
       C.addItems(S.store, filtered.items);
       S.scan = { state: 'Scanning', startedAt: performance.now(), endedAt: 0, handle: null, source: S.source, folder: $('folder').value.trim(), failure: null, stopping: false, heard: 0 };
       applyView();
-      note([C.pickedWords(got.picked), filtered.skipped ? plural(filtered.skipped, 'item') + ' skipped: not video.' : ''].filter(Boolean).join(' '));
+      note(filtered.skipped ? plural(filtered.skipped, 'item') + ' skipped: not video.' : '');
       var binary = extensionRoot() + '/bin/select-engine';
       var problem = N.engineProblem(binary);
       if (problem) {
@@ -1222,11 +1268,11 @@
   // (BE.Prefs.Undo.MaxLevels), so a batch cannot be taken back with Cmd+Z and it pushes older edits out of History.
   var UNDO_LEVELS = 50;
 
+  // Said only when it matters: a write too big for Cmd+Z, or one that pushes the oldest Undo Write out of reach.
   function undoText(steps) {
-    var cmd = steps <= UNDO_LEVELS
-      ? '<p class="quiet">Cmd+Z takes it back one step at a time, about ' + plural(steps, 'step') + '.</p>'
-      : '<p class="warn">Premiere will record about ' + fmtInt(steps) + ' undo steps. It keeps only the last ' + UNDO_LEVELS + ', so Cmd+Z can\'t reach this write or your edits before it.</p>';
-    return cmd + '<p class="quiet">' + esc(C.undoReach(undoState().count)) + '</p>';
+    var cmd = steps > UNDO_LEVELS ? '<p class="warn">Too big for Cmd+Z. Undo Write takes it back.</p>' : '';
+    var reach = C.undoReach(undoState().count);
+    return cmd + (reach ? '<p class="quiet">' + esc(reach) + '</p>' : '');
   }
 
   // A write that needs Tier 2 waits for it. Asked twice: when pressed, and again after the sheet, in case the view moved.
@@ -1306,14 +1352,10 @@
       if (!inProject.length) { note(gone.some(function (t) { return t.copies; }) ? 'The clips picked for this scan aren\'t in the project any more. Scan again.' : 'None of these clips are in the project.', 'warn'); return; }
       var plan = spec.plan(inProject, ready.project);
       if (!plan) { return; }
-      var items = inProject.reduce(function (n, t) { return n + t.row.items.length; }, 0);
-      var scope = selectedInView() ? 'the selected clips' : 'the current view';
-      var copies = gone.filter(function (t) { return t.copies; }).length, missing = gone.length - copies;
-      var body = '<p><b>' + plural(inProject.length, 'clip') + '</b>' + (items !== inProject.length ? ' (' + plural(items, 'project item') + ')' : '') + ' in ' + esc(projectTitle(ready.project)) + ', from ' + scope + '.</p>' +
-        (copies ? '<p class="warn">' + plural(copies, 'clip') + ' picked for this scan ' + (copies === 1 ? 'isn\'t' : 'aren\'t') + ' in the project any more, so ' + (copies === 1 ? 'it' : 'they') + ' will be skipped. Other copies of the same files stay as they are.</p>' : '') +
-        (missing ? '<p class="warn">' + plural(missing, 'clip') + ' not in this project will be skipped.</p>' : '') + plan.html;
+      // The title says how many and what; the sheet adds only what is skipped and the plan itself.
+      var body = (gone.length ? '<p class="warn">' + plural(gone.length, 'clip') + ' not in this project will be skipped.</p>' : '') + plan.html;
       return dialog(plan.title, body, plan.ok).then(function (yes) {
-        if (!yes) { note('Cancelled. Nothing was written.'); return; }
+        if (!yes) { return; }
         var refused = lockRefusal() || heldBack(spec.kind) || (S.busy ? 'Another write is running.' : '') || (S.hostLate ? LATE : '');
         if (refused) { note(refused, 'warn'); return; }
         if (plan.confirm) { plan.confirm(); }
@@ -1405,7 +1447,7 @@
           list: items,
           sent: { items: items },
           title: 'Label ' + plural(targets.length, 'clip') + '?',
-          html: '<div class="swatches">' + swatches + '</div><p>Sets the label <b id="label-name">' + esc(labelName()) + '</b> on these project items. Clips and files keep their names.</p>' + undoText(items.length),
+          html: '<div class="swatches">' + swatches + '</div><p>Label: <b id="label-name">' + esc(labelName()) + '</b></p>' + undoText(items.length),
           ok: 'Label ' + fmtInt(targets.length),
           busy: 'Labelling ' + plural(items.length, 'clip'),
           verb: 'Labelling',
@@ -1438,10 +1480,10 @@
           list: list,
           sent: { fields: fields, rows: rows },
           title: 'Add columns to ' + plural(targets.length, 'clip') + '?',
-          html: '<p>Adds ' + fields.length + ' columns to the project metadata: ' + fields.map(function (f) { return esc(f.label.replace(/^Select /, '')); }).join(', ') + '. Their names start with Select. Writes the values and shows the columns in the Project panel. Empty scores stay empty. Rank is the place in the current view.</p>' +
-            (later ? '<p class="warn">The other ' + later + ', such as People and Colour, come from looking closer, which is still running. Add Columns again when it is done to write them.</p>' : '') +
+          html: '<p>' + fields.map(function (f) { return esc(f.label.replace(/^Select /, '')); }).join(', ') + '</p>' +
+            (later ? '<p class="warn">' + later + ' more, such as People and Colour, once looking closer is done.</p>' : '') +
             undoText(list.length * fields.length) +
-            '<p class="quiet">Undo Write does not cover the fields or the layout: they stay in this project, and the columns stay shown, because Premiere saves them in the workspace. Hide them with Metadata Display in the Project panel menu.</p>',
+            '<p class="quiet">Undo Write clears the values. The columns stay in the Project panel.</p>',
           ok: 'Add Columns',
           busy: 'Adding columns to ' + plural(list.length, 'clip'),
           verb: 'Adding columns to',
@@ -1475,8 +1517,7 @@
           list: list,
           sent: { buckets: sent },
           title: 'Sort ' + plural(count, 'clip') + ' into bins?',
-          html: '<p>Creates the bin <b>' + esc(root) + '</b> with:</p><ul>' + listed + '</ul>' +
-            '<p>This moves items in the Project panel, not files on disk.</p>' + undoText(list.length + 2 * (buckets.length + 1)),
+          html: '<p><b>' + esc(root) + '</b></p><ul>' + listed + '</ul>' + undoText(list.length + 2 * (buckets.length + 1)),
           ok: 'Sort into Bins',
           busy: 'Moving ' + plural(list.length, 'clip'),
           verb: 'Moving',
@@ -1510,9 +1551,7 @@
       if (!r.ok) { note(r.message, 'warn'); return; }
       var u = undoState(), entry = u.top;
       if (!entry) { note('There is no write to undo in this project.'); return; }
-      var more = u.count - 1;
-      var reach = more > 0 ? 'After this, Undo Write can still take back ' + plural(more, 'earlier write') + '.' : 'This is the last write Undo Write can take back in this project.';
-      return dialog('Undo Write?', '<p>' + esc(C.undoWords(entry)) + '</p><p class="quiet">The write was made ' + esc(C.whenWords(entry.at)) + '. An item changed by anything else since is left alone.</p><p class="quiet">' + reach + '</p>', 'Undo Write').then(function (yes) {
+      return dialog('Undo Write?', '<p>' + esc(C.undoWords(entry)) + '</p><p class="quiet">Made ' + esc(C.whenWords(entry.at)) + '.</p>', 'Undo Write').then(function (yes) {
         if (!yes) { return; }
         var refused = lockRefusal() || (S.busy ? 'Another write is running.' : '') || (S.hostLate ? LATE : '');
         if (refused) { note(refused, 'warn'); return; }
@@ -1644,12 +1683,6 @@
 
   function setSource(src) {
     S.source = src;
-    var buttons = $('source').children;
-    for (var i = 0; i < buttons.length; i++) {
-      var on = buttons[i].dataset.src === src;
-      buttons[i].classList.toggle('on', on);
-      buttons[i].setAttribute('aria-pressed', on ? 'true' : 'false');
-    }
     $('folder-box').hidden = src !== 'folder';
     try { localStorage.setItem('select.source', src); } catch (e) {}
     renderFoot();
@@ -1674,8 +1707,11 @@
   function applyHostTheme() {
     if (!window.__adobe_cep__) { return; }
     try {
-      var skin = JSON.parse(window.__adobe_cep__.getHostEnvironment()).appSkinInfo;
-      document.documentElement.dataset.theme = C.themeFor(skin.panelBackgroundColor.color);
+      var skin = JSON.parse(window.__adobe_cep__.getHostEnvironment()).appSkinInfo, color = skin.panelBackgroundColor.color;
+      var root = document.documentElement, t = C.skinTokens(color);
+      root.dataset.theme = C.themeFor(color);
+      // The panel's ground is Premiere's own grey, whatever brightness the editor chose.
+      ['surface', 'foot', 'disc', 'track', 'ring', 'ink2'].forEach(function (k) { if (t) { root.style.setProperty('--' + k, t[k]); } else { root.style.removeProperty('--' + k); } });
     } catch (e) {}
   }
 
@@ -1782,10 +1818,6 @@
     S.source = SOURCE_NAMES[saved] ? saved : 'selection';
     if (folder) { $('folder').value = folder; }
 
-    $('source').onclick = function (e) {
-      var b = e.target.closest('button');
-      if (b) { setSource(b.dataset.src); }
-    };
     $('choose').onclick = chooseFolder;
     $('folder').addEventListener('input', renderFoot);
     $('scan').onclick = startScan;
@@ -1796,7 +1828,12 @@
     $('search').addEventListener('keydown', function (e) {
       if (e.key === 'Escape' && S.query) { e.stopPropagation(); clearSearch(); }
     });
-    $('search-clear').onclick = function (e) { e.preventDefault(); clearSearch(); };
+    $('search-clear').onclick = function (e) { e.preventDefault(); clearSearch(); $('search').focus(); };
+    $('search-box').addEventListener('mousedown', function (e) {
+      if (!$('search-box').classList.contains('open')) { e.preventDefault(); openSearch(false); }
+    });
+    $('search').addEventListener('blur', function () { setTimeout(closeSearchIfEmpty, 120); });
+    $('foot-close').onclick = function () { moveOn(); renderFoot(); };
     $('empty-clear').onclick = clearSearch;
     $('do-label').onclick = doLabel;
     $('do-columns').onclick = doColumns;
@@ -1818,6 +1855,7 @@
     document.addEventListener('mousedown', function (e) {
       if (!$('menu').hidden && !e.target.closest('#menu') && !e.target.closest('#more')) { closeMenu(); }
       if (!$('picker').hidden && !e.target.closest('#picker') && !e.target.closest('.pick')) { closePicker(); }
+      if (!e.target.closest('#search-box')) { closeSearchIfEmpty(); }
     });
     $('dialog-body').addEventListener('click', function (e) {
       var swatch = e.target.closest('[data-color]'), column = e.target.closest('[data-column]');
@@ -1843,6 +1881,7 @@
       if (at >= 0) { openRow(S.store.rows[S.order[at]]); }
     });
     $('grid').addEventListener('scroll', scheduleRows, { passive: true });
+    $('grid').addEventListener('scroll', onScrollTuck, { passive: true });
     new ResizeObserver(function () {
       if (poolSize() !== S.pool.length) { buildPool(); renderSortColumn(); }
       buildLayout();
@@ -1851,7 +1890,19 @@
     }).observe($('grid'));
 
     document.addEventListener('keydown', function (e) {
-      if ((e.metaKey || e.ctrlKey) && e.key === 'f') { e.preventDefault(); $('search').focus(); $('search').select(); return; }
+      if ((e.metaKey || e.ctrlKey) && e.key === 'f') { e.preventDefault(); openSearch(true); return; }
+      var typing = e.target && (e.target.tagName === 'INPUT' || e.target.isContentEditable);
+      var free = !typing && !S.modalOpen && !S.picker && $('menu').hidden;
+      // Over the clips: Cmd-A takes every clip on screen, Escape lets them go, and typing a letter starts a search.
+      if (free && (e.metaKey || e.ctrlKey) && e.key === 'a' && S.order.length) {
+        e.preventDefault();
+        S.order.forEach(function (id) { S.selected.add(id); });
+        renderItems();
+        renderFoot();
+        return;
+      }
+      if (free && e.key === 'Escape' && S.selected.size) { S.selected.clear(); S.anchor = null; renderItems(); renderFoot(); return; }
+      if (free && !e.metaKey && !e.ctrlKey && !e.altKey && e.key.length === 1 && /\S/.test(e.key) && S.store.rows.length) { openSearch(false); return; }
       if (e.key === 'Escape' && S.picker) { var from = S.picker; closePicker(); $(from).focus(); return; }
       if (S.picker && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
         e.preventDefault();

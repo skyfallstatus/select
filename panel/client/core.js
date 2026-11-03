@@ -331,58 +331,48 @@
     return function (r) { var v = r[key]; return v !== null && v !== undefined; };
   }
 
-  // tip: what it really checks. says: the foot's words while it is on. none: when the scan has nothing for it.
+  // tip: what it really checks. none: when the scan has nothing for it.
   var SHOWS = [
     { id: 'interviews', label: 'Interviews', section: 'people',
-      needs: known('speech'), none: 'No clip has sound and face data, so there is nothing to go on.',
+      needs: known('speech'), none: 'No sound or face data in this scan.',
       filter: function (r) {
         return r.speech === true && r.faces > 0 && r.durationS >= INTERVIEW_MIN_S && (typeof r.shake !== 'number' || r.shake <= SHAKE_LIMIT);
       },
-      says: 'Speech and a face, ' + INTERVIEW_MIN_S + ' seconds or longer.',
       tip: 'Speech heard and a face seen, ' + INTERVIEW_MIN_S + ' seconds or longer. Where the camera recorded its movement, a clip shakier than a handheld camera is left out. A vlog can pass too.' },
     { id: 'people', label: 'People', section: 'people',
-      needs: known('people'), none: 'No clip has people data, so there is nothing to go on.',
+      needs: known('people'), none: 'No people data in this scan.',
       filter: function (r) { return r.people > 0; },
-      says: 'Someone seen in the frames looked at.',
       tip: 'Someone was seen in at least one of the three frames looked at in each clip.' },
     { id: 'nopeople', label: 'No people', section: 'people',
-      needs: known('people'), none: 'No clip has people data, so there is nothing to go on.',
+      needs: known('people'), none: 'No people data in this scan.',
       filter: function (r) { return r.people === 0; },
-      says: 'No one seen in the frames looked at.',
       tip: 'No one was seen in the three frames looked at. Someone can still appear between them.' },
     { id: 'mediums', label: 'Mediums', section: 'people',
-      needs: known('shotSize'), none: 'No clip has shot size data, so there is nothing to go on.',
+      needs: known('shotSize'), none: 'No shot size data in this scan.',
       filter: function (r) { return r.shotSize === 'medium'; },
-      says: 'Someone from the waist up, or closer.',
       tip: 'Someone from about the waist up, or closer, judged by the size of their head in the frame.' },
     { id: 'wides', label: 'Wides', section: 'people',
-      needs: known('shotSize'), none: 'No clip has shot size data, so there is nothing to go on.',
+      needs: known('shotSize'), none: 'No shot size data in this scan.',
       filter: function (r) { return r.shotSize === 'wide'; },
-      says: 'People small in the frame.',
       tip: 'People small in the frame. Scenery with no one in it is under No people instead.' },
     { id: 'speech', label: 'Speech', section: 'sound',
-      needs: known('speech'), none: 'No clip has sound data, so there is nothing to go on.',
+      needs: known('speech'), none: 'No sound data in this scan.',
       filter: function (r) { return r.speech === true; },
-      says: 'Speech heard in the audio sampled.',
       tip: 'Speech heard in short stretches of the audio. Nothing is transcribed.' },
     { id: 'music', label: 'Music', section: 'sound',
-      needs: known('music'), none: 'No clip has sound data, so there is nothing to go on.',
+      needs: known('music'), none: 'No sound data in this scan.',
       filter: function (r) { return r.music === true; },
-      says: 'Music heard in the audio sampled.',
       tip: 'Music heard in short stretches of the audio.' },
     { id: 'silent', label: 'Silent', section: 'sound',
       filter: function (r) { return r.hasAudio === false || r.silent === true; },
-      says: 'No audio, or silence wherever it was sampled.',
       tip: 'No audio track, or silence in every stretch listened to. Clips whose audio could not be read are left out.' },
     { id: 'onscreen', label: 'Text on screen', section: 'picture',
-      needs: known('text'), none: 'No clip has text data, so there is nothing to go on.',
+      needs: known('text'), none: 'No text data in this scan.',
       filter: function (r) { return !!(r.text && r.text.length); },
-      says: 'Words read off the frames looked at.',
       tip: 'Signs, titles, packaging, slates: words of four letters or more. About half of readable text is found, so a missing word proves nothing.' },
     { id: 'similar', label: 'Similar shots', section: 'picture', group: true,
       needs: function (r) { return r.similar !== undefined; }, none: 'No similar shots in this scan.',
-      waiting: 'Similar shots come last, once every clip has been looked at.',
-      says: 'Clips that look alike, side by side.',
+      waiting: 'Similar shots come once every clip is looked at.',
       tip: 'Clips whose frames look alike, kept together: takes of one set-up, or two similar places. It does not pick the best take.' }
   ];
   var SHOW = {};
@@ -891,6 +881,32 @@
     return (Number(color.red) + Number(color.green) + Number(color.blue)) / 3 >= 128 ? 'light' : 'dark';
   }
 
+  // Premiere's own panel colour, as the panel's ground, with the few greys around it moved by the same step as in
+  // Ingest's tokens. Secondary text darkens or lightens until it still reads at 4.5:1 on both greys.
+  function skinTokens(color) {
+    var theme = themeFor(color);
+    if (!color) { return null; }
+    var base = [Number(color.red), Number(color.green), Number(color.blue)].map(function (v) { return Math.max(0, Math.min(255, Math.round(v) || 0)); });
+    var dark = theme === 'dark', hex = function (rgb) { return '#' + rgb.map(function (v) { return ('0' + Math.max(0, Math.min(255, Math.round(v))).toString(16)).slice(-2); }).join('').toUpperCase(); };
+    var step = function (by) { return hex(base.map(function (v) { return v + by; })); };
+    var ink = dark ? [237, 237, 238] : [29, 29, 31], ink2 = dark ? [173, 173, 177] : [95, 96, 99];
+    var lum = function (h) {
+      return [1, 3, 5].map(function (i) { var c = parseInt(h.slice(i, i + 2), 16) / 255; return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); })
+        .reduce(function (sum, c, i) { return sum + c * [0.2126, 0.7152, 0.0722][i]; }, 0);
+    };
+    var contrast = function (a, b) { var x = lum(a), y = lum(b); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); };
+    // A mid grey that no text can read on moves, a step at a time, toward the end its theme belongs to.
+    for (var n = 0; n < 128 && (contrast(hex(ink), step(0)) < 4.5 || contrast(hex(ink), step(dark ? -10 : -11)) < 4.5); n++) {
+      base = base.map(function (v) { return v + (dark ? -1 : 1); });
+    }
+    var surface = hex(base), foot = step(dark ? -10 : -11);
+    var second = hex(ink2);
+    for (var k = 1; k <= 20 && (contrast(second, surface) < 4.5 || contrast(second, foot) < 4.5); k++) {
+      second = hex(ink2.map(function (v, i) { return v + (ink[i] - v) * k / 20; }));
+    }
+    return { theme: theme, surface: surface, foot: foot, disc: step(dark ? 20 : -24), track: step(dark ? 20 : -22), ring: step(dark ? 50 : -54), ink2: second };
+  }
+
   // ---------------------------------------------------------------- clips the engine could not read
 
   var WHY = { unsupported: 'unsupported', ffmpeg: 'ffmpeg', missing: 'missing', denied: 'denied', other: 'other' };
@@ -966,7 +982,7 @@
     } else {
       why = 'this Mac couldn\'t decode ' + them + '.';
     }
-    return plural(n, 'clip') + (n === 1 ? ' is' : ' are') + ' listed with blank picture scores: ' + why;
+    return plural(n, 'clip') + (n === 1 ? ' has' : ' have') + ' no picture scores: ' + why;
   }
 
   // ---------------------------------------------------------------- when the engine does not run
@@ -1069,13 +1085,12 @@
   // sent, after Stop or a refusal), error (why the rest was not sent), buckets and columns (read back at the end).
   function writeOutcome(kind, sent, res, extra) {
     var failed = res.failed || [], skipped = res.skipped || [], unsent = res.unsent || 0, why = refusalWords(res.error);
-    var want = itemCount(sent), whole = !failed.length && !skipped.length && !unsent && !why, files = 'Your files weren\'t touched.';
+    var want = itemCount(sent), whole = !failed.length && !skipped.length && !unsent && !why;
     var keep = { failed: failed.concat(skipped) };
     function rest(line) {
       var bits = [line];
       if (skipped.length) { bits.push(plural(skipped.length, 'item') + (skipped.length === 1 ? ' was' : ' were') + ' left alone: ' + (skipped.length === 1 ? 'it has' : 'they have') + ' changed in the project since Select found ' + (skipped.length === 1 ? 'it' : 'them') + '.'); }
       if (why) { bits.push('The rest weren\'t sent: ' + why); } else if (unsent) { bits.push('Stopped, so the last ' + plural(unsent, 'item') + (unsent === 1 ? ' wasn\'t' : ' weren\'t') + ' written.'); }
-      bits.push(files);
       return bits.filter(Boolean).join(' ');
     }
     function out(kindWord, verdict, sentence, undo) {
@@ -1086,7 +1101,7 @@
       n = res.moved || 0;
       var read = binsRead(res.placed || [], res), bins = sent.buckets.length;
       if (whole && read.confirmed && read.matched === want && !read.extra) {
-        return out('proved', 'Sorted into ' + plural(bins, 'bin'), plural(read.matched, 'clip') + ' moved. ' + files, true);
+        return out('proved', 'Sorted into ' + plural(bins, 'bin'), '', true);
       }
       if (!n) { return out('partial', 'Nothing moved', rest('Premiere did not move any clips.'), false); }
       if (!read.confirmed) { return out('partial', 'Moved, not confirmed', rest('Premiere moved ' + plural(n, 'clip') + ' but did not confirm where they landed, so check the bins.'), true); }
@@ -1098,18 +1113,18 @@
       n = res.changed || 0;
       var matched = typeof res.matched === 'number' ? res.matched : null, shown = !!(res.columns && res.columns.shown);
       if (whole && matched === want && shown) {
-        return out('proved', 'Added ' + plural(added, 'column'), plural(matched, 'clip') + ' updated. ' + files, true);
+        return out('proved', 'Added ' + plural(added, 'column'), '', true);
       }
       if (!n) { return out('partial', 'Nothing written', rest('Premiere did not take the columns.'), false); }
       if (matched === null) { return out('partial', 'Written, not confirmed', rest('Premiere took the columns on ' + plural(n, 'clip') + ' but did not confirm them, so check a few.'), true); }
-      if (whole && matched === want) { return out('partial', 'Added, not showing', 'The values are in. Turn the columns on with Metadata Display in the Project panel menu.', true); }
+      if (whole && matched === want) { return out('partial', 'Added, not showing', 'Turn them on with Metadata Display in the Project panel menu.', true); }
       var unread = n - matched + failed.length;
       return out('partial', 'Wrote ' + fmtInt(matched) + ' of ' + plural(want, 'clip'), rest(unread ? plural(unread, 'clip') + ' did not read back the same.' : ''), true);
     }
     // Labels: the host reads each label back as it sets it, and `changed` counts only those that matched.
     n = res.changed || 0;
     if (whole && n === want) {
-      return out('proved', 'Labelled ' + plural(n, 'clip') + ' ' + extra, 'Every label read back. ' + files, true);
+      return out('proved', 'Labelled ' + plural(n, 'clip') + ' ' + extra, '', true);
     }
     if (!n) { return out('partial', 'Nothing labelled', rest('Premiere did not change any labels.'), false); }
     return out('partial', 'Labelled ' + fmtInt(n) + ' of ' + plural(want, 'clip'), rest(failed.length ? plural(failed.length, 'clip') + ' did not read back the same.' : ''), true);
@@ -1126,6 +1141,7 @@
     if (!bits.length) { bits.push('There was nothing left to put back.'); }
     var verdict = !restored ? 'Nothing went back' : (failed || unsent || why ? 'Partly undone' : 'Undone');
     var clean = restored && !failed && !res.skipped && !unsent && !why && res.binRemoved !== false;
+    if (clean) { bits = []; }
     return { kind: clean ? 'undone' : 'partial', verdict: verdict, sentence: bits.join(' '), undo: !!more, failed: res.failed || [] };
   }
 
@@ -1178,27 +1194,12 @@
 
   // The sheet's line on how far Undo Write reaches, before a write. held: records already kept for this project.
   function undoReach(held) {
-    var line = 'Undo Write in Select takes back the last ' + UNDO_KEEP + ' writes to this project, newest first, and keeps them when the panel reloads.';
-    return held >= UNDO_KEEP ? line + ' This one pushes the oldest of them out of reach.' : line;
+    return held >= UNDO_KEEP ? 'This pushes the oldest of the last ' + UNDO_KEEP + ' writes out of Undo Write\'s reach.' : '';
   }
 
   // ---------------------------------------------------------------- the selection
 
-  // Where a Selection scan's clips came from, before the scan runs. picked: {clips, where: [bin names, '' for the top]}.
-  function pickedWords(picked) {
-    if (!picked || !picked.clips) { return ''; }
-    var where = picked.where || [], named = where.map(function (w) { return w ? quoted(w) : 'the top of the project'; });
-    var place = !named.length ? '' : named.length <= 3 ? ' in ' + listWords(named) : ' in ' + fmtInt(named.length) + ' bins';
-    return 'Scanning the ' + plural(picked.clips, 'clip') + ' selected' + place + '.';
-  }
-
   // ---------------------------------------------------------------- the foot
-
-  var SOURCE_WORDS = {
-    selection: 'Scan reads the clips selected in the Project panel.',
-    project: 'Scan reads every clip in this project.',
-    folder: 'Scan reads the video files in this folder.'
-  };
 
   // Scan progress as a share of the work: file details are the first fifth, decoded frames and audio the rest.
   function progress(store) {
@@ -1238,18 +1239,15 @@
 
   function notUnderstoodSummary(store) {
     var n = store.tier2Failed;
-    return n ? plural(n, 'clip') + ' could not be looked at more closely. ' + (n === 1 ? 'Its' : 'Their') + ' file details and picture scores stand.' : '';
+    return n ? plural(n, 'clip') + ' couldn\'t be looked at closely.' : '';
   }
 
   // A write or an Undo Write while it runs. w: {kind: write or undo, verb, unit, done, total, stopping}.
   function writingState(busy, w) {
-    if (!w || !w.total) { return { kind: 'writing', mark: 'running', verdict: busy, sentence: 'Premiere is busy for a moment.', actions: [] }; }
+    if (!w || !w.total) { return { kind: 'writing', mark: 'running', verdict: busy, sentence: '', actions: [] }; }
     var many = w.total > BATCH, unit = w.unit || 'clip';
     var verdict = w.stopping ? 'Stopping after this batch' : w.verb + ' ' + (w.done ? fmtInt(w.done) + ' of ' : '') + plural(w.total, unit);
-    if (!many) { return { kind: 'writing', mark: 'running', verdict: verdict, sentence: 'Premiere is busy for a moment.', actions: [] }; }
-    var after = w.kind === 'undo' ? 'what isn\'t back yet stays for the next Undo Write.' : 'Undo Write takes back what was written.';
-    return { kind: 'writing', mark: 'running', verdict: verdict, sentence: 'Premiere takes them ' + BATCH + ' at a time. Stop ends it after this batch, and ' + after,
-      meter: Math.min(1, w.done / w.total), actions: w.stopping ? [] : ['stop'] };
+    return { kind: 'writing', mark: 'running', verdict: verdict, sentence: '', actions: many && !w.stopping ? ['stop'] : [] };
   }
 
   // The bottom line. Pure: every word of the foot comes from here, so tests read what a person would and no view decides.
@@ -1271,56 +1269,54 @@
         if (o.kind === 'undone' || !o.undo) { list = list.concat(writes); }
       }
       var result = { kind: o.kind, mark: o.green ? 'seal' : (o.kind === 'undone' ? 'done' : 'look'), verdict: o.verdict, sentence: o.sentence, green: !!o.green, actions: list, primary: list.indexOf('bins') >= 0 ? 'bins' : null, binsOff: !sorted };
-      // A write made while the scan runs leaves the scan's Stop and its meter in place.
-      if (running && !sc.stopping) {
-        var pr = progress(st);
-        result.actions = ['stop'].concat(list);
-        result.meter = pr.finished >= st.total && st.total ? understandingShare(st).share : pr.share;
-      }
+      // A write made while the scan runs leaves the scan's Stop in place.
+      if (running && !sc.stopping) { result.actions = ['stop'].concat(list); }
       return result;
     }
     if (running) {
-      var p = progress(st), rate = Math.round(p.finished / Math.max(sc.seconds, 0.001));
+      var p = progress(st);
+      // One line while a scan runs: the spinning mark and a count. The count is the progress, so there is no bar to fill
+      // twice, and the second stage gets its own words so its count starting again reads as a new step.
       // Stage three: every clip is usable, and the engine is still looking closer. The panel works, so it says so quietly.
       if (p.finished >= st.total && st.total && !sc.stopping) {
         var u = understandingShare(st), hold = !u.landed && !!f.needsTier2;
         var on = waitingOn(f.view, f.query ? [f.query] : null);
-        return { kind: 'understanding', mark: 'running', verdict: viewName(f.view) || plural(st.total, 'clip') + ' read', sentence: 'Finding people, words, sound and colour: ' + fmtInt(u.done) + ' of ' + fmtInt(u.due), meter: u.share,
+        return { kind: 'understanding', mark: 'running', verdict: 'Looking closer ' + fmtInt(u.done) + ' of ' + fmtInt(u.due), sentence: '',
           actions: ['stop'].concat(writes), primary: 'bins', binsOff: !sorted,
           held: hold ? writes : [],
           wait: hold ? on + ' needs every clip looked at, so Label, Add Columns and Sort into Bins wait until it is done. They turn on by themselves.' : '' };
       }
-      return { kind: 'scanning', mark: 'running', verdict: sc.stopping ? 'Stopping' : 'Reading ' + fmtInt(p.finished) + ' of ' + fmtInt(st.total), sentence: fmtInt(rate) + ' clips per second', meter: p.share, actions: ['stop'] };
+      return { kind: 'scanning', mark: 'running', verdict: sc.stopping ? 'Stopping' : 'Reading ' + fmtInt(p.finished) + ' of ' + fmtInt(st.total), sentence: '', actions: ['stop'] };
     }
     // The source changed since this scan, so Scan comes back to the foot. The results stay until it's pressed.
     if (f.rescan && sc) {
-      return { kind: 'finished', mark: 'waiting', verdict: 'Ready to scan', sentence: SOURCE_WORDS[f.source] + ' The list below is from the last scan.', actions: ['scan'], primary: 'scan' };
+      return { kind: 'finished', mark: 'waiting', verdict: 'Ready to scan', sentence: '', actions: ['scan'], primary: 'scan' };
     }
     if (!sc || !total) {
-      var idle = f.project ? SOURCE_WORDS[f.source] : (f.connected ? 'Open a project in Premiere, then press Scan.' : (f.source === 'folder' ? SOURCE_WORDS.folder : 'Waiting for Premiere.'));
-      return { kind: 'empty', mark: 'waiting', verdict: 'Nothing scanned yet', sentence: idle, actions: ['scan'], primary: 'scan' };
+      var idle = f.project || f.source === 'folder' ? 'Nothing scanned yet' : (f.connected ? 'No project open' : 'Waiting for Premiere');
+      return { kind: 'empty', mark: 'waiting', verdict: idle, sentence: '', actions: ['scan'], primary: 'scan' };
     }
     var clips = plural(total, 'clip');
     var blank = st.noPicture ? noPictureSummary(st.noPicture) : '';
-    var withBlank = function (line) { return blank ? line + ' ' + blank : line; };
+    var withBlank = function (line) { return blank ? (line ? line + ' ' : '') + blank : line; };
     var count = f.shown === total ? clips : fmtInt(f.shown) + ' of ' + clips;
     if (sc.state === 'Stopped') {
-      return { kind: 'stopped', mark: 'skipped', verdict: 'Stopped', sentence: withBlank(fmtInt(progress(st).finished) + ' of ' + clips + ' read. What was read stays.'), actions: writes.concat('scan'), primary: 'scan', binsOff: !sorted };
+      return { kind: 'stopped', mark: 'skipped', verdict: 'Stopped', sentence: withBlank(fmtInt(progress(st).finished) + ' of ' + clips + ' read.'), actions: writes.concat('scan'), primary: 'scan', binsOff: !sorted };
     }
     if (sc.failure) {
       return { kind: 'failed', mark: 'failed', verdict: sc.failure.verdict, sentence: sc.failure.sentence, actions: writes.concat('scan'), primary: 'scan', binsOff: !sorted };
     }
     var read = total - st.errors;
     if (sc.state === 'Done' && !read) {
-      return { kind: 'unreadable', mark: 'look', verdict: 'Nothing could be read', sentence: 'None of these ' + clips + ' could be read. The line below says why.', actions: ['scan'], primary: 'scan' };
+      return { kind: 'unreadable', mark: 'look', verdict: 'Nothing could be read', sentence: '', actions: ['scan'], primary: 'scan' };
     }
-    var selected = f.selected;
+    // Facts only: the view's name, and a count when the view leaves clips out. The toolbar and the buttons say the rest.
     var show = f.view.show ? SHOW[f.view.show] : null;
-    var words = show ? (f.status === 'none' ? show.none : show.says) : '';
-    var seconds = sc.seconds < 10 ? sc.seconds.toFixed(1) : String(Math.round(sc.seconds));
-    var head = show && show.group ? plural(f.groupCount, 'group') + ', ' + count + '.' : (f.shown === total ? clips + ' in ' + seconds + ' s.' : count + (f.query ? ' match ' + quoted(f.query) + '.' : '.'));
-    var line = selected ? fmtInt(selected) + ' of ' + clips + ' selected. Label, Add Columns and Sort into Bins use these.' : withBlank(words ? head + ' ' + words : (f.shown === total && !viewName(f.view) ? 'Took ' + seconds + ' s. Choose what to show, or how to sort, above.' : head));
-    return { kind: 'finished', mark: 'done', verdict: viewName(f.view) || clips + ' read', sentence: line, actions: writes, primary: 'bins', binsOff: !sorted };
+    if (f.selected) {
+      return { kind: 'finished', mark: 'done', verdict: fmtInt(f.selected) + ' of ' + clips + ' selected', sentence: '', actions: writes, primary: 'bins', binsOff: !sorted };
+    }
+    var line = show && f.status === 'none' ? show.none : show && show.group ? plural(f.groupCount, 'group') : f.shown === total || f.query ? '' : count;
+    return { kind: 'finished', mark: 'done', verdict: viewName(f.view) || clips + ' read', sentence: withBlank(line), actions: writes, primary: 'bins', binsOff: !sorted };
   }
 
   return {
@@ -1359,6 +1355,7 @@
     fmtInt: fmtInt,
     plural: plural,
     themeFor: themeFor,
+    skinTokens: skinTokens,
     unreadableReason: unreadableReason,
     unreadableSummary: unreadableSummary,
     noPictureWords: noPictureWords,
@@ -1380,7 +1377,6 @@
     undoWords: undoWords,
     whenWords: whenWords,
     undoReach: undoReach,
-    pickedWords: pickedWords,
     fmtDate: fmtDate,
     footState: footState,
     FAMILIES: FAMILIES,

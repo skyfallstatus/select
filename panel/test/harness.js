@@ -312,7 +312,8 @@ async function launch() {
   function signalEngines(sig) {
     for (const child of engines.values()) { if (child.exitCode === null && child.signalCode === null) { try { child.kill(sig); } catch (e) {} } }
   }
-  return { evalIn, open, waitFor, click, mouse, shot, close, size, problems, requests, engineEnv, engineLog, signalEngines, send: P };
+  const listen = fn => listeners.push(fn);
+  return { evalIn, open, waitFor, click, mouse, shot, close, size, problems, requests, engineEnv, engineLog, signalEngines, listen, send: P };
 }
 
 // ---------------------------------------------------------------- helpers in the page

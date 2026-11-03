@@ -254,8 +254,8 @@ test('shows on the synthetic fixture: each keeps exactly what it says, in the or
 test('shows and sorts stay honest: relative words, no verdicts, every tip says what it measures', () => {
   for (const s of C.SHOWS) {
     assert.ok(s.tip.length > 40, s.id);
-    assert.ok(s.label && s.says, s.id);
-    assert.ok(!VERDICT.test([s.label, s.says, s.none || '', s.waiting || ''].join(' ')), s.id);
+    assert.ok(s.label && !('says' in s), s.id);
+    assert.ok(!VERDICT.test([s.label, s.none || '', s.waiting || ''].join(' ')), s.id);
     noVerdict(s.tip, s.id);
   }
   for (const e of C.SORTS) {
@@ -557,16 +557,16 @@ test('no picture: the foot explains it once, and calmly', () => {
   const noDecoder = "This Mac has no decoder for H.264 10-bit, and ffmpeg isn't installed. File details are fine, picture scores are blank.";
   const tally = reasons => { const s = C.createStore(); reasons.forEach((r, i) => { C.addItems(s, [{ path: '/v/' + i + '.mp4' }]); C.ingest(s, { type: 'clip', tier: 1, path: '/v/' + i + '.mp4', reason: r }); }); return s.noPicture; };
   assert.equal(C.noPictureSummary(tally([])), '');
-  assert.equal(C.noPictureSummary(tally([noDecoder])), "1 clip is listed with blank picture scores: this Mac has no decoder for it, and ffmpeg isn't installed.");
-  assert.equal(C.noPictureSummary(tally([noDecoder, noDecoder])), "2 clips are listed with blank picture scores: this Mac has no decoder for them, and ffmpeg isn't installed.");
-  assert.equal(C.noPictureSummary(tally(["This Mac couldn't decode a frame from this clip, and ffmpeg isn't installed. Rest."])), "1 clip is listed with blank picture scores: this Mac couldn't decode it, and ffmpeg isn't installed.");
-  assert.equal(C.noPictureSummary(tally(["This Mac has no decoder for X, and ffmpeg couldn't read it either. Rest.", noDecoder])), "2 clips are listed with blank picture scores: this Mac couldn't decode them.");
+  assert.equal(C.noPictureSummary(tally([noDecoder])), "1 clip has no picture scores: this Mac has no decoder for it, and ffmpeg isn't installed.");
+  assert.equal(C.noPictureSummary(tally([noDecoder, noDecoder])), "2 clips have no picture scores: this Mac has no decoder for them, and ffmpeg isn't installed.");
+  assert.equal(C.noPictureSummary(tally(["This Mac couldn't decode a frame from this clip, and ffmpeg isn't installed. Rest."])), "1 clip has no picture scores: this Mac couldn't decode it, and ffmpeg isn't installed.");
+  assert.equal(C.noPictureSummary(tally(["This Mac has no decoder for X, and ffmpeg couldn't read it either. Rest.", noDecoder])), "2 clips have no picture scores: this Mac couldn't decode them.");
   const store = { total: 301, tier0: 301, tier1: 301, errors: 0, bad: 0, noPicture: tally([noDecoder, noDecoder]) };
   const f = C.footState(facts({ store }));
-  assert.equal(f.sentence, "301 clips in 1.8 s. 2 clips are listed with blank picture scores: this Mac has no decoder for them, and ffmpeg isn't installed.");
+  assert.equal(f.sentence, "2 clips have no picture scores: this Mac has no decoder for them, and ffmpeg isn't installed.");
   assert.equal(f.mark, 'done', 'a finished scan, not a failed one');
   assert.equal(f.verdict, 'Softest first');
-  assert.match(C.footState(facts({ store, view: V() })).sentence, /^Took 1\.8 s\. Choose what to show, or how to sort, above\. 2 clips are listed/);
+  assert.match(C.footState(facts({ store, view: V() })).sentence, /^2 clips have no picture scores/);
   assert.equal(C.footState(facts({ store, selected: 4 })).sentence.indexOf('blank'), -1, 'a selection has its own line');
 });
 
@@ -601,8 +601,9 @@ test('foot: before scanning', () => {
   assert.deepStrictEqual(f.actions, ['scan']);
   assert.equal(f.primary, 'scan');
   assert.ok(!f.green);
-  assert.match(C.footState(facts({ scan: null, rows: 0, project: null })).sentence, /Open a project/);
-  assert.match(C.footState(facts({ scan: null, rows: 0, source: 'folder' })).sentence, /this folder/);
+  assert.equal(C.footState(facts({ scan: null, rows: 0, project: null })).verdict, 'No project open');
+  assert.equal(C.footState(facts({ scan: null, rows: 0, project: null, connected: false })).verdict, 'Waiting for Premiere');
+  assert.equal(C.footState(facts({ scan: null, rows: 0, source: 'folder', project: null })).verdict, 'Nothing scanned yet', 'a folder needs no project');
 });
 
 test('foot: scanning', () => {
@@ -610,9 +611,9 @@ test('foot: scanning', () => {
   const f = C.footState(facts({ store, scan: { state: 'Scanning', failure: null, seconds: 1.8, stopping: false } }));
   assert.equal(f.mark, 'running');
   assert.equal(f.verdict, 'Reading 214 of 301');
-  assert.equal(f.sentence, '119 clips per second');
+  assert.equal(f.sentence, '', 'one line: the count is the progress');
   assert.deepStrictEqual(f.actions, ['stop']);
-  assert.ok(f.meter > 0.7 && f.meter < 0.8, String(f.meter));
+  assert.equal(f.meter, undefined, 'no bar');
   assert.ok(!f.green);
 });
 
@@ -620,25 +621,26 @@ test('foot: finished, with Scan gone from the foot', () => {
   const f = C.footState(facts());
   assert.equal(f.mark, 'done');
   assert.equal(f.verdict, 'Softest first');
-  assert.equal(f.sentence, '301 clips in 1.8 s.');
+  assert.equal(f.sentence, '', 'a sort keeps every clip, so there is nothing to add');
   assert.deepStrictEqual(f.actions, ['label', 'columns', 'bins']);
   assert.equal(f.primary, 'bins');
   assert.ok(!f.binsOff && !f.green);
   const unsorted = C.footState(facts({ view: V() }));
   assert.equal(unsorted.verdict, '301 clips read');
-  assert.equal(unsorted.sentence, 'Took 1.8 s. Choose what to show, or how to sort, above.');
+  assert.equal(unsorted.sentence, '');
   assert.ok(unsorted.binsOff, 'bins need a show, a sort or a colour');
-  assert.equal(C.footState(facts({ selected: 4 })).sentence, '4 of 301 clips selected. Label, Add Columns and Sort into Bins use these.');
+  assert.equal(C.footState(facts({ selected: 4 })).verdict, '4 of 301 clips selected');
+  assert.equal(C.footState(facts({ selected: 4 })).sentence, '');
   const filtered = C.footState(facts({ shown: 12, view: V({ show: 'silent' }) }));
   assert.equal(filtered.verdict, 'Silent');
-  assert.equal(filtered.sentence, '12 of 301 clips. No audio, or silence wherever it was sampled.');
+  assert.equal(filtered.sentence, '12 of 301 clips');
   assert.ok(!filtered.binsOff);
   const groups = C.footState(facts({ shown: 90, groupCount: 30, view: V({ show: 'similar', sort: [by('sharpness', -1)] }) }));
   assert.equal(groups.verdict, 'Similar shots, sharpest first');
-  assert.equal(groups.sentence, '30 groups, 90 of 301 clips. Clips that look alike, side by side.');
+  assert.equal(groups.sentence, '30 groups');
   const bright = C.footState(facts({ view: V({ sort: [by('luma', -1)] }) }));
   assert.equal(bright.verdict, 'Brightest first');
-  assert.equal(bright.sentence, '301 clips in 1.8 s.');
+  assert.equal(bright.sentence, '');
 });
 
 test('foot: a new source brings Scan back, and the old results stay', () => {
@@ -647,13 +649,14 @@ test('foot: a new source brings Scan back, and the old results stay', () => {
   const f = C.footState(facts({ scan: { state: 'Done', seconds: 2, failure: null }, source: 'folder', rescan: true }));
   assert.deepStrictEqual(f.actions, ['scan']);
   assert.equal(f.primary, 'scan');
-  assert.match(f.sentence, /last scan/);
+  assert.equal(f.verdict, 'Ready to scan');
+  assert.equal(f.sentence, '');
 });
 
 test('foot: stopped, failed, and nothing readable', () => {
   const stopped = C.footState(facts({ store: { total: 301, tier0: 200, tier1: 120, errors: 0, bad: 0 }, scan: { state: 'Stopped', failure: null, seconds: 1, stopping: false } }));
   assert.equal(stopped.verdict, 'Stopped');
-  assert.equal(stopped.sentence, '120 of 301 clips read. What was read stays.');
+  assert.equal(stopped.sentence, '120 of 301 clips read.');
   assert.equal(stopped.primary, 'scan');
   const failed = C.footState(facts({ scan: { state: 'Failed', failure: C.engineFailure({ errorCode: 'ENOENT' }, 0), seconds: 0, stopping: false } }));
   assert.equal(failed.mark, 'failed');
@@ -674,7 +677,7 @@ test('green: only when what was read back matches what was sent', () => {
   const bins = C.writeOutcome('bins', binsSent(), { ok: true, moved: 3, failed: [], placed: placedAll(), buckets: [{ name: '01 Softest', ids: ['2', '1'] }, { name: '02 Softer', ids: ['3'] }] });
   assert.equal(bins.green, true);
   assert.equal(bins.verdict, 'Sorted into 2 bins');
-  assert.equal(bins.sentence, '3 clips moved. Your files weren\'t touched.');
+  assert.equal(bins.sentence, '', 'a proved write needs no words beyond its verdict');
   const foot = C.footState(facts({ outcome: bins }));
   assert.ok(foot.green);
   assert.equal(foot.mark, 'seal');
@@ -695,7 +698,7 @@ test('green: never on a partial or unconfirmed write, whatever the host calls it
   // One clip stayed behind, and the host still said ok.
   let o = never(C.writeOutcome('bins', binsSent(), { ok: true, moved: 3, failed: [], placed: placedAll(), buckets: [{ name: '01 Softest', ids: ['1'] }, { name: '02 Softer', ids: ['3'] }] }));
   assert.equal(o.verdict, 'Moved 2 of 3 clips');
-  assert.equal(o.sentence, '1 clip did not land where it should. Your files weren\'t touched.');
+  assert.equal(o.sentence, '1 clip did not land where it should.');
   // In the wrong bin.
   o = never(C.writeOutcome('bins', binsSent(), { ok: true, moved: 3, failed: [], placed: placedAll(), buckets: [{ name: '01 Softest', ids: ['1', '3'] }, { name: '02 Softer', ids: ['2'] }] }));
   assert.equal(o.verdict, 'Moved 1 of 3 clips');
@@ -726,7 +729,7 @@ test('green: never on a partial or unconfirmed write, whatever the host calls it
 });
 
 test('undo words: never green, and honest about what stayed', () => {
-  assert.equal(C.undoOutcome({ restored: 301, skipped: 0, failed: [] }).sentence, '301 items back where they were.');
+  assert.equal(C.undoOutcome({ restored: 301, skipped: 0, failed: [] }).sentence, '');
   const some = C.undoOutcome({ restored: 5, skipped: 1, failed: [] });
   assert.match(some.sentence, /1 changed since and left alone/);
   assert.ok(!some.green);
@@ -769,6 +772,22 @@ test('tokens: exactly Ingest\'s, and every text colour measures at least 4.5:1',
   }
   assert.ok(contrast(light.ink3, light.surface) < 4.5, 'ink3 stays for placeholders only');
   assert.ok(!/color:\s*var\(--ink3\)/.test(css.replace(/#(folder|search)::placeholder \{[^}]*\}/g, '')), 'ink3 is used by the placeholder and by nothing else');
+});
+
+test('the ground is Premiere\'s own grey at every brightness, and secondary text still reads at 4.5:1 on it', () => {
+  for (const v of [29, 35, 50, 75, 100, 127, 128, 160, 184, 214, 240]) {
+    const t = C.skinTokens({ red: v, green: v, blue: v });
+    const grey = '#' + v.toString(16).padStart(2, '0').toUpperCase().repeat(3);
+    if ([29, 35, 50, 75, 184, 214, 240].includes(v)) { assert.equal(t.surface, grey); }
+    assert.equal(t.theme, v >= 128 ? 'light' : 'dark');
+    const ink = t.theme === 'dark' ? '#EDEDEE' : '#1D1D1F';
+    for (const bg of [t.surface, t.foot]) {
+      assert.ok(contrast(t.ink2, bg) >= 4.5, `ink2 ${t.ink2} on ${bg}: ${contrast(t.ink2, bg).toFixed(2)}`);
+      assert.ok(contrast(ink, bg) >= 4.5, `ink on ${bg}: ${contrast(ink, bg).toFixed(2)}`);
+    }
+  }
+  assert.equal(C.skinTokens({ red: 35, green: 35, blue: 35 }).ink2, '#ADADB1');
+  assert.equal(C.skinTokens(null), null);
 });
 
 // A project in memory, shaped as the host script sees Premiere. `lose` drops one id's move, as a failed read-back would show.
@@ -1141,7 +1160,7 @@ test('tier 2 failure: nothing Tiers 0 and 1 found is touched, and it is not call
   assert.equal(s.rows[0].durationS, 5);
   assert.equal(C.unreadableSummary(s.rows), '');
   assert.equal(C.footState(facts({ store: s, rows: 3, shown: 3 })).mark, 'done');
-  assert.equal(C.notUnderstoodSummary(s), '2 clips could not be looked at more closely. Their file details and picture scores stand.');
+  assert.equal(C.notUnderstoodSummary(s), '2 clips couldn\'t be looked at closely.');
   const early = C.createStore();
   C.addItems(early, [{ path: '/v/x.mp4' }]);
   C.ingest(early, { type: 'error', path: '/v/x.mp4', message: 'unreadable' });
@@ -1170,9 +1189,8 @@ test('three stages: rows usable from Tier 1, then the foot says the rest is stil
   const u = C.footState(facts({ store, scan, view: V({ sort: [by('sharpness', 1)] }) }));
   assert.equal(u.kind, 'understanding');
   assert.equal(u.mark, 'running');
-  assert.equal(u.verdict, 'Softest first');
-  assert.equal(u.sentence, 'Finding people, words, sound and colour: 120 of 300');
-  assert.ok(u.meter > .39 && u.meter < .41);
+  assert.equal(u.verdict, 'Looking closer 120 of 300');
+  assert.equal(u.sentence, '');
   assert.deepStrictEqual(u.actions, ['stop', 'label', 'columns', 'bins'], 'the writes work now, because Tier 1 is in');
   assert.equal(u.primary, 'bins');
   assert.equal(C.footState(facts({ store: { ...store, tier1: 100 }, scan })).kind, 'scanning', 'stage two still says Reading');
@@ -1199,14 +1217,14 @@ test('a choice with no data says so plainly, a waiting one says waiting', () => 
   assert.equal(C.dataStatus(s.rows, 'silent', false), 'ok', 'Silent listens to what Tiers 0 and 1 read');
   assert.equal(C.dataStatus(s.rows, null, false), 'ok');
   const f = C.footState(facts({ status: 'none', shown: 0, view: V({ show: 'people' }) }));
-  assert.equal(f.sentence, '0 of 301 clips. No clip has people data, so there is nothing to go on.');
-  assert.equal(C.footState(facts({ status: 'waiting', shown: 0, view: V({ show: 'people' }) })).sentence, '0 of 301 clips. Someone seen in the frames looked at.');
+  assert.equal(f.sentence, 'No people data in this scan.');
+  assert.equal(C.footState(facts({ status: 'waiting', shown: 0, view: V({ show: 'people' }) })).sentence, '0 of 301 clips');
 });
 
 test('foot and tiles: a search says how many and why, and a tile keeps one fact', () => {
   const q = C.footState(facts({ shown: 12, query: 'red' }));
-  assert.equal(q.sentence, '12 of 301 clips match “red”.');
-  assert.equal(C.footState(facts({ shown: 12, query: 'red', view: V({ show: 'speech' }) })).sentence, '12 of 301 clips match “red”. Speech heard in the audio sampled.');
+  assert.equal(q.sentence, '', 'the search box already counts');
+  assert.equal(C.footState(facts({ shown: 12, query: 'red', view: V({ show: 'speech' }) })).sentence, '');
   assert.equal(C.footState(facts({ shown: 9, view: V({ sort: [by('colorName', 1)], family: 'teal' }) })).verdict, 'Teal');
   const row = { path: '/v/a.mp4', name: 'a.mp4', durationS: 75, sharpness: .123, labels: [{ name: 'oven', conf: .9 }], nameFold: 'a mp4', error: null };
   assert.equal(C.tileFact(row, V()), '1:15.0', 'length, with nothing else to say');
@@ -1536,7 +1554,6 @@ test('interviews: speech and a face for 15 seconds or more; a shorter talking cl
   assert.equal(C.SHAKE_LIMIT, 0.6);
   const steady = [.1, .35, .56, .6, .61, .9].map((shake, i) => clip('s' + i, { shake })).concat(clip('nogyro', { shake: null }), clip('short-steady', { shake: 0, durationS: 14.9 }));
   assert.deepStrictEqual(C.computeView(steady, V({ show: 'interviews' })).order.map(i => steady[i].name), ['s0', 's1', 's2', 's3', 'nogyro']);
-  assert.match(C.SHOW.interviews.says, /15 seconds or longer/);
   assert.match(C.SHOW.interviews.tip, /15 seconds or longer/);
 });
 
@@ -1559,29 +1576,28 @@ test('showCount: what each Show would leave, Similar shots included', () => {
   assert.equal(C.showCount([], 'interviews'), 0);
 });
 
-test('foot wording: the verdict names the view, and a finished sentence says what a Show keeps', () => {
+test('foot wording: the verdict names the view, and the sentence only counts what a view leaves out', () => {
   const say = over => C.footState(facts(over));
   assert.equal(say({ view: V() }).verdict, '301 clips read');
-  assert.equal(say({ view: V() }).sentence, 'Took 1.8 s. Choose what to show, or how to sort, above.');
-  assert.equal(say({ view: V(), scan: { state: 'Done', failure: null, seconds: 12.4, stopping: false } }).sentence, 'Took 12 s. Choose what to show, or how to sort, above.');
+  assert.equal(say({ view: V() }).sentence, '');
   const sorted = say({ view: V({ sort: [by('shake', 1)] }), scan: { state: 'Done', failure: null, seconds: 3.21, stopping: false } });
   assert.equal(sorted.verdict, 'Steadiest first');
-  assert.equal(sorted.sentence, '301 clips in 3.2 s.', 'a sort alone keeps every clip, so the head is all there is to say');
+  assert.equal(sorted.sentence, '', 'a sort alone keeps every clip, so there is nothing to say');
   const all = say({ view: V({ show: 'speech' }) });
-  assert.equal(all.sentence, '301 clips in 1.8 s. Speech heard in the audio sampled.');
+  assert.equal(all.sentence, '');
   const full = say({ shown: 4, view: V({ show: 'interviews', sort: [by('sharpness', -1)], family: 'red' }) });
   assert.equal(full.verdict, 'Red, interviews, sharpest first');
-  assert.equal(full.sentence, '4 of 301 clips. Speech and a face, 15 seconds or longer.');
+  assert.equal(full.sentence, '4 of 301 clips');
   for (const s of C.SHOWS.filter(x => !x.group)) {
-    assert.equal(say({ shown: 7, view: V({ show: s.id }) }).sentence, '7 of 301 clips. ' + s.says, s.id);
-    if (s.none) { assert.equal(say({ shown: 7, view: V({ show: s.id }), status: 'none' }).sentence, '7 of 301 clips. ' + s.none, s.id + ' with nothing to go on'); }
+    assert.equal(say({ shown: 7, view: V({ show: s.id }) }).sentence, '7 of 301 clips', s.id);
+    if (s.none) { assert.equal(say({ shown: 7, view: V({ show: s.id }), status: 'none' }).sentence, s.none, s.id + ' with nothing to go on'); }
     assert.equal(say({ shown: 7, view: V({ show: s.id }) }).verdict, s.label);
   }
-  assert.equal(say({ shown: 0, groupCount: 0, view: V({ show: 'similar' }), status: 'none' }).sentence, '0 groups, 0 of 301 clips. No similar shots in this scan.');
-  assert.equal(say({ shown: 7, groupCount: 3, view: V({ show: 'similar', family: 'teal' }) }).sentence, '3 groups, 7 of 301 clips. Clips that look alike, side by side.');
+  assert.equal(say({ shown: 0, groupCount: 0, view: V({ show: 'similar' }), status: 'none' }).sentence, 'No similar shots in this scan.');
+  assert.equal(say({ shown: 7, groupCount: 3, view: V({ show: 'similar', family: 'teal' }) }).sentence, '3 groups');
   const teal = say({ shown: 9, view: V({ family: 'teal' }) });
   assert.equal(teal.verdict, 'Teal');
-  assert.equal(teal.sentence, '9 of 301 clips.');
+  assert.equal(teal.sentence, '9 of 301 clips');
   assert.ok(!teal.binsOff);
   assert.ok(say({ view: V({ sort: [by('name', 1)] }) }).binsOff, 'a name order makes no bins');
   assert.equal(say({ view: V({ sort: [by('name', 1)] }) }).verdict, 'A to Z');
@@ -1589,12 +1605,11 @@ test('foot wording: the verdict names the view, and a finished sentence says wha
   const store = { total: 301, tier0: 301, tier1: 301, errors: 1, tier2: 120, tier2Failed: 0, bad: 0 };
   const scan = { state: 'Scanning', failure: null, seconds: 2, stopping: false };
   const stage3 = view => C.footState(facts({ store, scan, view }));
-  assert.equal(stage3(V()).verdict, '301 clips read');
+  assert.equal(stage3(V()).verdict, 'Looking closer 120 of 300');
   assert.ok(stage3(V()).binsOff);
-  assert.equal(stage3(V()).sentence, 'Finding people, words, sound and colour: 120 of 300');
-  assert.equal(stage3(V({ show: 'similar', family: 'teal' })).verdict, 'Teal, similar shots');
+  assert.equal(stage3(V()).sentence, '');
+  assert.equal(stage3(V({ show: 'similar', family: 'teal' })).verdict, 'Looking closer 120 of 300', 'the toolbar says the view');
   assert.ok(!stage3(V({ show: 'similar' })).binsOff);
-  assert.match(stage3(V({ show: 'interviews' })).sentence, /^Finding people, words, sound and colour: /);
 });
 
 test('public: the panel carries nothing private, and asks nothing of the network', () => {
@@ -1682,11 +1697,11 @@ test('H3: a write stopped or refused part way says what landed, is never green, 
   const stopped = C.writeOutcome('label', { items: pairs('1', '2', '3', '4') }, { changed: 2, failed: [], skipped: [], unsent: 2 }, 'Mango');
   assert.ok(!stopped.green);
   assert.equal(stopped.verdict, 'Labelled 2 of 4 clips');
-  assert.equal(stopped.sentence, 'Stopped, so the last 2 items weren\'t written. Your files weren\'t touched.');
+  assert.equal(stopped.sentence, 'Stopped, so the last 2 items weren\'t written.');
   assert.equal(stopped.undo, true);
   const refused = C.writeOutcome('columns', { fields: C.FIELDS, rows: [{ items: pairs('1', '2'), values: {} }] }, { changed: 1, matched: 1, failed: [], skipped: [], unsent: 1, error: 'Playback is running. Stop it and try again. Nothing was changed.', columns: { shown: true } });
   assert.ok(!refused.green);
-  assert.match(refused.sentence, /The rest weren't sent: Playback is running\. Stop it and try again\. Your files/);
+  assert.match(refused.sentence, /The rest weren't sent: Playback is running\. Stop it and try again\.$/);
   assert.ok(!/Nothing was changed/.test(refused.sentence), 'part way, nothing changed is no longer true');
   const late = C.undoOutcome({ restored: 100, skipped: 0, failed: [], unsent: 300, error: 'Premiere didn\'t answer within 2 minutes.' }, true);
   assert.equal(late.verdict, 'Partly undone');
@@ -1697,18 +1712,16 @@ test('H3: the foot shows a long write\'s real progress, with Stop, and a short o
   const base = facts({});
   const long = C.footState({ ...base, busy: 'Adding columns to 973 clips', write: { kind: 'write', verb: 'Adding columns to', unit: 'clip', done: 300, total: 973, stopping: false } });
   assert.equal(long.verdict, 'Adding columns to 300 of 973 clips');
-  assert.equal(long.sentence, 'Premiere takes them 100 at a time. Stop ends it after this batch, and Undo Write takes back what was written.');
-  assert.ok(Math.abs(long.meter - 300 / 973) < 1e-9);
+  assert.equal(long.sentence, '');
   assert.deepStrictEqual(long.actions, ['stop']);
   const stopping = C.footState({ ...base, busy: 'x', write: { kind: 'write', verb: 'Labelling', done: 300, total: 973, stopping: true } });
   assert.equal(stopping.verdict, 'Stopping after this batch');
   assert.deepStrictEqual(stopping.actions, []);
   const undo = C.footState({ ...base, busy: 'x', write: { kind: 'undo', verb: 'Putting back', unit: 'item', done: 0, total: 400, stopping: false } });
   assert.equal(undo.verdict, 'Putting back 400 items');
-  assert.match(undo.sentence, /what isn't back yet stays for the next Undo Write/);
+  assert.equal(undo.sentence, '');
   const short = C.footState({ ...base, busy: 'Labelling 4 clips', write: { kind: 'write', verb: 'Labelling', unit: 'clip', done: 0, total: 4, stopping: false } });
   assert.equal(short.verdict, 'Labelling 4 clips');
-  assert.equal(short.meter, undefined);
 });
 
 test('H1: Undo records live on disk per project, newest last, ten kept, and read back after a reload', () => {
@@ -1809,8 +1822,8 @@ test('N6: the docs say what the panel does: Undo Write\'s reach per project, whi
 });
 
 test('H1: the write sheets say how far Undo Write reaches, and Undo Write says what it will put back', () => {
-  assert.equal(C.undoReach(3), 'Undo Write in Select takes back the last 10 writes to this project, newest first, and keeps them when the panel reloads.');
-  assert.match(C.undoReach(10), /pushes the oldest of them out of reach/);
+  assert.equal(C.undoReach(3), '', 'said only when it matters');
+  assert.match(C.undoReach(10), /pushes the oldest of the last 10 writes out of Undo Write's reach/);
   assert.equal(C.undoWords({ kind: 'columns', restore: { items: [1, 2, 3] } }), 'Puts back what the Select columns held on 3 clips before this write.');
   assert.equal(C.undoWords({ kind: 'bins', meta: { root: 'SELECT 2026-11-03 Sharpest first' }, restore: { items: [1, 2] } }), 'Moves 2 clips back to the bins they came from, and removes SELECT 2026-11-03 Sharpest first once it is empty.');
   const now = new Date(2026, 10, 3, 18, 0).getTime();
@@ -1880,7 +1893,7 @@ test('L1: an Undo that put nothing back never says Undone', () => {
   assert.equal(C.undoOutcome({ restored: 0, skipped: 0, failed: [] }).sentence, 'There was nothing left to put back.');
 });
 
-test('L2: a write during stage three keeps the scan\'s Stop and its meter', () => {
+test('L2: a write during stage three keeps the scan\'s Stop', () => {
   const store = C.createStore();
   C.addItems(store, [{ path: '/a/1.mp4', id: '1' }, { path: '/a/2.mp4', id: '2' }]);
   ['/a/1.mp4', '/a/2.mp4'].forEach(p => { C.ingest(store, { type: 'clip', tier: 0, path: p, durationS: 20 }); C.ingest(store, { type: 'clip', tier: 1, path: p, sharpness: 0.5 }); });
@@ -1890,10 +1903,8 @@ test('L2: a write during stage three keeps the scan\'s Stop and its meter', () =
   const f = C.footState({ ...scanning, outcome: out });
   assert.ok(f.green);
   assert.deepStrictEqual(f.actions, ['stop', 'undo']);
-  assert.equal(f.meter, 0.5, 'one of two clips looked at closely');
   const after = C.footState({ ...scanning, scan: { ...scanning.scan, state: 'Done' }, outcome: out });
   assert.deepStrictEqual(after.actions, ['undo']);
-  assert.equal(after.meter, undefined);
 });
 
 test('L3: listing a folder can be stopped, and stops by itself past the cap', async () => {
@@ -1921,16 +1932,15 @@ test('L3: listing a folder can be stopped, and stops by itself past the cap', as
   }
 });
 
-test('L5: a Selection scan says where its clips come from, and two selections are refused rather than guessed', () => {
+test('L5: a Selection scan knows where its clips come from, and two selections are refused rather than guessed', () => {
   const h = hostWithViews([], [[2]]), day = h.root.createBin('Day 2');
   h.clip(2).moveBin(day);
   const one = h.call('collect', { mode: 'selection' });
   assert.ok(one.ok);
   assert.deepStrictEqual(one.picked, { clips: 1, where: ['Day 2'] });
-  assert.equal(C.pickedWords(one.picked), 'Scanning the 1 clip selected in “Day 2”.');
   const bin = hostWithViews([], [[]]);
   bin.sandbox.app.getProjectViewSelection = () => [bin.root.kids[0], bin.root.kids[1]];
-  assert.equal(C.pickedWords(bin.call('collect', { mode: 'selection' }).picked), 'Scanning the 2 clips selected in the top of the project.');
+  assert.deepStrictEqual(bin.call('collect', { mode: 'selection' }).picked, { clips: 2, where: [''] });
   const two = hostWithViews([], [[1], [3]]).call('collect', { mode: 'selection' });
   assert.equal(two.ok, false);
   assert.equal(two.code, 'several-selections');
@@ -1938,7 +1948,6 @@ test('L5: a Selection scan says where its clips come from, and two selections ar
   const current = hostWithViews([1], [[1], [3]]).call('collect', { mode: 'selection' });
   assert.ok(current.ok, 'the selection in focus wins');
   assert.deepStrictEqual(current.items.map(i => i.id), ['1']);
-  assert.match(C.pickedWords({ clips: 40, where: ['A', 'B', 'C', 'D'] }), /in 4 bins\.$/);
 });
 
 test('wording: project columns use the panel\'s words, Undo has one name, and refusals name projects plainly', () => {
