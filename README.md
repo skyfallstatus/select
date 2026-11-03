@@ -1,14 +1,12 @@
 # Select
 
-A Premiere Pro panel that ranks hundreds of clips in seconds, so you know where to look first.
+A Premiere Pro panel that sorts and searches hundreds of clips in seconds, so you know where to look first.
 
 <p align="center">
   <img src="docs/media/demo.png" width="760" alt="An animated illustration of the Select panel with invented clips. The grid of clips sorts itself by colour into rainbow order, a search narrows it down, and a write to the project ends with the bottom of the panel turning green.">
 </p>
 
-Select lives in a panel inside Premiere. Choose your clips, press **Scan**, and every clip gets looked at: three moments for picture, a few short stretches for sound, and the file's own details. Then two menus do the rest. **Show** picks which clips: interviews, people, no people, mediums, wides, speech, music, silent, text on screen or similar shots. **Sort** puts them in order: by shoot time, length, sharpness, brightness, highlights, motion, camera shake, loudness, colour or name. The two work together, so *Interviews, longest first* or *People, softest first* is two clicks. A colour dot narrows it again, and search finds what's in the clips.
-
-Everything happens on your Mac. No clip, frame or word leaves it.
+Select lives in a panel inside Premiere. Pick your clips, press **Scan**, and a few seconds later every clip has been looked at: its picture, its sound and the camera's own details. Then two menus do the rest. **Show** picks which clips you see, such as interviews, people, speech or similar shots. **Sort** puts them in order, by shoot time, length, sharpness, brightness, colour and more. They work together, so *Interviews, longest first* is two clicks.
 
 <p align="center">
   <picture>
@@ -19,20 +17,13 @@ Everything happens on your Mac. No clip, frame or word leaves it.
 
 Sorting changes nothing. Your project only changes when you press a button that says so, and your files never change at all.
 
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/media/panel-dark.png">
-    <img src="docs/media/panel.png" width="760" alt="The Select panel after a scan, listing clips in rows with columns for their scores, sorted softest first, with the Show and Sort menus along the top.">
-  </picture>
-</p>
-
 Select is in beta, so please try the buttons that write to your project on a copy of it first.
 
 ## Download
 
 Get **Select.pkg** from the [latest release](https://github.com/skyfallstatus/select/releases/latest).
 
-You'll need a Mac with macOS 13 or later, and Premiere Pro 23 or later. So far it has only been run on Premiere 26.5, on macOS 27 with an M5 Max. Older versions of both are untested, and it's built for Intel too, but it has never run on an Intel Mac. If you're on one of those, please try it and tell us how it goes. Windows isn't supported.
+You'll need a Mac with macOS 13 or later, and Premiere Pro 2023 or later. So far it has only been tested on Premiere 26.5, on macOS 27 with Apple silicon. Older versions and Intel Macs are untested, so if you're on one, please try it and tell us how it goes. Windows isn't supported.
 
 ## Installing
 
@@ -41,16 +32,30 @@ Select isn't signed by Apple yet, so macOS asks you to confirm the first time. I
 1. Open `Select.pkg`. macOS says it can't be opened. Click **Done**.
 2. Go to **System Settings › Privacy & Security** and scroll down to **Security**.
 3. Next to the message about Select, click **Open Anyway**, enter your password, then click **Open**.
-4. Follow the installer. It asks for your password again, because the folder it uses is shared by everyone on the Mac.
-5. Quit Premiere if it's open, then open it again. Select is under **Window › Extensions**.
+4. Follow the installer. It asks for your password again.
+5. Quit Premiere if it's open, and open it again.
+6. In Premiere, choose **Window › Extensions › Select**. Dock the panel wherever you like; Premiere remembers.
 
-On macOS 13 or 14 you can skip the first three steps: Control-click the package and choose **Open**.
+On macOS 13 or 14 you can skip steps 1 to 3: Control-click the package and choose **Open**.
 
-You don't need the Terminal, and you don't need to turn on Adobe's debug mode.
+You don't need the Terminal, and you don't need Adobe's debug mode.
 
-To remove Select, quit Premiere and delete the `com.skyfallstatus.select` folder from `/Library/Application Support/Adobe/CEP/extensions`. macOS asks for your password. Select also remembers its results in `~/Library/Caches/com.skyfallstatus.select`, including thumbnails, file paths and any camera location, so delete that folder too.
+## Using it
 
-## Show and Sort
+1. At the top right, choose what to scan: **Selection** (clips or bins selected in the Project panel), **Project**, or a **Folder** on disk.
+2. Press **Scan**. The list fills in straight away, and the deeper look at people, words, sound and colour finishes a few seconds later.
+3. Use **Show** and **Sort**, the colour dots, and the search box. The grid button at the right shows big thumbnails.
+4. When the view is what you want, **Label**, **Add Columns** or **Sort into Bins** write it to the project. **Undo** takes it back.
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/media/panel-dark.png">
+    <img src="docs/media/panel.png" width="760" alt="The Select panel after a scan, listing clips in rows with columns for their scores, sorted softest first, with the Show and Sort menus along the top.">
+  </picture>
+</p>
+
+<details>
+<summary>What Show and Sort look at, and how sure they are</summary>
 
 All of these are places to look first. None of them is a verdict on a clip.
 
@@ -76,6 +81,8 @@ All of these are places to look first. None of them is a verdict on a clip.
 
 **Sort into Bins** follows what's on screen: a bin per colour when sorted by colour, a bin per day in shoot order, a bin per group of similar shots, one bin for a Show such as Interviews, and five bins from top to bottom for the other sorts.
 
+</details>
+
 <p align="center">
   <img src="docs/media/panel-sorted.png" width="760" alt="The Select panel after Sort into Bins, with clips sorted softest first. The bottom of the panel is green and says Sorted into 5 bins, 301 clips moved, your files were not touched, with an Undo button.">
 </p>
@@ -87,9 +94,10 @@ All of these are places to look first. None of them is a verdict on a clip.
 - **It's quick, and how quick depends on your Mac.** On an M5 Max from a USB SSD, 973 clips, 510 GB, got their file details and scores in about 5 seconds, which is about 2 seconds per 400, and the full look at people, words, sound and colour finished after 14 seconds. The list is usable from the start. A rescan took under a tenth of a second, because results are remembered. Yours will vary.
 - **Labels and words are suggestions.** They come from Apple's on-device models, and they're often right and sometimes odd. On 60 real clips the top labels were fair on 47 of 57, and the misses were mostly art taken literally.
 - **Camera and lens depend on sidecar files.** Select reads them from the small file some cameras write beside each clip, such as Sony's `M01.XML`. Move a clip without it and those columns go blank.
-- **A blank score means Select couldn't get it, never a guess.** Blank clips sort last. When a clip's picture can't be read, Select says why. If your Mac has no decoder for a clip, the file details stay and the picture scores stay blank. See [Formats](#formats).
+- **A blank score means Select couldn't get it, never a guess.** Blank clips sort last. When a clip's picture can't be read, Select says why. If your Mac has no decoder for a clip, the file details stay and the picture scores stay blank. Open **Formats** below for more.
 
-## Formats
+<details>
+<summary>Formats</summary>
 
 MP4 and MOV work on their own. MXF works when [ffmpeg](https://ffmpeg.org) is installed, and it's much slower, because each clip goes through ffmpeg: the full look took 0.3 to 2 seconds per MXF clip on the same M5 Max, against about 0.15 seconds for an MP4. RED and BRAW aren't supported yet.
 
@@ -99,15 +107,19 @@ To install ffmpeg, get [Homebrew](https://brew.sh) and run `brew install ffmpeg`
 
 The full picture, and how sure we are of each part, is in [docs/FORMATS.md](docs/FORMATS.md).
 
+</details>
+
 ## Privacy
 
-The panel sends nothing. There's no account, no tracking and no check for updates, so a new version is something you download yourself.
-
-Labels, faces, words and sounds are all worked out on your Mac, with models that come with macOS. We scanned with the network blocked and every result came out the same, and the engine opened no network connection during a scan.
+Select sends nothing. There's no account, no tracking and no check for updates. Labels, faces, words and sounds are all worked out on your Mac, with models that come with macOS.
 
 **Report a Bug** only opens a GitHub page in your browser. Nothing is sent unless you type it in and press submit. Please leave out file names, paths and client names.
 
-Results, thumbnails and the fingerprints used to compare shots stay on your Mac, in `~/Library/Caches/com.skyfallstatus.select`. It's kept under 2 GB, about 50,000 clips, by dropping the clips used longest ago. Select writes nothing beside your media.
+Results and thumbnails stay on your Mac, in `~/Library/Caches/com.skyfallstatus.select`, kept under 2 GB. Select writes nothing beside your media.
+
+## Removing it
+
+Quit Premiere, then delete the `com.skyfallstatus.select` folder from `/Library/Application Support/Adobe/CEP/extensions`. macOS asks for your password. To remove its remembered results too, delete `~/Library/Caches/com.skyfallstatus.select`.
 
 ## Contributing
 
