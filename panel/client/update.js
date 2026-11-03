@@ -808,6 +808,7 @@
         line.appendChild(a);
       }
       line.hidden = false;
+      if (app && app.reveal) { app.reveal(); }
       if (words.fades) { fadeTimer = win.setTimeout(function () { line.hidden = true; }, 8000); }
     }
 

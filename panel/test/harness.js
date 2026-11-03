@@ -795,7 +795,7 @@ async function main() {
     await waitModal();
     const colText = await dialogText();
     const colFields = (/^Rank, .*$/m.exec(colText) || [''])[0].split(', ');
-    check('Add Columns confirmation: count, the 13 fields in the panel\'s words, and the undo truth', /^Add columns to 400 clips\?/.test(colText) && /^Rank, Sharpness, Brightness, Highlights, Motion, Loudness, People/.test(colFields.join(', ')) && colFields.length === 13 && /Too big for Cmd\+Z\. Undo Write takes it back\./.test(colText) && /Undo Write clears the values\. The columns stay in the Project panel\./.test(colText), colText);
+    check('Add Columns confirmation: count, the 13 fields in the panel\'s words, and the undo truth', /^Add columns to 400 clips\?/.test(colText) && /^Rank, Sharpness, Brightness, Highlights, Motion, Loudness, People/.test(colFields.join(', ')) && colFields.length === 13 && /Too big for Cmd\+Z: your earlier edits drop out of Premiere's undo history\. Undo Write takes this write back\./.test(colText) && /Undo Write clears the values\. The columns stay in the Project panel\./.test(colText), colText);
     await b.shot('06-columns-dialog');
     await b.click('#dialog-ok');
     await b.waitFor(`/Added 13 columns/.test(${text('foot-verdict')})`);
@@ -812,7 +812,7 @@ async function main() {
     await waitModal();
     const binText = await dialogText();
     check('Sort into Bins confirmation names the top bin and every bin with its count', /^Sort 400 clips into bins\?/.test(binText) && /SELECT \d{4}-\d\d-\d\d Sharpest first/.test(binText) && /01 Sharpest\s+\d+/.test(binText) && /05 Softest\s+\d+/.test(binText), binText);
-    check('the sheet has a radius of 14, one cobalt button and the undo truth', (await b.evalIn(`getComputedStyle(document.getElementById('dialog')).borderRadius`)) === '14px' && (await b.evalIn(`Array.from(document.querySelectorAll('#dialog button')).filter(function(x){return getComputedStyle(x).backgroundColor==='rgb(47, 111, 230)';}).length`)) === 1 && /Too big for Cmd\+Z\. Undo Write takes it back\./.test(binText));
+    check('the sheet has a radius of 14, one cobalt button and the undo truth', (await b.evalIn(`getComputedStyle(document.getElementById('dialog')).borderRadius`)) === '14px' && (await b.evalIn(`Array.from(document.querySelectorAll('#dialog button')).filter(function(x){return getComputedStyle(x).backgroundColor==='rgb(47, 111, 230)';}).length`)) === 1 && /Too big for Cmd\+Z: your earlier edits drop out of Premiere's undo history\./.test(binText));
     await b.shot('07-bins-dialog');
     await b.click('#dialog-ok');
     await b.waitFor(`/Sorted into/.test(${text('foot-verdict')})`);
@@ -1161,6 +1161,8 @@ async function main() {
     await b.evalIn(`__mock.project={path:'/Volumes/Field SSD/Projects/other.prproj',name:'other.prproj'};__mock.items=[{id:'q1',path:'/Volumes/Field SSD/f/A0001.MP4',name:'A0001.MP4'}];__mock.calls.length=0`);
     await b.click('#do-label');
     await waitModal();
+    const named = await dialogText();
+    check('the confirmation names the project in front', /\bother\b/.test(named) && !/lantern-spring/.test(named), named);
     await b.click('#dialog-ok');
     await b.waitFor(`__mock.calls.some(function(c){return c.fn==='label';})&&!SelectApp.state.busy`);
     const inFront = (await calls('label'))[0].args;
@@ -1236,7 +1238,7 @@ async function main() {
     // Ingest's tokens, but the ground and the greys around it are Premiere's own panel grey (230 and 35 here) moved by
     // Ingest's steps, and on the light grey ink2 and the red darken until they still read on every grey they sit on.
     const TOKENS = {
-      light: { ink: '#1D1D1F', ink2: '#555659', ink3: '#8E8E93', surface: '#E6E6E6', foot: '#DBDBDB', disc: '#CECECE', tick: '#3A3A3C', ring: '#B0B0B0', track: '#D0D0D0', meter: '#6E6E73', 'focus-ring': '#8A8A90', cobalt: '#2563EB', bad: '#B8271C', safe: '#15803D', 'plate-sel': 'rgba(0, 0, 0, .075)' },
+      light: { ink: '#1D1D1F', ink2: '#555659', ink3: '#77777C', surface: '#E6E6E6', foot: '#DBDBDB', disc: '#CECECE', tick: '#3A3A3C', ring: '#B0B0B0', track: '#D0D0D0', meter: '#6E6E73', 'focus-ring': '#6F6F74', cobalt: '#2563EB', bad: '#B92318', safe: '#15803D', 'plate-sel': 'rgba(0, 0, 0, .075)' },
       dark: { ink: '#EDEDEE', ink2: '#ADADB1', ink3: '#7C7C82', surface: '#232323', foot: '#191919', disc: '#373737', tick: '#EDEDEE', ring: '#555555', track: '#373737', meter: '#A0A0A6', 'focus-ring': '#9A9AA0', cobalt: '#2F6FE6', bad: '#FF6A5F', safe: '#15803D', 'plate-sel': 'rgba(255, 255, 255, .11)' }
     };
     const measured = [];

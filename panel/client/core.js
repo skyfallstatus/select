@@ -902,17 +902,31 @@
     var grounds = function () {
       return [step(0), step(dark ? -10 : -11), step(dark ? 20 : -24), hex(base.map(function (v) { return dark ? v + (255 - v) * 0.11 : v * 0.925; }))];
     };
-    // A mid grey that no text can read on moves, a step at a time, toward the end its theme belongs to.
-    for (var n = 0; n < 128 && !reads(hex(ink), grounds()); n++) {
+    var toward = function (from, to, k) { return hex(from.map(function (v, i) { return v + (to[i] - v) * k / 20; })); };
+    // Each colour may move toward a stronger version of itself: grey toward ink, red toward a deeper or paler red. Secondary
+    // text stops short of ink, so it stays secondary. Text needs 4.5:1, the focus ring and placeholders 3:1.
+    var red = dark ? [255, 106, 95] : [201, 40, 28], redFar = dark ? [255, 190, 184] : [120, 16, 10];
+    var ink3 = dark ? [124, 124, 130] : [142, 142, 147], ringC = dark ? [154, 154, 160] : [138, 138, 144];
+    function fit(from, to, need, on, most) {
+      for (var k = 0; k <= most; k++) {
+        var c = toward(from, to, k);
+        if (on.every(function (g) { return contrast(c, g) >= need; })) { return c; }
+      }
+      return null;
+    }
+    // A mid grey where that is not enough moves, a step at a time, toward the end its theme belongs to.
+    var on, t = {};
+    for (var n = 0; n < 128; n++) {
+      on = grounds();
+      t.ink2 = fit(ink2, ink, 4.5, on, 14);
+      t.bad = fit(red, redFar, 4.5, on.slice(0, 2), 20);
+      t.ink3 = fit(ink3, ink, 3, on.slice(0, 2), 20);
+      t.ring = fit(ringC, ink, 3, on.slice(0, 3), 20);
+      if (reads(hex(ink), on) && t.ink2 && t.bad && t.ink3 && t.ring) { break; }
       base = base.map(function (v) { return v + (dark ? -1 : 1); });
     }
-    var on = grounds(), surface = on[0], foot = on[1], disc = on[2];
-    var toward = function (from, k) { return hex(from.map(function (v, i) { return v + (ink[i] - v) * k / 20; })); };
-    var second = hex(ink2);
-    for (var k = 1; k <= 20 && !reads(second, on); k++) { second = toward(ink2, k); }
-    var red = dark ? [255, 106, 95] : [201, 40, 28], bad = hex(red);
-    for (var j = 1; j <= 20 && !reads(bad, [surface, foot]); j++) { bad = toward(red, j); }
-    return { theme: theme, surface: surface, foot: foot, disc: disc, track: step(dark ? 20 : -22), ring: step(dark ? 50 : -54), ink2: second, bad: bad };
+    var surface = on[0], foot = on[1], disc = on[2];
+    return { theme: theme, surface: surface, foot: foot, disc: disc, track: step(dark ? 20 : -22), ring: step(dark ? 50 : -54), ink2: t.ink2, bad: t.bad, ink3: t.ink3, 'focus-ring': t.ring };
   }
 
   // ---------------------------------------------------------------- clips the engine could not read

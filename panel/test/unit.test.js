@@ -790,6 +790,14 @@ test('the ground is Premiere\'s own grey at every brightness, and secondary text
     // A selected row is --plate-sel over the ground, and a menu item under the pointer is disc. Both hold ink2.
     const plate = '#' + [1, 3, 5].map(i => parseInt(t.surface.slice(i, i + 2), 16)).map(c => Math.round(t.theme === 'dark' ? c + (255 - c) * 0.11 : c * 0.925).toString(16).padStart(2, '0')).join('').toUpperCase();
     for (const bg of [t.disc, plate]) { assert.ok(contrast(t.ink2, bg) >= 4.5, `${v}: ink2 ${t.ink2} on ${bg}: ${contrast(t.ink2, bg).toFixed(2)}`); }
+    // The focus ring and placeholders read at 3:1; secondary text stays apart from ink, and red stays red.
+    for (const bg of [t.surface, t.foot]) {
+      assert.ok(contrast(t['focus-ring'], bg) >= 3, `${v}: focus ring ${t['focus-ring']} on ${bg}: ${contrast(t['focus-ring'], bg).toFixed(2)}`);
+      assert.ok(contrast(t.ink3, bg) >= 3, `${v}: ink3 ${t.ink3} on ${bg}: ${contrast(t.ink3, bg).toFixed(2)}`);
+    }
+    assert.notEqual(t.ink2, ink, `${v}: secondary text keeps its own grey`);
+    const [r, g] = [1, 3].map(i => parseInt(t.bad.slice(i, i + 2), 16));
+    assert.ok(r - g >= 60, `${v}: ${t.bad} still reads as red`);
   }
   const css = fs.readFileSync(path.join(__dirname, '../client/style.css'), 'utf8');
   assert.match(css, /:root \{[^}]*--plate-sel: rgba\(0, 0, 0, \.075\);/, 'the light plate skinTokens measures against');

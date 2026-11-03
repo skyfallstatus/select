@@ -173,6 +173,7 @@
     el.className = kind || '';
     el.title = text || '';
     el.hidden = !text;
+    if (text) { tuck(false); }
   }
 
   function scanRunning() {
@@ -234,6 +235,8 @@
   function renderFoot() {
     var f = C.footState(footFacts()), foot = $('foot');
     foot.className = f.kind + (f.green ? ' green' : '') + (S.tucked ? ' tucked' : '');
+    // A count that ticks while a scan or a write runs isn't read aloud; what it ends on is.
+    foot.setAttribute('aria-live', /^(scanning|understanding|listing|writing)$/.test(f.kind) ? 'off' : 'polite');
     $('foot-mark').dataset.kind = f.mark;
     setFootWords('foot-verdict', f.verdict, f.kind);
     setFootWords('foot-sentence', f.sentence, f.kind);
@@ -264,12 +267,13 @@
 
   // ---------------------------------------------------------------- the status tucks away while the clips scroll
 
-  var lastTop = 0, tuckedAt = 0, tuckLater = null;
+  var lastTop = 0, tuckedAt = 0, tuckLater = null, deepest = 0, heldFrom = 0;
   function tuck(on) {
     if (!!S.tucked === on) { return; }
     S.tucked = on;
     $('foot').classList.toggle('tucked', on);
     tuckedAt = performance.now();
+    deepest = $('grid').scrollTop;
   }
 
   // Down through the clips tucks a calm status away; any way up brings it back. Nothing tucks while a scan or a write
@@ -280,11 +284,20 @@
     // Too soon after the last change, which also lets the grid's own resize settle. A quick flick back to the top
     // would leave the status away with no scroll left to bring it back, so the top is looked at again after the wait.
     if (since < 320) {
+      if (tuckLater === null) { heldFrom = top - delta; }
       clearTimeout(tuckLater);
-      tuckLater = setTimeout(function () { if ($('grid').scrollTop < 8) { tuck(false); } }, 320 - since);
+      tuckLater = setTimeout(function () {
+        var g = $('grid'), now = g.scrollTop, long = g.scrollHeight - g.clientHeight > 240;
+        tuckLater = null;
+        if (now < 8) { tuck(false); } else if (!S.tucked && S.calm && now - heldFrom > 48 && now > 48 && long) { tuck(true); }
+      }, 320 - since);
       return;
     }
-    if (top < 8 || delta < -6) { tuck(false); return; }
+    // Up by a flick or by many small steps, both count: the way back is measured from the deepest point reached. At the
+    // end of the list the grid growing pulls the scroll back on its own, which is not the editor going up.
+    var atEnd = top >= grid.scrollHeight - grid.clientHeight - 2;
+    if (S.tucked) { deepest = atEnd ? top : Math.max(deepest, top); }
+    if (top < 8 || (!atEnd && (delta < -6 || (S.tucked && deepest - top > 24)))) { tuck(false); return; }
     if (S.calm && delta > 4 && top > 48 && grid.scrollHeight - grid.clientHeight > 240) { tuck(true); }
   }
 
@@ -1283,7 +1296,7 @@
 
   // Said only when it matters: a write too big for Cmd+Z, or one that pushes the oldest Undo Write out of reach.
   function undoText(steps) {
-    var cmd = steps > UNDO_LEVELS ? '<p class="warn">Too big for Cmd+Z. Undo Write takes it back.</p>' : '';
+    var cmd = steps > UNDO_LEVELS ? '<p class="warn">Too big for Cmd+Z: your earlier edits drop out of Premiere\'s undo history. Undo Write takes this write back.</p>' : '';
     var reach = C.undoReach(undoState().count);
     return cmd + (reach ? '<p class="quiet">' + esc(reach) + '</p>' : '');
   }
@@ -1365,8 +1378,8 @@
       if (!inProject.length) { note(gone.some(function (t) { return t.copies; }) ? 'The clips picked for this scan aren\'t in the project any more. Scan again.' : 'None of these clips are in the project.', 'warn'); return; }
       var plan = spec.plan(inProject, ready.project);
       if (!plan) { return; }
-      // The title says how many and what; the sheet adds only what is skipped and the plan itself.
-      var body = (gone.length ? '<p class="warn">' + plural(gone.length, 'clip') + ' not in this project will be skipped.</p>' : '') + plan.html;
+      // The title says how many and what; the sheet adds the project it writes to, what is skipped, and the plan.
+      var body = '<p class="quiet">' + esc(projectTitle(ready.project)) + '</p>' + (gone.length ? '<p class="warn">' + plural(gone.length, 'clip') + ' not in this project will be skipped.</p>' : '') + plan.html;
       return dialog(plan.title, body, plan.ok).then(function (yes) {
         if (!yes) { return; }
         var refused = lockRefusal() || heldBack(spec.kind) || (S.busy ? 'Another write is running.' : '') || (S.hostLate ? LATE : '');
@@ -1696,6 +1709,7 @@
 
   function setSource(src) {
     S.source = src;
+    tuck(false);
     $('folder-box').hidden = src !== 'folder';
     try { localStorage.setItem('select.source', src); } catch (e) {}
     renderFoot();
@@ -1724,7 +1738,7 @@
       var root = document.documentElement, t = C.skinTokens(color);
       root.dataset.theme = C.themeFor(color);
       // The panel's ground is Premiere's own grey, whatever brightness the editor chose.
-      ['surface', 'foot', 'disc', 'track', 'ring', 'ink2', 'bad'].forEach(function (k) { if (t) { root.style.setProperty('--' + k, t[k]); } else { root.style.removeProperty('--' + k); } });
+      ['surface', 'foot', 'disc', 'track', 'ring', 'ink2', 'bad', 'ink3', 'focus-ring'].forEach(function (k) { if (t) { root.style.setProperty('--' + k, t[k]); } else { root.style.removeProperty('--' + k); } });
     } catch (e) {}
   }
 
@@ -1845,6 +1859,7 @@
     $('search-box').addEventListener('mousedown', function (e) {
       if (!$('search-box').classList.contains('open')) { e.preventDefault(); openSearch(false); }
     });
+    $('search').addEventListener('focus', function () { if (!$('search-box').classList.contains('open')) { openSearch(false); } });
     $('search').addEventListener('blur', function () { setTimeout(closeSearchSoon, 120); });
     document.addEventListener('mousedown', function () { pressing = true; }, true);
     document.addEventListener('mouseup', function () {
@@ -1894,7 +1909,7 @@
     // clips under the pointer. So the second press of a double-click keeps the clip the first one picked, and opens it.
     var pressed = null;
     $('grid').addEventListener('mousedown', function (e) {
-      if (e.detail > 1 && pressed !== null) { return; }
+      if (e.detail > 1 && pressed !== null && !e.metaKey && !e.ctrlKey && !e.shiftKey) { return; }
       var at = rowAt(e.target);
       pressed = at >= 0 ? S.order[at] : null;
       if (at >= 0) { clickRow(at, e); }
@@ -1962,6 +1977,7 @@
   // For the tests and for the integration pass, through the DevTools port.
   window.SelectApp = {
     state: S,
+    reveal: function () { tuck(false); },
     timeouts: TIMEOUT,
     startScan: startScan,
     stopScan: stopScan,
