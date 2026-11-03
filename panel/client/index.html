@@ -65,7 +65,7 @@
         <button id="do-label" class="action" hidden title="Set a colour label on the selected rows, or on the current view">Label</button>
         <button id="do-columns" class="action" hidden title="Writes what Select found into Project panel columns, so Premiere can sort by them">Add Columns</button>
         <button id="do-bins" class="action" hidden title="Moves these clips into new bins in the Project panel. Files on disk stay where they are.">Sort into Bins</button>
-        <button id="undo-write" class="action" hidden>Undo</button>
+        <button id="undo-write" class="action" hidden>Undo Write</button>
         <button id="scan" class="action primary" hidden>Scan</button>
       </div>
     </div>
@@ -75,17 +75,21 @@
     </div>
     <p id="status-unread" hidden></p>
     <p id="status-note" hidden></p>
+    <div id="update-line" role="status" aria-live="polite" hidden></div>
   </footer>
   <div id="picker" role="menu" hidden></div>
   <div id="menu" role="menu" hidden>
     <button role="menuitem" data-menu="rescan">Rescan</button>
     <button role="menuitem" data-menu="columns">Columns…</button>
-    <button role="menuitem" data-menu="undo-view" hidden title="Back to the previous sort and filter. Changes nothing in the project.">Undo View</button>
-    <button role="menuitem" data-menu="undo" hidden>Undo Last Write</button>
+    <button role="menuitem" data-menu="undo-view" hidden title="Back to the previous sort and filter. Changes nothing in the project.">Previous View</button>
+    <button role="menuitem" data-menu="undo" hidden>Undo Write</button>
     <button role="menuitem" data-menu="clear">Clear Results</button>
     <hr>
     <button role="menuitem" data-menu="bug">Report a Bug</button>
     <button role="menuitem" data-menu="about">About Select</button>
+    <hr data-update hidden>
+    <button role="menuitem" data-update="check" hidden>Check for Updates</button>
+    <button role="menuitemcheckbox" data-update="auto" aria-checked="true" hidden title="Once a day, asks GitHub whether there's a new version">Check Automatically</button>
   </div>
   <div id="modal" hidden>
     <div id="dialog" role="dialog" aria-modal="true" aria-labelledby="dialog-title">
@@ -103,5 +107,6 @@
 <script src="core.js"></script>
 <script src="native.js"></script>
 <script src="app.js"></script>
+<script src="update.js"></script>
 </body>
 </html>

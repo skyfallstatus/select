@@ -27,6 +27,13 @@ function storeFromFixture(records) {
 
 function byOrder(rows, order) { return order.map(i => rows[i]); }
 
+// Runs fn with this process in another time zone. Node reads TZ again whenever it changes.
+function inZone(tz, fn) {
+  const was = process.env.TZ;
+  process.env.TZ = tz;
+  try { return fn(); } finally { if (was === undefined) { delete process.env.TZ; } else { process.env.TZ = was; } }
+}
+
 // A view is two questions and a colour: what to show, and in what order.
 const V = over => ({ show: null, sort: [], family: null, ...over });
 const by = (key, dir) => ({ key, dir });
@@ -121,7 +128,8 @@ test('format: null is an empty cell, never 0; 0 stays 0', () => {
   assert.equal(C.fmtDuration(65.25), '1:05.3');
   assert.equal(C.fmtDuration(3725), '1:02:05.0');
   assert.equal(C.cellText({ width: 3840, height: 2160 }, C.COLUMN.pixels), '3840x2160');
-  assert.equal(C.cellText({ createdAt: '2023-11-02T16:45:07.000000Z' }, C.COLUMN.createdAt), '2023-11-02 16:45');
+  assert.equal(inZone('UTC', () => C.cellText({ createdAt: '2023-11-02T16:45:07.000000Z' }, C.COLUMN.createdAt)), '2023-11-02 16:45');
+  assert.equal(inZone('Europe/Paris', () => C.cellText({ createdAt: '2023-11-02T16:45:07.000000Z' }, C.COLUMN.createdAt)), '2023-11-02 17:45');
 });
 
 test('sort: nulls last in both directions, secondary keys, stable', () => {
@@ -209,9 +217,7 @@ test('shows on the synthetic fixture: each keeps exactly what it says, in the or
   assert.ok(silent.every(r => r.hasAudio === false || r.silent === true));
   assert.equal(silent.length, rows.filter(r => r.hasAudio === false || r.silent === true).length);
 
-  const shakes = rows.map(r => r.shake).filter(v => typeof v === 'number').sort((a, b) => a - b);
-  const limit = shakes[Math.ceil(shakes.length * 0.6) - 1];
-  const interview = r => r.speech === true && r.faces > 0 && r.durationS >= C.INTERVIEW_MIN_S && (typeof r.shake !== 'number' || r.shake <= limit);
+  const interview = r => r.speech === true && r.faces > 0 && r.durationS >= C.INTERVIEW_MIN_S && (typeof r.shake !== 'number' || r.shake <= C.SHAKE_LIMIT);
   const iv = view('interviews', [by('durationS', -1)]).list;
   assert.ok(iv.length > 0);
   assert.ok(iv.every(interview), 'speech, a face, 15 s or longer, and steady when shake is known');
@@ -307,7 +313,9 @@ test('column values: text order equals number order, and null stays empty', () =
   const s = storeFromFixture(fixture);
   const checks = { SelectLuma: 'luma', SelectSharpness: 'sharpness', SelectClipHigh: 'clipHighPct', SelectMotion: 'motionProxy', SelectAudio: 'audioDb' };
   for (const [field, key] of Object.entries(checks)) {
-    const pairs = s.rows.filter(r => r[key] !== null && r[key] !== undefined).map((r, i) => [r[key], C.columnValues(r, i + 1, 4)[field]]);
+    // Loudness says the real level after its sort key: 077.6 (-22.4 dB). The key is what Premiere sorts on.
+    const sortKey = v => (field === 'SelectAudio' ? v.slice(0, 5) : v);
+    const pairs = s.rows.filter(r => r[key] !== null && r[key] !== undefined).map((r, i) => [r[key], sortKey(C.columnValues(r, i + 1, 4)[field])]);
     assert.ok(pairs.length > 10, field);
     assert.equal(new Set(pairs.map(p => p[1].length)).size, 1, field + ' has one width');
     const lexical = pairs.slice().sort((a, b) => (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0)).map(p => p[0]);
@@ -317,8 +325,9 @@ test('column values: text order equals number order, and null stays empty', () =
   assert.deepStrictEqual(v, { SelectRank: '0007', SelectSharpness: '', SelectLuma: '', SelectClipHigh: '', SelectMotion: '', SelectAudio: '', SelectPeople: '', SelectFaces: '', SelectShot: '', SelectColour: '', SelectSound: '', SelectLabels: '', SelectText: '' });
   const full = C.columnValues({ people: 12, faces: 0, shotSize: 'medium', colorName: 'teal', sounds: [{ name: 'speech', conf: 1 }, { name: 'wind', conf: .5 }], labels: [{ name: 'oven', conf: .9 }], text: ['Fresh today'] }, 1, 4);
   assert.deepStrictEqual([full.SelectPeople, full.SelectFaces, full.SelectShot, full.SelectColour, full.SelectSound, full.SelectLabels, full.SelectText], ['012', '000', 'Medium', 'Teal', 'speech, wind', 'oven', 'Fresh today']);
-  assert.equal(C.columnValues({ audioDb: -9 }, 1, 4).SelectAudio, '091.0');
-  assert.equal(C.columnValues({ audioDb: -30 }, 1, 4).SelectAudio, '070.0');
+  assert.equal(C.columnValues({ audioDb: -9 }, 1, 4).SelectAudio, '091.0 (-9.0 dB)');
+  assert.equal(C.columnValues({ audioDb: -30 }, 1, 4).SelectAudio, '070.0 (-30.0 dB)');
+  assert.ok(C.columnValues({ audioDb: -9 }, 1, 4).SelectAudio > C.columnValues({ audioDb: -30 }, 1, 4).SelectAudio, 'louder sorts higher as text');
   assert.equal(C.columnValues({ clipHighPct: 12.5 }, 1, 4).SelectClipHigh, '012.50');
 });
 
@@ -655,10 +664,14 @@ test('foot: stopped, failed, and nothing readable', () => {
   assert.equal(none.mark, 'look');
 });
 
-const binsSent = () => ({ root: 'R', buckets: [{ name: '01 Softest', ids: ['1', '2'] }, { name: '02 Softer', ids: ['3'] }] });
+// Items as the panel sends them: [id, media path].
+const pairs = (...ids) => ids.map(id => [id, '/v/C' + id + '.MP4']);
+const binsSent = () => ({ root: 'R', buckets: [{ name: '01 Softest', items: pairs('1', '2') }, { name: '02 Softer', items: pairs('3') }] });
+// What the host said it moved, batch by batch, merged.
+const placedAll = () => [{ name: '01 Softest', ids: ['1', '2'] }, { name: '02 Softer', ids: ['3'] }];
 
 test('green: only when what was read back matches what was sent', () => {
-  const bins = C.writeOutcome('bins', binsSent(), { ok: true, moved: 3, failed: [], buckets: [{ name: '01 Softest', ids: ['2', '1'] }, { name: '02 Softer', ids: ['3'] }] });
+  const bins = C.writeOutcome('bins', binsSent(), { ok: true, moved: 3, failed: [], placed: placedAll(), buckets: [{ name: '01 Softest', ids: ['2', '1'] }, { name: '02 Softer', ids: ['3'] }] });
   assert.equal(bins.green, true);
   assert.equal(bins.verdict, 'Sorted into 2 bins');
   assert.equal(bins.sentence, '3 clips moved. Your files weren\'t touched.');
@@ -667,11 +680,11 @@ test('green: only when what was read back matches what was sent', () => {
   assert.equal(foot.mark, 'seal');
   assert.deepStrictEqual(foot.actions, ['undo']);
 
-  const label = C.writeOutcome('label', { ids: ['1', '2'] }, { ok: true, changed: 2, failed: [] }, 'Mango');
+  const label = C.writeOutcome('label', { items: pairs('1', '2') }, { ok: true, changed: 2, failed: [] }, 'Mango');
   assert.equal(label.green, true);
   assert.equal(label.verdict, 'Labelled 2 clips Mango');
 
-  const cols = { fields: C.FIELDS, rows: [{ ids: ['1', '2'], values: {} }] };
+  const cols = { fields: C.FIELDS, rows: [{ items: pairs('1', '2'), values: {} }] };
   const columns = C.writeOutcome('columns', cols, { ok: true, changed: 2, matched: 2, failed: [], columns: { shown: true } });
   assert.equal(columns.green, true);
   assert.equal(columns.verdict, 'Added 13 columns');
@@ -680,26 +693,26 @@ test('green: only when what was read back matches what was sent', () => {
 test('green: never on a partial or unconfirmed write, whatever the host calls it', () => {
   const never = o => { assert.ok(!o.green, o.verdict); assert.ok(!C.footState(facts({ outcome: o })).green); assert.equal(C.footState(facts({ outcome: o })).mark, 'look'); return o; };
   // One clip stayed behind, and the host still said ok.
-  let o = never(C.writeOutcome('bins', binsSent(), { ok: true, moved: 3, failed: [], buckets: [{ name: '01 Softest', ids: ['1'] }, { name: '02 Softer', ids: ['3'] }] }));
+  let o = never(C.writeOutcome('bins', binsSent(), { ok: true, moved: 3, failed: [], placed: placedAll(), buckets: [{ name: '01 Softest', ids: ['1'] }, { name: '02 Softer', ids: ['3'] }] }));
   assert.equal(o.verdict, 'Moved 2 of 3 clips');
   assert.equal(o.sentence, '1 clip did not land where it should. Your files weren\'t touched.');
   // In the wrong bin.
-  o = never(C.writeOutcome('bins', binsSent(), { ok: true, moved: 3, failed: [], buckets: [{ name: '01 Softest', ids: ['1', '3'] }, { name: '02 Softer', ids: ['2'] }] }));
+  o = never(C.writeOutcome('bins', binsSent(), { ok: true, moved: 3, failed: [], placed: placedAll(), buckets: [{ name: '01 Softest', ids: ['1', '3'] }, { name: '02 Softer', ids: ['2'] }] }));
   assert.equal(o.verdict, 'Moved 1 of 3 clips');
   // A stranger in the bin.
-  o = never(C.writeOutcome('bins', binsSent(), { ok: true, moved: 3, failed: [], buckets: [{ name: '01 Softest', ids: ['1', '2', '9'] }, { name: '02 Softer', ids: ['3'] }] }));
+  o = never(C.writeOutcome('bins', binsSent(), { ok: true, moved: 3, failed: [], placed: placedAll(), buckets: [{ name: '01 Softest', ids: ['1', '2', '9'] }, { name: '02 Softer', ids: ['3'] }] }));
   // A failure listed, even with every id back.
-  never(C.writeOutcome('bins', binsSent(), { ok: true, moved: 3, failed: [{ id: 'x', error: 'e' }], buckets: [{ name: '01 Softest', ids: ['1', '2'] }, { name: '02 Softer', ids: ['3'] }] }));
+  never(C.writeOutcome('bins', binsSent(), { ok: true, moved: 3, failed: [{ id: 'x', error: 'e' }], placed: placedAll(), buckets: [{ name: '01 Softest', ids: ['1', '2'] }, { name: '02 Softer', ids: ['3'] }] }));
   // A host with no read-back at all.
-  o = never(C.writeOutcome('bins', binsSent(), { ok: true, moved: 3, failed: [], buckets: [{ name: '01 Softest', moved: 2, inBin: 2 }, { name: '02 Softer', moved: 1, inBin: 1 }] }));
+  o = never(C.writeOutcome('bins', binsSent(), { ok: true, moved: 3, failed: [], placed: placedAll(), buckets: [{ name: '01 Softest', moved: 2, inBin: 2 }, { name: '02 Softer', moved: 1, inBin: 1 }] }));
   assert.equal(o.verdict, 'Moved, not confirmed');
   // A bin that did not come back.
-  never(C.writeOutcome('bins', binsSent(), { ok: true, moved: 2, failed: [], buckets: [{ name: '01 Softest', ids: ['1', '2'] }] }));
+  never(C.writeOutcome('bins', binsSent(), { ok: true, moved: 2, failed: [], placed: placedAll(), buckets: [{ name: '01 Softest', ids: ['1', '2'] }] }));
   o = never(C.writeOutcome('bins', binsSent(), { ok: true, moved: 0, failed: [], buckets: [] }));
   assert.equal(o.verdict, 'Nothing moved');
   assert.equal(o.undo, false);
 
-  const cols = { fields: C.FIELDS, rows: [{ ids: ['1'], values: {} }, { ids: ['2', '3'], values: {} }] };
+  const cols = { fields: C.FIELDS, rows: [{ items: pairs('1'), values: {} }, { items: pairs('2', '3'), values: {} }] };
   o = never(C.writeOutcome('columns', cols, { ok: true, changed: 3, matched: 2, failed: [], columns: { shown: true } }));
   assert.equal(o.verdict, 'Wrote 2 of 3 clips');
   o = never(C.writeOutcome('columns', cols, { ok: true, changed: 3, failed: [], columns: { shown: true } }));
@@ -707,7 +720,7 @@ test('green: never on a partial or unconfirmed write, whatever the host calls it
   o = never(C.writeOutcome('columns', cols, { ok: true, changed: 3, matched: 3, failed: [], columns: { shown: false } }));
   assert.match(o.sentence, /Metadata Display/);
 
-  o = never(C.writeOutcome('label', { ids: ['1', '2'] }, { ok: true, changed: 1, failed: [{ id: '2', error: 'label did not change' }] }, 'Mango'));
+  o = never(C.writeOutcome('label', { items: pairs('1', '2') }, { ok: true, changed: 1, failed: [{ id: '2', error: 'label did not change' }] }, 'Mango'));
   assert.equal(o.verdict, 'Labelled 1 of 2 clips');
   assert.deepStrictEqual(C.footState(facts({ outcome: o })).actions, ['details', 'undo']);
 });
@@ -783,7 +796,30 @@ function hostWith(options) {
   return { call: (fn, args) => JSON.parse(sandbox.slCall(fn, JSON.stringify(args))), root, sandbox, clip: id => root.kids.concat(...root.kids.map(k => k.kids || [])).concat(...root.kids.flatMap(k => (k.kids || []).map(x => x.kids || []))).find(c => c.nodeId === id) };
 }
 
-const binsArgs = () => ({ project: '/p.prproj', root: 'SELECT x', buckets: [{ name: '01 Softest', ids: ['1', '2'] }, { name: '02 Softer', ids: ['3'] }] });
+const binsArgs = () => ({ project: '/p.prproj', root: 'SELECT x', buckets: [{ name: '01 Softest', items: pairs('1', '2') }, { name: '02 Softer', items: pairs('3') }] });
+
+// Sends a write to the real host script the way the panel does: in batches, merged by the panel's own core.addBatch,
+// and for bins read back once at the end. Returns the merged result, with the Undo record as `restore`.
+function viaHost(h, kind, sent, size) {
+  const acc = C.writeAcc(kind), items = [];
+  let list, head = null;
+  if (kind === 'label') { list = sent.items; }
+  if (kind === 'columns') { list = sent.rows.flatMap(r => r.items.map(p => ({ items: [p], values: r.values }))); }
+  if (kind === 'bins') { list = sent.buckets.flatMap(b => b.items.map(p => ({ name: b.name, pair: p }))); }
+  for (const part of C.batches(list, size || C.BATCH)) {
+    const args = kind === 'label' ? { project: '/p.prproj', items: part, color: sent.color }
+      : kind === 'columns' ? { project: '/p.prproj', fields: sent.fields, rows: part, show: sent.show !== false && !acc.columns }
+        : { project: '/p.prproj', root: sent.root, buckets: C.groupMoves(part), ...(acc.top ? { top: acc.top } : {}) };
+    const res = h.call(kind, args);
+    if (!res.ok) { acc.error = res.message; break; }
+    C.addBatch(kind, acc, res);
+    head = res.restore;
+    items.push(...res.restore.items);
+  }
+  if (kind === 'bins' && acc.top) { Object.assign(acc, h.call('binsCheck', { project: '/p.prproj', top: acc.top, clear: !acc.moved })); }
+  acc.restore = head ? { ...head, items } : null;
+  return acc;
+}
 
 test('undo: bins that really went back are counted, and the SELECT bin leaves', () => {
   const h = hostWith(), res = h.call('bins', binsArgs()), back = h.call('restore', { project: '/p.prproj', restore: res.restore });
@@ -801,10 +837,11 @@ test('undo: a move that said yes and did nothing is a failure, and it can be ret
   assert.equal(first.restored, 2);
   assert.equal(first.failed.length, 1);
   assert.equal(first.remaining.items.length, 1, 'only what is left is retried');
-  const o = C.undoOutcome(first);
+  const o = C.undoOutcome(first, true);
   assert.equal(o.verdict, 'Partly undone');
-  assert.equal(o.undo, true);
+  assert.equal(o.undo, true, 'Undo Write stays while a record is left');
   assert.equal(o.kind, 'partial');
+  assert.equal(C.undoOutcome(first, false).undo, false);
   stuck.clear();
   const second = h.call('restore', { project: '/p.prproj', restore: first.remaining });
   assert.equal(second.restored, 1);
@@ -813,7 +850,7 @@ test('undo: a move that said yes and did nothing is a failure, and it can be ret
 });
 
 test('undo: a label that did not change back is a failure, not a count', () => {
-  const stuckLabel = new Set(), h = hostWith({ stuckLabel }), res = h.call('label', { project: '/p.prproj', ids: ['1', '2'], color: 5 });
+  const stuckLabel = new Set(), h = hostWith({ stuckLabel }), res = h.call('label', { project: '/p.prproj', items: pairs('1', '2'), color: 5 });
   assert.equal(res.changed, 2);
   stuckLabel.add(1);
   const back = h.call('restore', { project: '/p.prproj', restore: res.restore });
@@ -823,7 +860,7 @@ test('undo: a label that did not change back is a failure, not a count', () => {
 });
 
 test('undo: an id that now names another clip is left alone', () => {
-  const h = hostWith(), res = h.call('label', { project: '/p.prproj', ids: ['1'], color: 5 });
+  const h = hostWith(), res = h.call('label', { project: '/p.prproj', items: pairs('1'), color: 5 });
   h.root.kids[0].getMediaPath = () => '/v/Someone-Else.MP4';
   const back = h.call('restore', { project: '/p.prproj', restore: res.restore });
   assert.equal(back.restored, 0);
@@ -833,7 +870,7 @@ test('undo: an id that now names another clip is left alone', () => {
 test('undo: column values with markup go back as they were', () => {
   const h = hostWith(), c = h.root.kids[0], tag = 'premierePrivateProjectMetaData:SelectRank';
   c.setProjectMetadata(`<${tag}>A&amp;B</${tag}>`);
-  const res = h.call('columns', { project: '/p.prproj', show: false, fields: [{ name: 'SelectRank', label: 'x' }], rows: [{ ids: ['1'], values: { SelectRank: '0001' } }] });
+  const res = h.call('columns', { project: '/p.prproj', show: false, fields: [{ name: 'SelectRank', label: 'x' }], rows: [{ items: pairs('1'), values: { SelectRank: '0001' } }] });
   const back = h.call('restore', { project: '/p.prproj', restore: res.restore });
   assert.equal(back.restored, 1);
   assert.ok(c.getProjectMetadata().includes('>A&amp;B<'));
@@ -848,8 +885,8 @@ test('bins: a failure part way through keeps what is needed to undo the clips th
     top.createBin = n => { if (++calls === 2) { throw new Error('no more bins'); } return inner(n); };
     return top;
   };
-  const sent = binsArgs(), res = h.call('bins', sent);
-  assert.ok(res.ok, 'not a bare failure');
+  const sent = binsArgs(), res = viaHost(h, 'bins', sent);
+  assert.ok(!res.error, 'not a bare failure');
   assert.equal(res.moved, 2);
   assert.equal(res.restore.items.length, 2);
   assert.ok(res.failed.some(f => /no more bins/.test(f.error)));
@@ -859,27 +896,28 @@ test('bins: a failure part way through keeps what is needed to undo the clips th
 });
 
 test('bins: when nothing moved, no empty bins stay behind', () => {
-  const h = hostWith(), sent = { project: '/p.prproj', root: 'SELECT x', buckets: [{ name: '01 Softest', ids: ['98'] }, { name: '02 Softer', ids: ['99'] }] };
-  const res = h.call('bins', sent);
+  const h = hostWith(), sent = { project: '/p.prproj', root: 'SELECT x', buckets: [{ name: '01 Softest', items: pairs('98') }, { name: '02 Softer', items: pairs('99') }] };
+  const res = viaHost(h, 'bins', sent);
   assert.equal(res.moved, 0);
-  assert.equal(res.restore, null);
+  assert.equal(res.restore.items.length, 0);
+  assert.equal(res.skipped.length, 2, 'ids not in the project are left alone, and said');
   assert.equal(res.binRemoved, true);
   assert.ok(!h.root.kids.some(k => k.type === 2));
 });
 
 test('guard: a dialog state nobody can read is refused', () => {
-  const res = hostWith({ noModalCheck: true }).call('label', { project: '/p.prproj', ids: ['1'], color: 5 });
+  const res = hostWith({ noModalCheck: true }).call('label', { project: '/p.prproj', items: pairs('1'), color: 5 });
   assert.equal(res.ok, false);
   assert.match(res.message, /no dialog is open/);
 });
 
 test('host: bins report what each bin really holds, and the foot reads it', () => {
-  const sent = { project: '/p.prproj', root: 'SELECT x', buckets: [{ name: '01 Softest', ids: ['1', '2'] }, { name: '02 Softer', ids: ['3'] }] };
-  const res = hostWith().call('bins', sent);
-  assert.ok(res.ok);
+  const sent = binsArgs();
+  const res = viaHost(hostWith(), 'bins', sent);
+  assert.ok(!res.error);
   assert.deepStrictEqual(res.buckets.map(b => b.ids), [['1', '2'], ['3']]);
   assert.equal(C.writeOutcome('bins', sent, res).green, true);
-  const lost = hostWith({ lose: 2 }).call('bins', sent);
+  const lost = viaHost(hostWith({ lose: 2 }), 'bins', sent);
   assert.equal(lost.moved, 3, 'the move call said yes');
   assert.deepStrictEqual(lost.buckets[0].ids, ['1'], 'the bin says otherwise');
   const o = C.writeOutcome('bins', sent, lost);
@@ -888,11 +926,11 @@ test('host: bins report what each bin really holds, and the foot reads it', () =
 });
 
 test('host: columns read each value back, and a value that did not stick is not counted', () => {
-  const values = { SelectRank: '0001', SelectMotion: '0.412' }, sent = { project: '/p.prproj', show: false, fields: [{ name: 'SelectRank', label: 'Select Rank' }, { name: 'SelectMotion', label: 'Select Motion' }], rows: [{ ids: ['1', '2'], values }] };
-  const ok = hostWith().call('columns', sent);
+  const values = { SelectRank: '0001', SelectMotion: '0.412' }, sent = { project: '/p.prproj', show: false, fields: [{ name: 'SelectRank', label: 'Select Rank' }, { name: 'SelectMotion', label: 'Select Motion' }], rows: [{ items: pairs('1', '2'), values }] };
+  const ok = viaHost(hostWith(), 'columns', sent);
   assert.equal(ok.changed, 2);
   assert.equal(ok.matched, 2);
-  const lost = hostWith({ dropMetadata: true }).call('columns', sent);
+  const lost = viaHost(hostWith({ dropMetadata: true }), 'columns', sent);
   assert.equal(lost.changed, 2, 'the set call said yes');
   assert.equal(lost.matched, 0);
   assert.ok(!C.writeOutcome('columns', sent, lost).green);
@@ -1012,11 +1050,11 @@ test('bins by category: named, numbered in the category\'s order, no value kept 
 });
 
 test('host: category bins go through the same write, with the same read-back, and a stray stays unproved', () => {
-  const sent = { project: '/p.prproj', root: 'SELECT 2026-11-03 Colour', buckets: [{ name: '01 Red', ids: ['1', '2'] }, { name: '02 Blue', ids: ['3'] }] };
-  const res = hostWith().call('bins', sent);
+  const sent = { project: '/p.prproj', root: 'SELECT 2026-11-03 Colour', buckets: [{ name: '01 Red', items: pairs('1', '2') }, { name: '02 Blue', items: pairs('3') }] };
+  const res = viaHost(hostWith(), 'bins', sent);
   assert.equal(C.writeOutcome('bins', sent, res).verdict, 'Sorted into 2 bins');
   assert.equal(C.writeOutcome('bins', sent, res).green, true);
-  const lost = hostWith({ lose: 3 }).call('bins', sent);
+  const lost = viaHost(hostWith({ lose: 3 }), 'bins', sent);
   assert.ok(!C.writeOutcome('bins', sent, lost).green);
   assert.ok(lost.restore && lost.restore.items.length, 'Undo still has what it needs');
 });
@@ -1237,7 +1275,7 @@ test('writes that need Tier 2 wait for it in stage three, turn on by themselves,
 test('Add Columns writes Tier 2 fields only once they have landed', () => {
   assert.deepStrictEqual(C.columnFields(false).map(f => f.name), ['SelectRank', 'SelectSharpness', 'SelectLuma', 'SelectClipHigh', 'SelectMotion', 'SelectAudio']);
   assert.equal(C.columnFields(true).length, 13);
-  const sent = { fields: C.columnFields(false), rows: [{ ids: ['1'], values: {} }] };
+  const sent = { fields: C.columnFields(false), rows: [{ items: pairs('1'), values: {} }] };
   assert.equal(C.writeOutcome('columns', sent, { ok: true, changed: 1, matched: 1, failed: [], columns: { shown: true } }).verdict, 'Added 6 columns');
 });
 
@@ -1436,11 +1474,13 @@ test('bucketize: a bin per similar group, per colour in rainbow order, per day, 
   }
   assert.deepStrictEqual(C.bucketize(cs, V({ show: 'speech', sort: [by('colorName', 1)] })).map(x => x.name).slice(0, 1), ['01 Red'], 'a Show sorted by colour bins by colour');
 
-  const day = (name, createdAt) => ({ name, createdAt });
+  const day = (name, createdAt) => ({ name, createdAt, time: createdAt ? Date.parse(createdAt) : NaN });
   const days = [day('a', '2026-10-12T09:00:00Z'), day('b', '2026-10-12T17:30:00Z'), day('c', '2026-10-13T08:00:00Z'), day('d', null)];
-  assert.deepStrictEqual(C.bucketize(days, V({ sort: [by('createdAt', 1)] })).map(b => [b.name, b.rows.length]), [['01 2026-10-12', 2], ['02 2026-10-13', 1], ['03 No value', 1]]);
-  const latest = [days[2], days[1], days[0], days[3]];
-  assert.deepStrictEqual(C.bucketize(latest, V({ sort: [by('createdAt', -1)] })).map(b => b.name), ['01 2026-10-13', '02 2026-10-12', '03 No value'], 'days come in sort order');
+  inZone('UTC', () => {
+    assert.deepStrictEqual(C.bucketize(days, V({ sort: [by('createdAt', 1)] })).map(b => [b.name, b.rows.length]), [['01 2026-10-12', 2], ['02 2026-10-13', 1], ['03 No value', 1]]);
+    const latest = [days[2], days[1], days[0], days[3]];
+    assert.deepStrictEqual(C.bucketize(latest, V({ sort: [by('createdAt', -1)] })).map(b => b.name), ['01 2026-10-13', '02 2026-10-12', '03 No value'], 'days come in sort order');
+  });
 
   const cams = [{ camera: 'Canon EOS R5' }, { camera: 'SONY ILME-FX3' }, { camera: 'SONY ILME-FX3' }, { camera: null }];
   assert.deepStrictEqual(C.bucketize(cams, V({ sort: [by('camera', 1)] })).map(b => [b.name, b.rows.length]), [['01 Canon EOS R5', 1], ['02 SONY ILME-FX3', 2], ['03 No value', 1]]);
@@ -1487,9 +1527,10 @@ test('interviews: speech and a face for 15 seconds or more; a shorter talking cl
   assert.deepStrictEqual(names(V({ show: 'interviews' })), ['at15', 'long']);
   assert.equal(C.showCount(rows, 'interviews'), 2);
   assert.deepStrictEqual(names(V({ show: 'speech' })).slice(0, 3), ['at14.9', 'at15', 'long'], 'a short clip with speech is still speech');
-  // Steadier where the camera recorded its movement: the steadiest 60 percent of known shakes, and unknown shake stays.
-  const steady = [.1, .2, .3, .4, .5].map((shake, i) => clip('s' + i, { shake })).concat(clip('nogyro', { shake: null }), clip('short-steady', { shake: 0, durationS: 14.9 }));
-  assert.deepStrictEqual(C.computeView(steady, V({ show: 'interviews' })).order.map(i => steady[i].name), ['s0', 's1', 's2', 'nogyro']);
+  // Where the camera recorded its movement, up to a fixed line just past handheld, and unknown shake stays.
+  assert.equal(C.SHAKE_LIMIT, 0.6);
+  const steady = [.1, .35, .56, .6, .61, .9].map((shake, i) => clip('s' + i, { shake })).concat(clip('nogyro', { shake: null }), clip('short-steady', { shake: 0, durationS: 14.9 }));
+  assert.deepStrictEqual(C.computeView(steady, V({ show: 'interviews' })).order.map(i => steady[i].name), ['s0', 's1', 's2', 's3', 'nogyro']);
   assert.match(C.SHOW.interviews.says, /15 seconds or longer/);
   assert.match(C.SHOW.interviews.tip, /15 seconds or longer/);
 });
@@ -1570,4 +1611,352 @@ test('public: the panel carries nothing private, and asks nothing of the network
     const text = fs.readFileSync(path.join(root, 'client', f), 'utf8').replace('http://www.w3.org', '').replace('https://github.com/skyfallstatus/select/issues/new', '');
     assert.ok(!/https?:\/\/|XMLHttpRequest|fetch\(|WebSocket|sendBeacon/.test(text), f);
   }
+});
+
+// ---------------------------------------------------------------- 0.2: safe writes, durable Undo, honest words
+
+// A Premiere with Project panels whose selections the test sets: current is the selection in focus, views the others.
+function hostWithViews(current, views, options) {
+  const h = hostWith(options), ids = list => list.map(id => h.clip(id) || h.root.kids.concat(...h.root.kids.map(k => k.kids || [])).find(b => b.nodeId === id));
+  Object.assign(h.sandbox.app, {
+    getCurrentProjectViewSelection: () => ids(current),
+    getProjectViewIDs: () => views.map((v, i) => 'view' + i),
+    getProjectFromViewID: () => h.sandbox.app.project,
+    getProjectViewSelection: id => ids(views[Number(id.slice(4))])
+  });
+  return h;
+}
+
+test('H2: a write names each item by id and path, and an id that now names another clip is left alone and said', () => {
+  const h = hostWith();
+  h.root.kids[1].getMediaPath = () => '/v/Someone-Else.MP4';    // a revert gave id 2 to another clip
+  const label = h.call('label', { project: '/p.prproj', items: pairs('1', '2', '9'), color: 5 });
+  assert.equal(label.changed, 1);
+  assert.deepStrictEqual(label.skipped.map(x => [x.id, x.error]), [['2', 'now a different clip'], ['9', 'no longer in the project']]);
+  assert.equal(h.root.kids[1].getColorLabel(), 0, 'the other clip keeps its label');
+  assert.deepStrictEqual(label.restore.items.map(e => e[0]), ['1']);
+  const o = C.writeOutcome('label', { items: pairs('1', '2', '9') }, label, 'Mango');
+  assert.ok(!o.green);
+  assert.match(o.sentence, /2 items were left alone: they have changed in the project since Select found them\./);
+  assert.equal(o.failed.length, 2, 'Details lists them');
+
+  const cols = viaHost(h, 'columns', { fields: [{ name: 'SelectRank', label: 'Select Rank' }], show: false, rows: [{ items: pairs('1', '2'), values: { SelectRank: '0001' } }] });
+  assert.equal(cols.changed, 1);
+  assert.equal(cols.skipped.length, 1);
+  assert.equal(h.root.kids[1].getProjectMetadata(), '', 'nothing written to the other clip');
+
+  const bins = viaHost(h, 'bins', binsArgs());
+  assert.equal(bins.moved, 2);
+  assert.deepStrictEqual(bins.skipped.map(x => x.id), ['2']);
+  assert.ok(h.root.kids.some(k => k.name === 'C2.MP4'), 'the other clip stays where it was');
+  const opened = h.call('open', { project: '/p.prproj', id: '2', path: '/v/C2.MP4' });
+  assert.equal(opened.ok, false);
+  assert.equal(opened.code, 'changed');
+});
+
+test('H3: batches of about 100, one top bin across them, read back once, and Undo in batches too', () => {
+  assert.equal(C.BATCH, 100);
+  assert.deepStrictEqual(C.batches([1, 2, 3, 4, 5], 2), [[1, 2], [3, 4], [5]]);
+  const h = hostWith(), sent = binsArgs();
+  const res = viaHost(h, 'bins', sent, 1);
+  const tops = h.root.kids.filter(k => k.type === 2);
+  assert.equal(tops.length, 1, 'later batches fill the bin the first one made');
+  assert.deepStrictEqual(tops[0].kids.map(k => [k.name, k.kids.map(c => c.nodeId)]), [['01 Softest', [1, 2]], ['02 Softer', [3]]]);
+  const o = C.writeOutcome('bins', sent, res);
+  assert.ok(o.green, o.sentence);
+  assert.equal(res.restore.items.length, 3);
+  // Undo Write in batches of one: the SELECT bin goes only with the last.
+  const parts = C.batches(res.restore.items, 1);
+  const backs = parts.map((part, i) => h.call('restore', { project: '/p.prproj', restore: { ...res.restore, items: part }, final: i === parts.length - 1 }));
+  assert.deepStrictEqual(backs.map(b => b.binRemoved), [null, null, true]);
+  assert.equal(backs.reduce((n, b) => n + b.restored, 0), 3);
+  assert.deepStrictEqual(h.root.kids.map(k => k.name), ['C1.MP4', 'C2.MP4', 'C3.MP4']);
+});
+
+test('H3: a write stopped or refused part way says what landed, is never green, and keeps Undo', () => {
+  const stopped = C.writeOutcome('label', { items: pairs('1', '2', '3', '4') }, { changed: 2, failed: [], skipped: [], unsent: 2 }, 'Mango');
+  assert.ok(!stopped.green);
+  assert.equal(stopped.verdict, 'Labelled 2 of 4 clips');
+  assert.equal(stopped.sentence, 'Stopped, so the last 2 items weren\'t written. Your files weren\'t touched.');
+  assert.equal(stopped.undo, true);
+  const refused = C.writeOutcome('columns', { fields: C.FIELDS, rows: [{ items: pairs('1', '2'), values: {} }] }, { changed: 1, matched: 1, failed: [], skipped: [], unsent: 1, error: 'Playback is running. Stop it and try again. Nothing was changed.', columns: { shown: true } });
+  assert.ok(!refused.green);
+  assert.match(refused.sentence, /The rest weren't sent: Playback is running\. Stop it and try again\. Your files/);
+  assert.ok(!/Nothing was changed/.test(refused.sentence), 'part way, nothing changed is no longer true');
+  const late = C.undoOutcome({ restored: 100, skipped: 0, failed: [], unsent: 300, error: 'Premiere didn\'t answer within 2 minutes.' }, true);
+  assert.equal(late.verdict, 'Partly undone');
+  assert.match(late.sentence, /The rest weren't sent: Premiere didn't answer within 2 minutes\./);
+});
+
+test('H3: the foot shows a long write\'s real progress, with Stop, and a short one stays brief', () => {
+  const base = facts({});
+  const long = C.footState({ ...base, busy: 'Adding columns to 973 clips', write: { kind: 'write', verb: 'Adding columns to', unit: 'clip', done: 300, total: 973, stopping: false } });
+  assert.equal(long.verdict, 'Adding columns to 300 of 973 clips');
+  assert.equal(long.sentence, 'Premiere takes them 100 at a time. Stop ends it after this batch, and Undo Write takes back what was written.');
+  assert.ok(Math.abs(long.meter - 300 / 973) < 1e-9);
+  assert.deepStrictEqual(long.actions, ['stop']);
+  const stopping = C.footState({ ...base, busy: 'x', write: { kind: 'write', verb: 'Labelling', done: 300, total: 973, stopping: true } });
+  assert.equal(stopping.verdict, 'Stopping after this batch');
+  assert.deepStrictEqual(stopping.actions, []);
+  const undo = C.footState({ ...base, busy: 'x', write: { kind: 'undo', verb: 'Putting back', unit: 'item', done: 0, total: 400, stopping: false } });
+  assert.equal(undo.verdict, 'Putting back 400 items');
+  assert.match(undo.sentence, /what isn't back yet stays for the next Undo Write/);
+  const short = C.footState({ ...base, busy: 'Labelling 4 clips', write: { kind: 'write', verb: 'Labelling', unit: 'clip', done: 0, total: 4, stopping: false } });
+  assert.equal(short.verdict, 'Labelling 4 clips');
+  assert.equal(short.meter, undefined);
+});
+
+test('H1: Undo records live on disk per project, newest last, ten kept, and read back after a reload', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'sl-undo-'));
+  try {
+    const project = '/Volumes/Field SSD/Projects/lantern-spring.prproj', other = '/Volumes/Field SSD/Projects/north-pier.prproj';
+    assert.match(N.undoDir(project, home), /\/Library\/Application Support\/com\.skyfallstatus\.select\/undo\/[0-9a-f]{16}$/);
+    assert.notEqual(C.projectKey(project), C.projectKey(other));
+    assert.equal(C.projectKey('/a/Créme.prproj'), C.projectKey('/a/Créme.prproj'), 'one key whatever the Unicode form');
+    const ids = [];
+    for (let i = 0; i < 12; i++) {
+      const id = N.newUndoId(1790000000000 + i);
+      ids.push(id);
+      assert.ok(N.saveUndo(project, { v: 1, id, project, at: new Date().toISOString(), kind: 'label', meta: { label: 'Mango' }, restore: { kind: 'label', color: 7, items: [['1', 0, '/v/C1.MP4']] } }, C.UNDO_KEEP, home).ok);
+    }
+    assert.equal(C.UNDO_KEEP, 10);
+    assert.deepStrictEqual(N.listUndo(project, home), ids.slice(2), 'the newest ten stay, oldest first');
+    assert.deepStrictEqual(N.listUndo(other, home), [], 'another project has its own');
+    const again = require('vm').runInNewContext(fs.readFileSync(path.join(__dirname, '../client/native.js'), 'utf8') + ';SelectNative', { require, SelectCore: C });
+    const top = again.readUndo(project, again.listUndo(project, home).pop(), home);
+    assert.equal(top.restore.items.length, 1, 'a fresh copy of the panel reads them back');
+    assert.equal(C.undoWords(top), 'Takes Mango off 1 clip and puts back the labels they had before.');
+    assert.ok(!fs.readdirSync(N.undoDir(project, home)).some(n => /\.tmp$/.test(n)), 'nothing half written is left');
+    // A record that names another project is not read as this one's.
+    fs.writeFileSync(path.join(N.undoDir(project, home), '1790000000099-0001.json'), JSON.stringify({ project: other, restore: { items: [] } }));
+    assert.equal(N.readUndo(project, '1790000000099-0001', home), null);
+    assert.ok(N.dropUndo(project, ids[11], home));
+    assert.equal(N.readUndo(project, ids[11], home), null);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('H1: the write sheets say how far Undo Write reaches, and Undo Write says what it will put back', () => {
+  assert.equal(C.undoReach(3), 'Undo Write in Select takes back the last 10 writes to this project, newest first, and keeps them when the panel reloads.');
+  assert.match(C.undoReach(10), /pushes the oldest of them out of reach/);
+  assert.equal(C.undoWords({ kind: 'columns', restore: { items: [1, 2, 3] } }), 'Puts back what the Select columns held on 3 clips before this write.');
+  assert.equal(C.undoWords({ kind: 'bins', meta: { root: 'SELECT 2026-11-03 Sharpest first' }, restore: { items: [1, 2] } }), 'Moves 2 clips back to the bins they came from, and removes SELECT 2026-11-03 Sharpest first once it is empty.');
+  const now = new Date(2026, 10, 3, 18, 0).getTime();
+  assert.equal(C.whenWords(new Date(2026, 10, 3, 14, 32).toISOString(), now), 'today at 14:32');
+  assert.equal(C.whenWords(new Date(2026, 10, 2, 9, 5).toISOString(), now), 'yesterday at 09:05');
+  assert.equal(C.whenWords(new Date(2026, 9, 30, 18, 0).toISOString(), now), '2026-10-30 at 18:00');
+});
+
+test('M2: dates and day bins are in this Mac\'s time zone, whether the time came with an offset or a Z', () => {
+  const s = C.createStore();
+  C.addItems(s, [{ path: '/v/kept-sidecar.mp4' }, { path: '/v/lost-sidecar.mp4' }, { path: '/v/late.mp4' }, { path: '/v/after-midnight.mp4' }]);
+  C.ingest(s, { type: 'clip', tier: 0, path: '/v/kept-sidecar.mp4', createdAt: '2026-09-17T18:50:40+01:00' });
+  C.ingest(s, { type: 'clip', tier: 0, path: '/v/lost-sidecar.mp4', createdAt: '2026-09-17T17:50:40Z' });
+  C.ingest(s, { type: 'clip', tier: 0, path: '/v/late.mp4', createdAt: '2026-09-17T21:30:00Z' });
+  C.ingest(s, { type: 'clip', tier: 0, path: '/v/after-midnight.mp4', createdAt: '2026-09-17T22:30:00Z' });
+  const dates = () => s.rows.map(r => C.cellText(r, C.COLUMN.createdAt));
+  const dayBins = () => C.bucketize(s.rows, V({ sort: [by('createdAt', 1)] })).map(b => [b.name, b.rows.length]);
+  inZone('Europe/Paris', () => {
+    assert.deepStrictEqual(dates(), ['2026-09-17 19:50', '2026-09-17 19:50', '2026-09-17 23:30', '2026-09-18 00:30'], 'one camera reads the same with or without its sidecar');
+    assert.deepStrictEqual(dayBins(), [['01 2026-09-17', 3], ['02 2026-09-18', 1]], 'a night shoot splits at local midnight');
+  });
+  inZone('America/Los_Angeles', () => {
+    assert.deepStrictEqual(dates(), ['2026-09-17 10:50', '2026-09-17 10:50', '2026-09-17 14:30', '2026-09-17 15:30']);
+    assert.deepStrictEqual(dayBins(), [['01 2026-09-17', 4]], 'west of UTC an evening stays on its own day');
+  });
+  assert.match(C.COLUMN.createdAt.tip, /this Mac's time zone/);
+  assert.ok(!/Camera time when present/.test(C.COLUMN.createdAt.tip));
+});
+
+test('M3: Interviews is a fixed rule: the same clip is in or out whatever else is in the scan', () => {
+  const x = { name: 'X', speech: true, faces: 1, durationS: 40, shake: 0.45 };
+  const broll = s => Array.from({ length: 9 }, (_, i) => ({ name: 'b' + i, speech: false, faces: 0, durationS: 10, shake: s }));
+  const inScan = rows => C.computeView(rows, V({ show: 'interviews' })).order.map(i => rows[i].name).includes('X');
+  assert.ok(inScan([x].concat(broll(0.2))), 'with tripod b-roll');
+  assert.ok(inScan([x].concat(broll(0.6))), 'with handheld b-roll');
+  assert.ok(inScan([x]), 'alone');
+  const whip = { ...x, name: 'X', shake: 0.8 };
+  assert.ok(!inScan([whip]) && !inScan([whip].concat(broll(0.9))), 'shakier than handheld stays out, even among shakier clips');
+  assert.match(C.SHOW.interviews.tip, /shakier than a handheld camera is left out/);
+  assert.ok(!/steadier/.test(C.SHOW.interviews.tip));
+});
+
+test('unknown is not zero: a null from Vision is never No people, 0 faces or Silent, and shows blank', () => {
+  const unknown = { name: 'u', durationS: 30, hasAudio: true, silent: null, speech: null, music: null, people: null, faces: null, shotSize: null, text: null, labels: null, sounds: null, colorName: null, shake: null };
+  const rows = [unknown, { ...unknown, name: 'none', people: 0, faces: 0 }, { ...unknown, name: 'quiet', silent: true }];
+  const shown = id => C.computeView(rows, V({ show: id })).order.map(i => rows[i].name);
+  assert.deepStrictEqual(shown('nopeople'), ['none']);
+  assert.deepStrictEqual(shown('people'), []);
+  assert.deepStrictEqual(shown('silent'), ['quiet']);
+  assert.deepStrictEqual(shown('interviews'), []);
+  for (const id of ['speech', 'music', 'mediums', 'wides', 'onscreen']) { assert.ok(!shown(id).includes('u'), id); }
+  for (const key of ['people', 'faces', 'shotSize', 'colorName', 'soundText', 'screenText', 'labelText', 'shake']) {
+    assert.equal(C.cellText(unknown, C.COLUMN[key]), '', key);
+  }
+  const v = C.columnValues(unknown, 1, 4);
+  for (const f of ['SelectPeople', 'SelectFaces', 'SelectShot', 'SelectColour', 'SelectSound', 'SelectLabels', 'SelectText']) { assert.equal(v[f], '', f); }
+  assert.equal(C.cellText({ people: 0 }, C.COLUMN.people), '0', 'a real zero stays 0');
+  const sorted = C.computeView(rows, V({ sort: [by('people', -1)] })).order.map(i => rows[i].name);
+  assert.equal(sorted[0], 'none', 'unknown sorts after a real 0');
+});
+
+test('L1: an Undo that put nothing back never says Undone', () => {
+  const o = C.undoOutcome({ ok: true, restored: 0, skipped: 12, failed: [], remaining: null, binRemoved: null });
+  assert.equal(o.verdict, 'Nothing went back');
+  assert.equal(o.sentence, '12 changed since and left alone.');
+  assert.equal(o.kind, 'partial');
+  assert.equal(C.undoOutcome({ restored: 0, skipped: 0, failed: [] }).sentence, 'There was nothing left to put back.');
+});
+
+test('L2: a write during stage three keeps the scan\'s Stop and its meter', () => {
+  const store = C.createStore();
+  C.addItems(store, [{ path: '/a/1.mp4', id: '1' }, { path: '/a/2.mp4', id: '2' }]);
+  ['/a/1.mp4', '/a/2.mp4'].forEach(p => { C.ingest(store, { type: 'clip', tier: 0, path: p, durationS: 20 }); C.ingest(store, { type: 'clip', tier: 1, path: p, sharpness: 0.5 }); });
+  C.ingest(store, { type: 'clip', tier: 2, path: '/a/1.mp4', moments: 3, people: 1 });
+  const scanning = { ...facts({}), scan: { state: 'Scanning', failure: null, seconds: 3, stopping: false }, store, rows: 2, shown: 2, view: V({ sort: [by('sharpness', -1)] }) };
+  const out = C.writeOutcome('label', { items: pairs('1', '2') }, { changed: 2, failed: [], skipped: [] }, 'Mango');
+  const f = C.footState({ ...scanning, outcome: out });
+  assert.ok(f.green);
+  assert.deepStrictEqual(f.actions, ['stop', 'undo']);
+  assert.equal(f.meter, 0.5, 'one of two clips looked at closely');
+  const after = C.footState({ ...scanning, scan: { ...scanning.scan, state: 'Done' }, outcome: out });
+  assert.deepStrictEqual(after.actions, ['undo']);
+  assert.equal(after.meter, undefined);
+});
+
+test('L3: listing a folder can be stopped, and stops by itself past the cap', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sl-walk-'));
+  try {
+    fs.mkdirSync(path.join(dir, 'a/b'), { recursive: true });
+    for (const f of ['1.mp4', 'a/2.mp4', 'a/3.mov', 'a/b/4.mp4', 'a/b/5.mxf']) { fs.writeFileSync(path.join(dir, f), ''); }
+    const counts = [];
+    const all = await new Promise(res => N.walkFolder(dir, (e, p, info) => res({ p, info }), { onCount: n => counts.push(n) }));
+    assert.equal(all.p.length, 5);
+    assert.deepStrictEqual(all.info, { capped: false, stopped: false });
+    assert.ok(counts.length >= 1 && counts[counts.length - 1] === 5, 'the count climbs as it goes');
+    const capped = await new Promise(res => N.walkFolder(dir, (e, p, info) => res({ p, info }), { most: 3 }));
+    assert.deepStrictEqual(capped, { p: [], info: { capped: true, stopped: false } });
+    let stopped = null;
+    const handle = N.walkFolder(dir, (e, p, info) => { stopped = { p, info }; });
+    handle.stop();
+    assert.deepStrictEqual(stopped, { p: [], info: { capped: false, stopped: true } }, 'Stop ends it at once');
+    assert.equal(N.MOST_FILES, 50000);
+    const f = C.footState({ ...facts({}), listing: true, listed: 1234, listStop: true });
+    assert.equal(f.sentence, '1,234 video files found so far.');
+    assert.deepStrictEqual(f.actions, ['stop']);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('L5: a Selection scan says where its clips come from, and two selections are refused rather than guessed', () => {
+  const h = hostWithViews([], [[2]]), day = h.root.createBin('Day 2');
+  h.clip(2).moveBin(day);
+  const one = h.call('collect', { mode: 'selection' });
+  assert.ok(one.ok);
+  assert.deepStrictEqual(one.picked, { clips: 1, where: ['Day 2'] });
+  assert.equal(C.pickedWords(one.picked), 'Scanning the 1 clip selected in “Day 2”.');
+  const bin = hostWithViews([], [[]]);
+  bin.sandbox.app.getProjectViewSelection = () => [bin.root.kids[0], bin.root.kids[1]];
+  assert.equal(C.pickedWords(bin.call('collect', { mode: 'selection' }).picked), 'Scanning the 2 clips selected in the top of the project.');
+  const two = hostWithViews([], [[1], [3]]).call('collect', { mode: 'selection' });
+  assert.equal(two.ok, false);
+  assert.equal(two.code, 'several-selections');
+  assert.match(two.message, /2 Project panels have clips selected/);
+  const current = hostWithViews([1], [[1], [3]]).call('collect', { mode: 'selection' });
+  assert.ok(current.ok, 'the selection in focus wins');
+  assert.deepStrictEqual(current.items.map(i => i.id), ['1']);
+  assert.match(C.pickedWords({ clips: 40, where: ['A', 'B', 'C', 'D'] }), /in 4 bins\.$/);
+});
+
+test('wording: project columns use the panel\'s words, Undo has one name, and refusals name projects plainly', () => {
+  const labels = C.FIELDS.map(f => f.label);
+  assert.deepStrictEqual(labels.slice(0, 6), ['Select Rank', 'Select Sharpness', 'Select Brightness', 'Select Highlights', 'Select Motion', 'Select Loudness']);
+  assert.ok(!labels.some(l => /dB\+100|Clip Hi|Luma|Audio/.test(l)), labels.join());
+  assert.equal(C.COLUMN.audioDb.label, 'Loudness');
+  assert.equal(C.COLUMN.audioDb.label, C.SORT.audioDb.label, 'the table and the Sort menu agree');
+  const html = fs.readFileSync(path.join(__dirname, '../client/index.html'), 'utf8');
+  assert.match(html, /data-menu="undo" hidden>Undo Write</);
+  assert.match(html, /id="undo-write" class="action" hidden>Undo Write</);
+  assert.match(html, /data-menu="undo-view"[^>]*>Previous View</);
+  assert.ok(!/Undo Last Write|>Undo View</.test(html));
+  const wrong = hostWith().call('label', { project: '/Volumes/Field SSD/Projects/north-pier.prproj', items: pairs('1'), color: 5 });
+  assert.equal(wrong.message, 'The project in front is p, not north-pier. Open north-pier and try again. Nothing was changed.');
+  assert.ok(!/\/Volumes|\.prproj/.test(wrong.message), 'no full path');
+  const twin = hostWith().call('restore', { project: '/elsewhere/p.prproj', restore: { kind: 'label', color: 5, items: [] } });
+  assert.match(twin.message, /^The project in front is another p, in a different folder\./);
+  const long = C.footState({ ...facts({}), busy: 'x', write: { kind: 'write', verb: 'Labelling', done: 100, total: 973 } });
+  assert.ok(!/busy for a moment/.test(long.sentence));
+});
+
+test('host: quoting stays pure ASCII for accents, quotes, controls and line separators', () => {
+  const sb = {};
+  require('vm').createContext(sb);
+  require('vm').runInContext(fs.readFileSync(path.join(__dirname, '../host/select.jsx'), 'utf8'), sb);
+  for (const s of ['plain', 'Crème Brûlée "A"\\x', 'line\nbreak\t\u0001', '  ￿', 'Créme']) {
+    const q = sb.slQuote(s);
+    assert.ok(/^[\x20-\x7e]*$/.test(q), q);
+    assert.equal(JSON.parse(q), s);
+  }
+});
+
+test('L4: a write or an open asks the host for its own clips only, in either Unicode form', () => {
+  const h = hostWith();
+  h.root.kids[2].getMediaPath = () => '/v/Cre\u0301me.MP4';
+  const got = h.call('find', { paths: ['/v/C1.MP4', '/v/Cr\u00e9me.MP4', '/v/Cre\u0301me.MP4', '/v/not-here.MP4'] });
+  assert.ok(got.ok);
+  assert.deepStrictEqual(got.items.map(i => [i.id, i.path]), [['1', '/v/C1.MP4'], ['3', '/v/Cre\u0301me.MP4']]);
+  const app = fs.readFileSync(path.join(__dirname, '../client/app.js'), 'utf8');
+  assert.match(app, /host\('find', \{ paths: paths \}\)/, 'resolveIds uses find, not a walk of the whole project');
+  assert.match(app, /normalize\('NFD'\)/);
+});
+
+test('speed: text columns sort on ranks in exactly the collator\'s order, and a changed value is seen', () => {
+  const collator = new Intl.Collator('en', { numeric: true, sensitivity: 'base' });
+  // The order before ranks: the collator inside every comparison, empty last both ways, ties in scan order.
+  const reference = (rows, key, dir) => rows.map((r, i) => i).sort((a, b) => {
+    const x = rows[a][key] || null, y = rows[b][key] || null;
+    if (x === null || y === null) { return x === y ? a - b : x === null ? 1 : -1; }
+    return collator.compare(x, y) * dir || a - b;
+  });
+  const names = ['C10.MP4', 'C2.MP4', 'c2.mp4', 'Crème', 'Creme', null, '', 'A0001', 'a0001', 'Zoë', 'zoe', 'C2.MP4'];
+  const rows = names.map((name, i) => ({ name, camera: i % 3 ? 'SONY ILME-FX3' : i % 2 ? 'Canon EOS R5' : null, labelText: name && name.length > 5 ? name.slice(1) : null, version: 1 }));
+  for (const key of ['name', 'camera', 'labelText']) {
+    for (const dir of [1, -1]) {
+      assert.deepStrictEqual(C.sortOrder(rows, rows.map((r, i) => i), [by(key, dir)]), reference(rows, key, dir), key + ' ' + dir);
+    }
+  }
+  const s = storeFromFixture(fixture);
+  for (const key of ['name', 'camera', 'lens', 'codec', 'soundText', 'screenText', 'labelText']) {
+    assert.deepStrictEqual(C.sortOrder(s.rows, s.rows.map((r, i) => i), [by(key, 1)]), reference(s.rows, key, 1), key);
+  }
+  rows[0].name = 'A0000';
+  assert.equal(C.sortOrder(rows, rows.map((r, i) => i), [by('name', 1)])[0], 0, 'a new value is sorted, not an old rank');
+});
+
+test('speed: the Show menu counts every Show in one pass, and agrees with each Show alone', () => {
+  const s = storeFromFixture(fixture);
+  C.ingest(s, { type: 'groups', groups: fixtureGroups(fixture) });
+  const all = C.showCounts(s.rows);
+  for (const sh of C.SHOWS) {
+    assert.equal(all[sh.id].n, C.showCount(s.rows, sh.id), sh.id);
+    assert.equal(all[sh.id].known, C.dataStatus(s.rows, sh.id, false) === 'ok', sh.id);
+  }
+  const bare = C.showCounts([{ name: 'x', durationS: 3 }]);
+  assert.equal(bare.people.known, false);
+  assert.equal(bare.silent.known, true, 'Silent needs no Tier 2');
+});
+
+test('speed: the search text built in idle time is the one a search uses', () => {
+  const s = storeFromFixture(fixture), rows = s.rows;
+  let budget = 1;
+  const first = C.warmSearch(rows, 0, () => budget-- > 0);
+  assert.ok(first > 0 && first < rows.length, 'it stops when the idle time runs out, and says where');
+  assert.equal(C.warmSearch(rows, first, () => true), rows.length);
+  assert.ok(rows.every(r => typeof r.hay === 'string' && r.hayVersion === r.version));
+  const tokens = C.searchTokens('bread');
+  const warm = C.computeView(rows, V(), null, { tokens }).order;
+  rows.forEach(r => { r.hay = undefined; });
+  assert.deepStrictEqual(C.computeView(rows, V(), null, { tokens }).order, warm);
 });

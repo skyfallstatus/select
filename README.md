@@ -35,28 +35,36 @@ Get **Select.pkg** from the [latest release](https://github.com/skyfallstatus/se
 
 1. Open `Select.pkg`. macOS says it can't be opened. Click **Done**.
 2. Go to **System Settings › Privacy & Security**, scroll down, and click **Open Anyway** next to Select.
-3. Follow the installer.
+3. Follow the installer. Select installs for you only, so it doesn't ask for an administrator's password.
 4. Restart Premiere, then choose **Window › Extensions › Select**.
 
 On macOS 13 or 14, you can instead Control-click the package and choose **Open**.
+
+### Updates
+
+Select updates itself. When a new version is ready, a line at the bottom of the panel says so. **Restart** switches to it, or Premiere uses it the next time it opens. **Check for Updates** in the **···** menu checks now.
+
+Coming from Select 0.1? Install the package once, as above. 0.1 can't update itself.
 
 ## Use
 
 1. Choose **Selection**, **Project** or **Folder** at the top, and press **Scan**.
 2. Pick from **Show** and **Sort**, tap a colour dot, or search.
-3. Happy with the view? **Label**, **Add Columns** or **Sort into Bins** puts it in your project. **Undo** takes it back.
+3. Happy with the view? **Label**, **Add Columns** or **Sort into Bins** puts it in your project. **Undo Write** in the **···** menu takes it back, up to your last 10 writes.
 
 Your media files are never changed. What each option measures, and how accurate it is, is in [What Select looks at](docs/WHAT-IT-LOOKS-AT.md).
 
 ## Privacy
 
-Nothing leaves your Mac: no account, no tracking, no network. Results are kept in `~/Library/Caches/com.skyfallstatus.select`.
+Your clips and what Select finds in them never leave your Mac: no account, no tracking. Results are kept in `~/Library/Caches/com.skyfallstatus.select`, and Undo records in `~/Library/Application Support/com.skyfallstatus.select`.
+
+Once a day Select asks GitHub whether there's a new version. That request is the only thing it sends. You can turn it off in the ··· menu. When there is a new version, Select downloads it from the same GitHub release.
 
 ## Feedback
 
 Bugs, odd formats and ideas are welcome. Use **Report a Bug** in the panel's **···** menu, or see [BETA.md](BETA.md) for what's most useful to hear.
 
-To remove Select, quit Premiere and delete `com.skyfallstatus.select` from `/Library/Application Support/Adobe/CEP/extensions`.
+To remove Select, quit Premiere and delete `com.skyfallstatus.select` from `~/Library/Application Support/Adobe/CEP/extensions`, and its settings folder, `~/Library/Application Support/com.skyfallstatus.select`. Select 0.1 installed for all users, in `/Library/Application Support/Adobe/CEP/extensions`, so if you had it, delete it there too.
 
 Want to build it yourself or help out? See [CONTRIBUTING.md](CONTRIBUTING.md).
 

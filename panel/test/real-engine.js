@@ -25,7 +25,7 @@ N.runEngine(binary, paths, {
     fs.writeFileSync(out, lines.join('\n') + '\n');
     console.log(`exit ${info.code}, ${lines.length} lines, ${((performance.now() - t0) / 1000).toFixed(2)} s, first clip at ${first && first.toFixed(0)} ms`);
     console.log(`rows ${store.rows.length}, tier0 ${store.tier0}, tier1 ${store.tier1}, errors ${store.errors}, bad ${store.bad}, done ${JSON.stringify(store.done)}`);
-    const contract0 = 'name sizeBytes durationS fps width height rotation codec bitDepth chroma allIntra mbps hasAudio audioChannels createdAt timecode camera lens gamma isLog gpsLat gpsLon keyframeBytesMean motionProxy'.split(' ');
+    const contract0 = 'name sizeBytes durationS fps width height rotation codec bitDepth chroma allIntra mbps hasAudio audioChannels createdAt timecode camera lens gamma isLog colorNote gpsLat gpsLon keyframeBytesMean motionProxy'.split(' ');
     const contract1 = 'sharpness luma contrast clipHighPct clipLowPct saturation warmth dhash audioDb silent thumb'.split(' ');
     const env = new Set(['type', 'tier', 'path', 'cached', 'ms']);
     console.log('tier 0 missing:', contract0.filter(k => !keys[0].has(k)), 'extra:', [...keys[0]].filter(k => !contract0.includes(k) && !env.has(k)));

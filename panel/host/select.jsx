@@ -1,25 +1,28 @@
 // Select ExtendScript host. ES3 only: no JSON, no Array.indexOf, no reserved words as names.
 // The panel calls one function, slCall(fn, jsonArgs), which always returns a JSON string in pure ASCII.
-// Every write does all its work in one call and checks playback, dialogs and the project in that same call.
+// A write comes in batches of about 100 items. Every call checks playback, dialogs and the project itself, and names
+// each item by its id and its media path: an item whose path no longer matches is left alone and reported.
 // Nothing here renames a clip, touches a file on disk or touches a sequence.
 
 var SELECT_HOST_VERSION = '0.1.0';
+// The shape of the calls. The panel loads this file again when an older one is still in Premiere's script engine.
+var SELECT_HOST_PROTOCOL = 2;
 var SELECT_NS = 'http://ns.adobe.com/premierePrivateProjectMetaData/1.0/';
 
 // ---------------------------------------------------------------- JSON out (ASCII only)
 
+function slEscape(c) {
+    if (c === '"') { return '\\"'; }
+    if (c === '\\') { return '\\\\'; }
+    var h = c.charCodeAt(0).toString(16);
+    return '\\u' + '0000'.substring(h.length) + h;
+}
+
+// One replace instead of a loop per character: ExtendScript is slow at string building, and many paths are accented.
 function slQuote(s) {
     s = String(s);
     if (/^[\x20\x21\x23-\x5b\x5d-\x7e]*$/.test(s)) { return '"' + s + '"'; }
-    var out = '"', i, c, h;
-    for (i = 0; i < s.length; i++) {
-        c = s.charCodeAt(i);
-        if (c === 34) { out += '\\"'; }
-        else if (c === 92) { out += '\\\\'; }
-        else if (c < 32 || c > 126) { h = c.toString(16); out += '\\u' + '0000'.substring(h.length) + h; }
-        else { out += s.charAt(i); }
-    }
-    return out + '"';
+    return '"' + s.replace(/[\x00-\x1f"\\\x7f-\uffff]/g, slEscape) + '"';
 }
 
 function slJson(v) {
@@ -83,21 +86,29 @@ function slPlayback() {
     return st;
 }
 
+// A project's name from its path, without the folders or .prproj.
+function slTitle(path) {
+    var p = String(path);
+    return p.substring(p.lastIndexOf('/') + 1).replace(/\.prproj$/i, '');
+}
+
 // null when a write may run, else the refusal to return. Unknown is refused.
 function slGuard(expectProject) {
     var path = slProjectPath();
-    if (!path) { return slFail('no-project', 'No project is open. Nothing was written.'); }
+    if (!path) { return slFail('no-project', 'No project is open. Nothing was changed.'); }
     if (expectProject && path !== expectProject) {
-        return slFail('wrong-project', 'The project in front is ' + path + ', not the one scanned. Nothing was written.', { active: path });
+        var now = slTitle(path), want = slTitle(expectProject);
+        return slFail('wrong-project', (now === want ? 'The project in front is another ' + want + ', in a different folder.' : 'The project in front is ' + now + ', not ' + want + '.') +
+            ' Open ' + want + ' and try again. Nothing was changed.', { active: path });
     }
     var st = slPlayback();
-    if (st.modal) { return slFail('modal', 'A Premiere dialog is open. Close it first. Nothing was written.', { playback: st }); }
-    if (st.modal === null) { return slFail('modal-unknown', 'Premiere did not confirm that no dialog is open, so nothing was written.', { playback: st }); }
+    if (st.modal) { return slFail('modal', 'A Premiere dialog is open. Close it first. Nothing was changed.', { playback: st }); }
+    if (st.modal === null) { return slFail('modal-unknown', 'Premiere did not confirm that no dialog is open, so nothing was changed.', { playback: st }); }
     if (st.program === true || st.source === true) {
-        return slFail('playing', 'Playback is running. Stop it and try again. Nothing was written.', { playback: st });
+        return slFail('playing', 'Playback is running. Stop it and try again. Nothing was changed.', { playback: st });
     }
     if (st.program !== false || st.source !== false) {
-        return slFail('playback-unknown', 'Premiere did not confirm that playback is stopped, so nothing was written.', { playback: st });
+        return slFail('playback-unknown', 'Premiere did not confirm that playback is stopped, so nothing was changed.', { playback: st });
     }
     return null;
 }
@@ -142,10 +153,12 @@ function slClipRecord(c, out) {
     out.items.push({ id: String(c.nodeId), path: path, name: String(c.name) });
 }
 
+// {items} for the selection the editor means, {several: n} when more than one Project panel has one and none is
+// current, or null when nothing is selected.
 function slSelection() {
-    var sel = null, views, i;
+    var sel = null, views, i, found = [];
     try { sel = app.getCurrentProjectViewSelection(); } catch (e) {}
-    if (sel && sel.length) { return sel; }
+    if (sel && sel.length) { return { items: sel }; }
     // Focus is on this panel, so the "current" view can be empty while a Project panel still has a selection.
     var path = slProjectPath();
     try {
@@ -154,11 +167,29 @@ function slSelection() {
             var p = app.getProjectFromViewID(views[i]);
             if (p && String(p.path) === path) {
                 sel = app.getProjectViewSelection(views[i]);
-                if (sel && sel.length) { return sel; }
+                if (sel && sel.length) { found.push(sel); }
             }
         }
     } catch (e1) {}
-    return null;
+    if (found.length > 1) { return { several: found.length }; }
+    return found.length ? { items: found[0] } : null;
+}
+
+// The names of the bins a selection comes from: selected bins by name, selected clips by the bin that holds them, ''
+// for the top of the project. At most four, which is enough to say where.
+function slWhere(sel) {
+    var names = [], seen = {}, parents = null, i, name, key;
+    for (i = 0; i < sel.length && names.length < 4; i++) {
+        if (sel[i].type === 2) {
+            name = String(sel[i].name);
+        } else {
+            if (!parents) { parents = slIndex().parents; }
+            key = 'n' + sel[i].nodeId;
+            name = !parents[key] || parents[key].nodeId === app.project.rootItem.nodeId ? '' : String(parents[key].name);
+        }
+        if (!seen['k' + name]) { seen['k' + name] = true; names.push(name); }
+    }
+    return names;
 }
 
 // ---------------------------------------------------------------- reads
@@ -186,9 +217,12 @@ slOps.collect = function (a) {
     var t0 = new Date().getTime();
     var out = { items: [], sequences: 0, noPath: 0 };
     var add = function (c) { slClipRecord(c, out); };
+    var picked = null;
     if (a.mode === 'selection') {
-        var sel = slSelection(), i;
-        if (!sel) { return slFail('no-selection', 'Nothing is selected in the Project panel. Select clips or a bin, or choose Project.'); }
+        var got = slSelection(), sel, i;
+        if (!got) { return slFail('no-selection', 'Nothing is selected in the Project panel. Select clips or a bin, or choose Project.'); }
+        if (got.several) { return slFail('several-selections', got.several + ' Project panels have clips selected, so Select can\'t tell which you mean. Clear the selection in all but one, or choose Project.'); }
+        sel = got.items;
         var seen = {}, unique = function (c) {
             var k = 'n' + c.nodeId;
             if (!seen[k]) { seen[k] = true; add(c); }
@@ -196,6 +230,7 @@ slOps.collect = function (a) {
         for (i = 0; i < sel.length; i++) {
             if (sel[i].type === 2) { slWalk(sel[i], unique); } else { unique(sel[i]); }
         }
+        picked = { clips: out.items.length, where: slWhere(sel) };
     } else {
         slWalk(app.project.rootItem, add);
     }
@@ -206,8 +241,24 @@ slOps.collect = function (a) {
         items: out.items,
         sequences: out.sequences,
         noPath: out.noPath,
+        picked: picked,
         ms: new Date().getTime() - t0
     };
+};
+
+// The items whose media path is one of `paths`, for a write or an open: only those cross the bridge, not the whole
+// project. ExtendScript cannot normalise Unicode, so the panel sends each path in every form it has.
+slOps.find = function (a) {
+    var path = slProjectPath();
+    if (!path) { return slFail('no-project', 'No project is open.'); }
+    var t0 = new Date().getTime(), want = {}, items = [], i;
+    for (i = 0; i < a.paths.length; i++) { want['p' + a.paths[i]] = true; }
+    slWalk(app.project.rootItem, function (c) {
+        if (c.isSequence()) { return; }
+        var p = slMediaPath(c);
+        if (p && want['p' + p] === true) { items.push({ id: String(c.nodeId), path: p, name: String(c.name) }); }
+    });
+    return { ok: true, project: { path: path, name: slProjectName() }, items: items, ms: new Date().getTime() - t0 };
 };
 
 // ---------------------------------------------------------------- source monitor and import
@@ -217,6 +268,7 @@ slOps.open = function (a) {
     if (g) { return g; }
     var it = slIndex().items['n' + a.id];
     if (!it) { return slFail('not-found', 'That clip is no longer in the project.'); }
+    if (a.path && slMediaPath(it) !== a.path) { return slFail('changed', 'That clip has changed in the project since. Try again.'); }
     app.sourceMonitor.openProjectItem(it);
     return { ok: true, name: String(it.name) };
 };
@@ -254,28 +306,38 @@ function slMediaPath(it) {
     try { return String(it.getMediaPath() || ''); } catch (e) { return ''; }
 }
 
+// The item a pair [id, path] names, or null with the reason added to `skipped`. Ids are small counters: a project
+// reverted, or closed and opened again, can give an id to another clip, so the path must still match.
+function slItem(items, pair, skipped) {
+    var id = String(pair[0]), it = items['n' + id];
+    if (!it) { skipped.push({ id: id, error: 'no longer in the project' }); return null; }
+    if (slMediaPath(it) !== String(pair[1])) { skipped.push({ id: id, name: String(it.name), error: 'now a different clip' }); return null; }
+    return it;
+}
+
 // Premiere keeps one undo step per item and only the last 50 steps (BE.Prefs.Undo.MaxLevels, measured on 26.5.2),
 // so its undo cannot take back a batch. Each write therefore returns what it replaced, for slOps.restore.
 slOps.label = function (a) {
     var g = slGuard(a.project);
     if (g) { return g; }
     var t0 = new Date().getTime();
-    var items = slIndex().items, failed = [], before = [], changed = 0, i, it;
-    for (i = 0; i < a.ids.length; i++) {
-        it = items['n' + a.ids[i]];
-        if (!it) { failed.push({ id: a.ids[i], error: 'not in the project' }); continue; }
+    var items = slIndex().items, failed = [], skipped = [], before = [], changed = 0, i, it, id;
+    for (i = 0; i < a.items.length; i++) {
+        it = slItem(items, a.items[i], skipped);
+        if (!it) { continue; }
+        id = String(a.items[i][0]);
         try {
             var was = it.getColorLabel();
             it.setColorLabel(a.color);
             if (it.getColorLabel() === a.color) {
                 changed++;
-                before.push([a.ids[i], was, slMediaPath(it)]);
+                before.push([id, was, String(a.items[i][1])]);
             } else {
-                failed.push({ id: a.ids[i], name: String(it.name), error: 'label did not change' });
+                failed.push({ id: id, name: String(it.name), error: 'label did not change' });
             }
-        } catch (e) { failed.push({ id: a.ids[i], name: String(it.name), error: String(e) }); }
+        } catch (e) { failed.push({ id: id, name: String(it.name), error: String(e) }); }
     }
-    return { ok: true, changed: changed, failed: failed, ms: new Date().getTime() - t0, restore: { kind: 'label', color: a.color, items: before } };
+    return { ok: true, changed: changed, failed: failed, skipped: skipped, ms: new Date().getTime() - t0, restore: { kind: 'label', color: a.color, items: before } };
 };
 
 function slXml(s) {
@@ -367,81 +429,102 @@ slOps.columns = function (a) {
         // Adding a field that already exists returns undefined and changes nothing.
         app.project.addPropertyToProjectMetadataSchema(a.fields[i].name, a.fields[i].label, 2);
     }
-    var items = slIndex().items, failed = [], before = [], changed = 0, matched = 0, row;
+    var items = slIndex().items, failed = [], skipped = [], before = [], changed = 0, matched = 0, row, id;
     for (i = 0; i < a.rows.length; i++) {
         row = a.rows[i];
-        for (j = 0; j < row.ids.length; j++) {
-            it = items['n' + row.ids[j]];
-            if (!it) { failed.push({ id: row.ids[j], error: 'not in the project' }); continue; }
+        for (j = 0; j < row.items.length; j++) {
+            it = slItem(items, row.items[j], skipped);
+            if (!it) { continue; }
+            id = String(row.items[j][0]);
             try {
                 var was = slReadFields(it, names);
                 if (it.setProjectMetadata(slPacket(names, row.values), names) === false) {
-                    failed.push({ id: row.ids[j], name: String(it.name), error: 'setProjectMetadata returned false' });
+                    failed.push({ id: id, name: String(it.name), error: 'setProjectMetadata returned false' });
                 } else {
                     changed++;
                     sample = it;
-                    before.push({ id: row.ids[j], wrote: row.values, was: was, path: slMediaPath(it) });
+                    before.push({ id: id, wrote: row.values, was: was, path: String(row.items[j][1]) });
                     if (slSame(slReadFields(it, names), row.values, names)) { matched++; }
                 }
-            } catch (e) { failed.push({ id: row.ids[j], name: String(it.name), error: String(e) }); }
+            } catch (e) { failed.push({ id: id, name: String(it.name), error: String(e) }); }
         }
     }
-    var columns = { shown: false };
-    if (sample && a.show !== false) {
+    // Shown once per write, by the first batch that wrote anything: the panel says show until a batch has.
+    var columns = null;
+    if (sample && a.show) {
         try { columns = slShowColumns(sample, names); }
         catch (e1) { columns = { shown: false, warning: String(e1) }; }
     }
-    return { ok: true, changed: changed, matched: matched, failed: failed, columns: columns, ms: new Date().getTime() - t0, restore: { kind: 'columns', fields: names, items: before } };
+    return { ok: true, changed: changed, matched: matched, failed: failed, skipped: skipped, columns: columns, ms: new Date().getTime() - t0, restore: { kind: 'columns', fields: names, items: before } };
 };
 
+// One batch of moves. The first batch makes the top bin, named from `root` and never over another bin, and later
+// batches name it by `top`. A sub-bin is found by name under the top bin, or made.
 slOps.bins = function (a) {
     var g = slGuard(a.project);
     if (g) { return g; }
     var t0 = new Date().getTime();
-    var root = app.project.rootItem, name = a.root, n = 2;
-    while (slChildBin(root, name, false)) { name = a.root + ' (' + (n++) + ')'; }
-    var top = root.createBin(name);
-    if (!top) { return slFail('bin-failed', 'Could not create the bin ' + name + '. Nothing moved.'); }
-    var index = slIndex(), failed = [], before = [], moved = 0, report = [], subs = [], i, j, it, sub, b, r, key;
+    var root = app.project.rootItem, index = slIndex(), top, name, n = 2;
+    if (a.top) {
+        top = index.bins['n' + a.top];
+        if (!top) { return slFail('bin-gone', 'The bin Select was filling is no longer in the project, so nothing more was moved.'); }
+        name = String(top.name);
+    } else {
+        name = a.root;
+        while (slChildBin(root, name, false)) { name = a.root + ' (' + (n++) + ')'; }
+        top = root.createBin(name);
+        if (!top) { return slFail('bin-failed', 'Could not create the bin ' + name + '. Nothing moved.'); }
+    }
+    var failed = [], skipped = [], before = [], moved = 0, report = [], i, j, it, sub, b, r, key, id, here;
     for (i = 0; i < a.buckets.length; i++) {
         b = a.buckets[i];
         // Clips may already have moved by now, so nothing below may throw past the return that carries `restore`.
         sub = null;
-        try { sub = top.createBin(b.name); } catch (e0) { failed.push({ id: null, error: 'could not create bin ' + b.name + ': ' + e0 }); continue; }
+        try { sub = slChildBin(top, b.name, true); } catch (e0) { failed.push({ id: null, error: 'could not create bin ' + b.name + ': ' + e0 }); continue; }
         if (!sub) {
             failed.push({ id: null, error: 'could not create bin ' + b.name });
             continue;
         }
-        var here = 0;
-        for (j = 0; j < b.ids.length; j++) {
-            key = 'n' + b.ids[j];
-            it = index.items[key];
-            if (!it) { failed.push({ id: b.ids[j], error: 'not in the project' }); continue; }
+        here = [];
+        for (j = 0; j < b.items.length; j++) {
+            it = slItem(index.items, b.items[j], skipped);
+            if (!it) { continue; }
+            id = String(b.items[j][0]);
+            key = 'n' + id;
             try {
                 var from = String(index.parents[key].nodeId);
                 r = it.moveBin(sub);
                 if (r === false) {
-                    failed.push({ id: b.ids[j], name: String(it.name), error: 'moveBin returned false' });
+                    failed.push({ id: id, name: String(it.name), error: 'moveBin returned false' });
                 } else {
-                    here++;
-                    before.push([b.ids[j], from, String(sub.nodeId), slMediaPath(it)]);
+                    here.push(id);
+                    before.push([id, from, String(sub.nodeId), String(b.items[j][1])]);
                 }
-            } catch (e) { failed.push({ id: b.ids[j], name: String(it.name), error: String(e) }); }
+            } catch (e) { failed.push({ id: id, name: String(it.name), error: String(e) }); }
         }
-        moved += here;
+        moved += here.length;
         report.push({ name: b.name, moved: here });
-        subs.push(sub);
     }
-    for (i = 0; i < subs.length; i++) {
-        try { report[i].ids = slChildIds(subs[i]); } catch (e1) { report[i].ids = null; }
+    return { ok: true, root: name, top: String(top.nodeId), moved: moved, buckets: report, failed: failed, skipped: skipped, ms: new Date().getTime() - t0, restore: { kind: 'bins', top: String(top.nodeId), items: before } };
+};
+
+// After the last batch, or a Stop: what each bin under the top bin holds now, read from the project's own tree.
+// clear: nothing was moved, so the bins are clutter with no Undo to clear them, and they go if they are empty.
+slOps.binsCheck = function (a) {
+    var g = slGuard(a.project);
+    if (g) { return g; }
+    var top = slIndex().bins['n' + a.top], out = [], removed = null, kids, i;
+    if (!top) { return { ok: true, buckets: [], gone: true, binRemoved: null }; }
+    kids = top.children;
+    for (i = 0; i < kids.numItems; i++) {
+        if (kids[i].type === 2) {
+            try { out.push({ name: String(kids[i].name), ids: slChildIds(kids[i]) }); } catch (e) { out.push({ name: String(kids[i].name), ids: null }); }
+        }
     }
-    if (!moved) {
-        // Nothing went in, so the bins are clutter with no Undo to clear them.
-        var cleared = false;
-        try { cleared = slDeleteIfEmpty(top); } catch (e2) {}
-        return { ok: true, root: name, moved: 0, buckets: report, failed: failed, binRemoved: cleared, ms: new Date().getTime() - t0, restore: null };
+    if (a.clear) {
+        try { removed = slDeleteIfEmpty(top); } catch (e1) { removed = false; }
     }
-    return { ok: true, root: name, moved: moved, buckets: report, failed: failed, ms: new Date().getTime() - t0, restore: { kind: 'bins', top: String(top.nodeId), items: before } };
+    return { ok: true, buckets: out, binRemoved: removed };
 };
 
 function slSame(a, b, names) {
@@ -459,7 +542,8 @@ function slDeleteIfEmpty(bin) {
     return bin.deleteBin() !== false;
 }
 
-// Puts back what a write replaced. An item changed by anyone since that write is left alone and counted.
+// Puts back what a write replaced, in batches like the write. An item changed by anyone since that write is left alone
+// and counted. remaining: what failed and can be tried again.
 slOps.restore = function (a) {
     var g = slGuard(a.project);
     if (g) { return g; }
@@ -513,8 +597,9 @@ slOps.restore = function (a) {
             if (!it || done[key] || !index.bins['n' + e[1]] || !sameClip(it, e[3]) || String(index.parents[key].nodeId) !== e[2]) { continue; }
             if (now.parents[key] && String(now.parents[key].nodeId) === e[1]) { restored++; } else { missed(e, e[0], it, 'did not move back'); }
         }
+        // The SELECT bin goes with the last batch of an Undo, once it is empty.
         var top = now.bins['n' + r.top];
-        if (top) {
+        if (top && a.final !== false) {
             try { slDeleteIfEmpty(top); } catch (e4) {}
             removed = !slIndex().bins['n' + r.top];
         }

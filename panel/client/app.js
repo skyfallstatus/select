@@ -35,9 +35,15 @@
     project: null,
     connected: false,
     listing: false,
-    busy: null,          // what a write in progress is doing, for the foot
+    listed: 0,           // video files found so far while listing a folder
+    listWalk: null,      // the folder walk while it runs, for Stop
+    busy: null,          // what a write in progress is doing, in words. Read by the updater too: no update mid-write
+    write: null,         // {kind: write or undo, verb, unit, done, total, stopping} while a write or an Undo Write runs
+    hostLate: 0,         // host calls that passed their deadline and have not answered yet
+    undo: null,          // {path, count, top}: the Undo records of the project in front, read from disk
+    memoryUndo: null,    // a record that could not be saved, so Undo Write still reaches it until the panel reloads
+    activeRecord: null,  // the id of the record a running write is filling, never cleared as empty on the way
     scan: null,          // {handle, startedAt, endedAt, stopping, state, source, failure}
-    lastWrite: null,     // {title, restore, project}
     outcome: null,       // the last write's result, in the foot until the view moves on
     sortMs: null,
     sortRows: 0,
@@ -63,24 +69,56 @@
     });
   }
 
-  function host(fn, args) {
+  // How long the panel waits for one host call, in ms. A batch of 100 is the longest; listing a big project comes close.
+  var TIMEOUT = { status: 20000, collect: 300000, find: 300000, other: 120000, load: 20000 };
+  var HOST_PROTOCOL = 2;
+  var LATE = 'Premiere hasn\'t answered Select\'s last call yet, so nothing new is sent to it. Try again once it has.';
+
+  function waitWords(ms) {
+    return ms >= 60000 ? plural(Math.round(ms / 60000), 'minute') : plural(Math.round(ms / 1000), 'second');
+  }
+
+  function parseHost(text) {
+    try {
+      var res = JSON.parse(text);
+      if (res && typeof res === 'object') { return res; }
+    } catch (e) {}
+    return { ok: false, code: 'host-error', message: 'Premiere answered: ' + String(text).slice(0, 200) };
+  }
+
+  // Every call has a deadline, so the panel never waits on Premiere for ever. An answer that comes after it still
+  // counts: `late` gets it, so a batch that landed late still goes into its Undo record.
+  function host(fn, args, late) {
     if (!window.__adobe_cep__) {
       return Promise.resolve({ ok: false, code: 'no-host', message: 'Premiere is not connected.' });
     }
-    return rawEval(C.hostCall(fn, args)).then(function (text) {
-      try {
-        return JSON.parse(text);
-      } catch (e) {
-        return { ok: false, code: 'host-error', message: 'Premiere answered: ' + String(text).slice(0, 200) };
-      }
+    var ms = TIMEOUT[fn] || TIMEOUT.other;
+    return new Promise(function (resolve) {
+      var over = false, timer = setTimeout(function () {
+        over = true;
+        S.hostLate++;
+        resolve({ ok: false, code: 'timeout', message: 'Premiere didn\'t answer within ' + waitWords(ms) + '.' });
+      }, ms);
+      rawEval(C.hostCall(fn, args)).then(function (text) {
+        var res = parseHost(text);
+        if (!over) { clearTimeout(timer); resolve(res); return; }
+        S.hostLate = Math.max(0, S.hostLate - 1);
+        if (late) { late(res); }
+        renderFoot();
+      });
     });
   }
 
-  // ScriptPath loads the host with the panel. Load it by hand if it did not.
+  // rawEval with a deadline: undefined when Premiere does not answer in time.
+  function rawEvalWithin(script, ms) {
+    return Promise.race([rawEval(script), new Promise(function (resolve) { setTimeout(resolve, ms); })]);
+  }
+
+  // ScriptPath loads the host with the panel. Load it by hand if it did not, or if an older one is still loaded.
   function ensureHost() {
-    return rawEval('typeof slCall').then(function (t) {
-      if (t === 'function' || t === null) { return; }
-      return rawEval('$.evalFile(' + JSON.stringify(extensionRoot() + '/host/select.jsx') + ')');
+    return rawEvalWithin('typeof SELECT_HOST_PROTOCOL === "number" ? String(SELECT_HOST_PROTOCOL) : typeof slCall', TIMEOUT.load).then(function (t) {
+      if (t === String(HOST_PROTOCOL) || t === null || t === undefined) { return; }
+      return rawEvalWithin('$.evalFile(' + JSON.stringify(extensionRoot() + '/host/select.jsx') + ')', TIMEOUT.load);
     });
   }
 
@@ -143,7 +181,10 @@
       project: S.project,
       connected: S.connected,
       listing: S.listing,
+      listed: S.listed,
+      listStop: !!S.listWalk,
       busy: S.busy,
+      write: S.write,
       outcome: S.outcome,
       scan: sc ? { state: sc.state, failure: sc.failure, seconds: scanSeconds(), stopping: sc.stopping } : null,
       store: S.store,
@@ -195,7 +236,8 @@
     $('do-columns').disabled = !S.order.length || held.indexOf('columns') >= 0;
     $('do-label').title = held.length ? f.wait : 'Set a colour label on the selected clips, or on the current view';
     $('do-columns').title = held.length ? f.wait : 'Write the scores to project metadata, so the Project panel can sort by them';
-    $('undo-write').title = S.lastWrite ? 'Puts back: ' + S.lastWrite.title : '';
+    var u = undoState();
+    $('undo-write').title = u.top ? C.undoWords(u.top) : '';
     var tail = S.scan && f.kind !== 'scanning' && !f.green ? [f.wait || '', statusLine()].filter(Boolean).join(' ') : '';
     $('status-unread').textContent = tail;
     $('status-unread').hidden = !tail;
@@ -379,7 +421,7 @@
         if (slot.nameText.textContent !== row.name) { slot.nameText.textContent = row.name; }
         if (slot.why.textContent !== reason) { slot.why.textContent = reason; }
         slot.why.classList.toggle('hit', !!hit && !row.error);
-        slot.cells[i].title = row.reason || row.lookReason ? row.path + '\n' + (row.reason || row.lookReason) : row.path;
+        slot.cells[i].title = [row.path, row.reason || row.lookReason, row.colorNote].filter(Boolean).join('\n');
         continue;
       }
       var cell = slot.cells[i], text = C.cellText(row, col);
@@ -573,7 +615,7 @@
     slot.fact.classList.toggle('hit', !!S.tokens.length);
     slot.chips.hidden = !colour;
     if (colour) { paintPalette(slot.chips.children, row); }
-    var why = row.error ? C.unreadableReason(row) : row.reason || row.lookReason;
+    var why = [row.error ? C.unreadableReason(row) : row.reason || row.lookReason, row.colorNote].filter(Boolean).join('\n');
     slot.el.title = why ? row.path + '\n' + why : row.path;
     // The clip's own colour holds the place until its picture is decoded, so a fast scroll reads as the footage.
     slot.pic.style.background = row.palette && row.palette[0] ? row.palette[0] : '';
@@ -776,17 +818,16 @@
   }
 
   // A count while there is something to count, a quiet ellipsis while the engine is still on it, a dash once it won't come.
-  // A count still climbing ends in an ellipsis too.
-  function showHint(id) {
+  // A count still climbing ends in an ellipsis too. counts: core.showCounts, made once for the whole menu.
+  function showHint(id, counts) {
     var rows = S.store.rows;
     if (!rows.length) { return ''; }
     if (id === null) { return fmtInt(rows.length); }
-    var status = C.dataStatus(rows, id, scanRunning());
-    if (status === 'waiting') { return '\u2026'; }
-    if (status === 'none') { return '\u2013'; }
+    var c = counts[id];
+    if (!c.known) { return scanRunning() ? '\u2026' : '\u2013'; }
     // A count that can still grow says so, so a 0 mid-scan never reads as an answer.
     var growing = scanRunning() && (C.SHOW[id].needs || C.SHOW[id].group) && !C.understandingShare(S.store).landed;
-    return fmtInt(C.showCount(rows, id)) + (growing ? '\u2026' : '');
+    return fmtInt(c.n) + (growing ? '\u2026' : '');
   }
 
   function sortHint(entry) {
@@ -821,11 +862,12 @@
     var menu = $('picker'), focused = document.activeElement && document.activeElement.parentNode === menu ? Array.prototype.indexOf.call(menu.children, document.activeElement) : -1;
     menu.textContent = '';
     if (which === 'show') {
-      pickerItem(menu, 'everything', 'Everything', showHint(null), !S.view.show, 'Every clip in the scan.', function () { pressShow(null); });
+      var counts = C.showCounts(S.store.rows);
+      pickerItem(menu, 'everything', 'Everything', showHint(null, counts), !S.view.show, 'Every clip in the scan.', function () { pressShow(null); });
       var section = null;
       C.SHOWS.forEach(function (s) {
         if (s.section !== section) { menu.appendChild(document.createElement('hr')); section = s.section; }
-        pickerItem(menu, s.id, s.label, showHint(s.id), S.view.show === s.id, s.tip, function () { pressShow(s.id); });
+        pickerItem(menu, s.id, s.label, showHint(s.id, counts), S.view.show === s.id, s.tip, function () { pressShow(s.id); });
       });
     } else {
       var now = S.view.sort[0];
@@ -918,15 +960,27 @@
     $('grid').scrollTop = 0;
   }
 
+  // The foot at most ten times a second, for counts that climb fast.
+  var footTimer = null;
+  function footSoon() {
+    if (footTimer !== null) { return; }
+    footTimer = setTimeout(function () { footTimer = null; renderFoot(); }, 100);
+  }
+
   function collectItems() {
     if (S.source === 'folder') {
       var folder = $('folder').value.trim();
       if (!folder) { return Promise.resolve({ ok: false, message: 'Enter or choose a folder.' }); }
       return new Promise(function (resolve) {
-        N.walkFolder(folder, function (err, paths) {
+        S.listed = 0;
+        S.listWalk = N.walkFolder(folder, function (err, paths, info) {
+          S.listWalk = null;
+          if (info && info.stopped) { resolve({ ok: false, quiet: true, message: 'Stopped listing. Nothing was scanned.' }); return; }
+          if (info && info.capped) { resolve({ ok: false, message: 'This folder holds more than ' + fmtInt(N.MOST_FILES) + ' video files, so it wasn\'t scanned. Choose a folder inside it.' }); return; }
           if (err) { resolve({ ok: false, message: 'Cannot read ' + folder + ': ' + err.code }); return; }
           resolve({ ok: true, items: paths.map(function (p) { return { path: p }; }), noPath: 0, sequences: 0 });
-        });
+        }, { onCount: function (n) { S.listed = n; footSoon(); } });
+        renderFoot();
       });
     }
     return host('collect', { mode: S.source });
@@ -941,7 +995,7 @@
     renderFoot();
     return collectItems().then(function (got) {
       S.listing = false;
-      if (!got.ok) { note(got.message, 'warn'); renderFoot(); return; }
+      if (!got.ok) { note(got.message, got.quiet ? '' : 'warn'); renderFoot(); return; }
       if (got.project) { S.project = got.project; }     // the project may have changed since the panel opened
       var filtered = C.videoItems(got.items);
       if (!filtered.items.length) { note('No video clips in that source.', 'warn'); renderFoot(); return; }
@@ -949,7 +1003,7 @@
       C.addItems(S.store, filtered.items);
       S.scan = { state: 'Scanning', startedAt: performance.now(), endedAt: 0, handle: null, source: S.source, folder: $('folder').value.trim(), failure: null, stopping: false, heard: 0 };
       applyView();
-      if (filtered.skipped) { note(plural(filtered.skipped, 'item') + ' skipped: not video.'); }
+      note([C.pickedWords(got.picked), filtered.skipped ? plural(filtered.skipped, 'item') + ' skipped: not video.' : ''].filter(Boolean).join(' '));
       var binary = extensionRoot() + '/bin/select-engine';
       var problem = N.engineProblem(binary);
       if (problem) {
@@ -1015,6 +1069,25 @@
       sc.state = 'Done';
     }
     applyView();
+    warmSearch();
+  }
+
+  // The search text for every clip, built while the panel is idle after a scan, so the first keystroke is quick.
+  function warmSearch() {
+    var rows = S.store.rows, at = 0;
+    var idle = window.requestIdleCallback || function (fn) { return setTimeout(function () { var t0 = performance.now(); fn({ timeRemaining: function () { return Math.max(0, 8 - (performance.now() - t0)); } }); }, 50); };
+    idle(function step(deadline) {
+      if (rows !== S.store.rows || scanRunning()) { return; }
+      at = C.warmSearch(rows, at, function () { return deadline.timeRemaining() > 2; });
+      if (at < rows.length) { idle(step); }
+    });
+  }
+
+  // One Stop in the foot: it ends what is running, a write first, then a folder listing, then the scan.
+  function pressStop() {
+    if (S.write) { S.write.stopping = true; renderFoot(); return; }
+    if (S.listWalk) { S.listWalk.stop(); return; }
+    stopScan();
   }
 
   function stopScan() {
@@ -1087,23 +1160,34 @@
   }
 
   // Paths are the identity, not ids. An id is a small counter that means nothing outside the project it came from, so
-  // every write and open asks the project in front for its items and matches rows by path. Rows not found have no ids.
+  // every write and open asks the project in front for its items and matches rows by path. Each row then carries
+  // items, [[id, path]] with the path exactly as Premiere gave it, and the host writes an item only while that id still
+  // has that path. Rows not found have no items.
   function resolveIds(targets) {
-    return host('collect', { mode: 'project' }).then(function (r) {
+    var paths = [], seen = {};
+    targets.forEach(function (t) {
+      [t.row.path, t.row.path.normalize('NFC'), t.row.path.normalize('NFD')].forEach(function (p) {
+        if (!seen['p' + p]) { seen['p' + p] = true; paths.push(p); }
+      });
+    });
+    return host('find', { paths: paths }).then(function (r) {
       if (!r.ok) { return r; }
       var byKey = new Map();
       r.items.forEach(function (it) {
         var k = C.pathKey(it.path);
         if (!byKey.has(k)) { byKey.set(k, []); }
-        byKey.get(k).push(it.id);
+        byKey.get(k).push([String(it.id), it.path]);
       });
-      // A Selection scan is a promise about which items were picked, so a second copy of the media elsewhere stays put.
+      // A Selection scan is a promise about which items were picked: a second copy of the media elsewhere stays put,
+      // and a picked item that has gone is skipped, never swapped for another copy.
       var picked = S.scan && S.scan.source === 'selection';
       targets.forEach(function (t) {
         var all = byKey.get(t.row.key) || [];
-        if (picked && !t.row.scanIds) { t.row.scanIds = t.row.ids.slice(); }
-        var kept = picked ? all.filter(function (id) { return t.row.scanIds.indexOf(id) !== -1; }) : [];
-        t.row.ids = kept.length ? kept : all;
+        if (picked && !t.row.scanIds) { t.row.scanIds = t.row.ids.map(String); }
+        var pairs = picked ? all.filter(function (p) { return t.row.scanIds.indexOf(p[0]) !== -1; }) : all;
+        t.row.items = pairs;
+        t.row.ids = pairs.map(function (p) { return p[0]; });
+        t.copies = picked && !pairs.length && all.length > 0;
       });
       return r;
     });
@@ -1112,9 +1196,9 @@
   function failureList(failed) {
     if (!failed || !failed.length) { return ''; }
     var byId = new Map();
-    S.store.rows.forEach(function (r) { r.ids.forEach(function (id) { byId.set(id, r.name); }); });
+    S.store.rows.forEach(function (r) { r.ids.forEach(function (id) { byId.set(String(id), r.name); }); });
     var shown = failed.slice(0, 8).map(function (f) {
-      return '<li>' + esc(f.name || byId.get(f.id) || f.id || 'bin') + ': ' + esc(f.error) + '</li>';
+      return '<li>' + esc(f.name || byId.get(String(f.id)) || f.id || 'bin') + ': ' + esc(f.error) + '</li>';
     }).join('');
     return '<ul class="fails">' + shown + '</ul>' + (failed.length > 8 ? '<p class="quiet">And ' + fmtInt(failed.length - 8) + ' more.</p>' : '');
   }
@@ -1124,10 +1208,10 @@
   var UNDO_LEVELS = 50;
 
   function undoText(steps) {
-    if (steps <= UNDO_LEVELS) {
-      return '<p class="quiet">Cmd+Z takes it back one step at a time, about ' + plural(steps, 'step') + '. Undo here works too.</p>';
-    }
-    return '<p class="warn">About ' + fmtInt(steps) + ' undo steps. Premiere keeps only the last ' + UNDO_LEVELS + ', so Cmd+Z can\'t take this back, and older edits leave History. Undo here puts the earlier values back, until the panel is reloaded.</p>';
+    var cmd = steps <= UNDO_LEVELS
+      ? '<p class="quiet">Cmd+Z takes it back one step at a time, about ' + plural(steps, 'step') + '.</p>'
+      : '<p class="warn">Premiere will record about ' + fmtInt(steps) + ' undo steps. It keeps only the last ' + UNDO_LEVELS + ', so Cmd+Z can\'t reach this write or your edits before it.</p>';
+    return cmd + '<p class="quiet">' + esc(C.undoReach(undoState().count)) + '</p>';
   }
 
   // A write that needs Tier 2 waits for it. Asked twice: when pressed, and again after the sheet, in case the view moved.
@@ -1140,8 +1224,53 @@
     return !scanRunning() || C.understandingShare(S.store).landed;
   }
 
-  // Shared route of the three writes: preflight, targets, confirmation, lock again, one host call, read-back, foot.
+  // ---------------------------------------------------------------- Undo records
+
+  // The records of the project in front, read once per project and again after every write or Undo Write.
+  function undoState() {
+    var path = S.project ? S.project.path : null;
+    if (!S.undo || S.undo.path !== path) { S.undo = loadUndo(path); }
+    return S.undo;
+  }
+
+  function forgetUndo() { S.undo = null; }
+
+  // The newest record with something left to put back. Empty ones, from a write whose first batch never answered,
+  // are cleared on the way, except the one a running write is filling.
+  function loadUndo(path) {
+    var mem = S.memoryUndo && S.memoryUndo.project === path ? S.memoryUndo : null;
+    var ids = path && N.available ? N.listUndo(path) : [], top = null;
+    for (var i = ids.length - 1; i >= 0 && !top; i--) {
+      var e = N.readUndo(path, ids[i]);
+      if (e && e.restore.items.length) { top = e; } else if (ids[i] !== S.activeRecord) { N.dropUndo(path, ids[i]); ids.splice(i, 1); }
+    }
+    if (mem && (!top || mem.id > top.id)) { return { path: path, count: ids.length + 1, top: mem }; }
+    return { path: path, count: ids.length, top: top };
+  }
+
+  // Saves a record, or keeps it in memory when the disk says no. Returns the error, or ''. Older records past
+  // C.UNDO_KEEP go once this one has something in it.
+  function keepUndo(entry) {
+    var keep = entry.restore.items.length ? C.UNDO_KEEP : 0;
+    var saved = N.available ? N.saveUndo(entry.project, entry, keep) : { ok: false, error: 'no Node' };
+    if (S.memoryUndo && S.memoryUndo.id === entry.id) { S.memoryUndo = saved.ok ? null : entry; } else if (!saved.ok) { S.memoryUndo = entry; }
+    forgetUndo();
+    return saved.ok ? '' : saved.error;
+  }
+
+  function dropRecord(entry) {
+    if (S.memoryUndo && S.memoryUndo.id === entry.id) { S.memoryUndo = null; }
+    if (N.available) { N.dropUndo(entry.project, entry.id); }
+    forgetUndo();
+  }
+
+  // ---------------------------------------------------------------- writes
+
+  // Shared route of the three writes: preflight, targets, confirmation, lock again, an Undo record on disk, then the
+  // host calls in batches of C.BATCH, each one saved to the record as it lands, then the read-back and the foot.
   function runWrite(spec) {
+    if (S.busy) { return Promise.resolve(); }
+    if (S.hostLate) { note(LATE, 'warn'); return Promise.resolve(); }
     var ready = null, waiting = heldBack(spec.kind);
     if (waiting) { note(waiting, 'warn'); return Promise.resolve(); }
     note('');
@@ -1156,33 +1285,92 @@
       });
     }).then(function (targets) {
       if (!targets) { return; }
-      var inProject = targets.filter(function (t) { return t.row.ids.length; });
-      var missing = targets.length - inProject.length;
-      if (!inProject.length) { note('None of these clips are in the project.', 'warn'); return; }
+      var inProject = targets.filter(function (t) { return t.row.items.length; });
+      var gone = targets.filter(function (t) { return !t.row.items.length; });
+      if (!inProject.length) { note(gone.some(function (t) { return t.copies; }) ? 'The clips picked for this scan aren\'t in the project any more. Scan again.' : 'None of these clips are in the project.', 'warn'); return; }
       var plan = spec.plan(inProject, ready.project);
       if (!plan) { return; }
-      var items = inProject.reduce(function (n, t) { return n + t.row.ids.length; }, 0);
+      var items = inProject.reduce(function (n, t) { return n + t.row.items.length; }, 0);
       var scope = selectedInView() ? 'the selected clips' : 'the current view';
+      var copies = gone.filter(function (t) { return t.copies; }).length, missing = gone.length - copies;
       var body = '<p><b>' + plural(inProject.length, 'clip') + '</b>' + (items !== inProject.length ? ' (' + plural(items, 'project item') + ')' : '') + ' in ' + esc(projectTitle(ready.project)) + ', from ' + scope + '.</p>' +
+        (copies ? '<p class="warn">' + plural(copies, 'clip') + ' picked for this scan ' + (copies === 1 ? 'isn\'t' : 'aren\'t') + ' in the project any more, so ' + (copies === 1 ? 'it' : 'they') + ' will be skipped. Other copies of the same files stay as they are.</p>' : '') +
         (missing ? '<p class="warn">' + plural(missing, 'clip') + ' not in this project will be skipped.</p>' : '') + plan.html;
       return dialog(plan.title, body, plan.ok).then(function (yes) {
         if (!yes) { note('Cancelled. Nothing was written.'); return; }
-        var refused = lockRefusal() || heldBack(spec.kind);
+        var refused = lockRefusal() || heldBack(spec.kind) || (S.busy ? 'Another write is running.' : '') || (S.hostLate ? LATE : '');
         if (refused) { note(refused, 'warn'); return; }
         if (plan.confirm) { plan.confirm(); }
-        plan.args.project = ready.project.path;
+        var project = ready.project.path;
+        var entry = { v: 1, id: N.available ? N.newUndoId() : String(Date.now()) + '-0000', project: project, at: new Date().toISOString(), kind: plan.fn, meta: plan.meta ? plan.meta() : {}, restore: plan.head() };
+        // No write without a way back: the record is on disk before Premiere is asked for anything.
+        S.activeRecord = entry.id;
+        var unsaved = keepUndo(entry);
+        if (unsaved) { S.activeRecord = null; dropRecord(entry); note('Select couldn\'t save its Undo record (' + unsaved + '), so nothing was written.', 'bad'); return; }
         moveOn();
-        S.busy = plan.busy;
-        renderFoot();
-        return host(plan.fn, plan.args).then(function (res) {
-          S.busy = null;
-          if (!res.ok) { note(res.message, 'bad'); renderFoot(); return; }
-          var count = res.changed !== undefined ? res.changed : res.moved;
-          S.outcome = C.writeOutcome(plan.fn, plan.args, res, plan.word && plan.word());
-          if (count) { S.lastWrite = { title: S.outcome.verdict, restore: res.restore, project: ready.project.path }; }
+        return writeBatches(plan, entry).then(function (acc) {
+          S.activeRecord = null;
+          if (!acc.anyOk && acc.error && !acc.landed) {
+            dropRecord(entry);
+            note(acc.error, 'bad');
+            renderFoot();
+            return;
+          }
+          S.outcome = C.writeOutcome(plan.fn, plan.sent, acc, plan.word && plan.word());
+          if (acc.unsavedUndo) { S.outcome.sentence += ' Select couldn\'t save its Undo record, so Undo Write reaches this write only until the panel reloads.'; }
           renderFoot();
         });
       });
+    });
+  }
+
+  // Sends plan.list in batches. Stop takes effect between batches. A refusal or a missed deadline ends the write there,
+  // and a batch that answers after its deadline is still added to the record.
+  function writeBatches(plan, entry) {
+    var parts = C.batches(plan.list, C.BATCH), acc = C.writeAcc(plan.fn), i = 0;
+    S.write = { kind: 'write', verb: plan.verb, unit: 'clip', done: 0, total: plan.list.length, stopping: false };
+    S.busy = plan.busy;
+    renderFoot();
+    function land(res) {
+      C.addBatch(plan.fn, acc, res);
+      var r = res.restore;
+      if (r && r.items && r.items.length) {
+        entry.restore.items = entry.restore.items.concat(r.items);
+        if (r.top) { entry.restore.top = r.top; }
+        acc.landed = true;
+      }
+      var error = keepUndo(entry);
+      if (error) { acc.unsavedUndo = true; }
+      return error;
+    }
+    function rest(from) {
+      return parts.slice(from).reduce(function (n, p) { return n + p.length; }, 0);
+    }
+    function next() {
+      if (i >= parts.length) { return Promise.resolve(); }
+      if (S.write.stopping) { acc.unsent = rest(i); return Promise.resolve(); }
+      var part = parts[i++];
+      return host(plan.fn, plan.args(part, acc, entry.project), function (late) {
+        if (!late.ok) { return; }
+        land(late);
+        note('Premiere answered late: ' + plural(late.changed !== undefined ? late.changed : late.moved || 0, 'more item') + ' changed, and Undo Write covers ' + (late.changed === 1 || late.moved === 1 ? 'it' : 'them') + '.', 'warn');
+      }).then(function (res) {
+        if (!res.ok) { acc.error = res.message; acc.unsent = rest(i - 1); return; }
+        acc.anyOk = true;
+        var unsaved = land(res);
+        S.write.done += part.length;
+        renderFoot();
+        if (unsaved && i < parts.length) { acc.error = 'Select couldn\'t save its Undo record (' + unsaved + '), so it stopped there.'; acc.unsent = rest(i); return; }
+        return next();
+      });
+    }
+    return next().then(function () {
+      return plan.finish ? plan.finish(acc, entry.project) : null;
+    }).then(function () {
+      S.write = null;
+      S.busy = null;
+      if (!entry.restore.items.length) { dropRecord(entry); }
+      return acc;
     });
   }
 
@@ -1191,20 +1379,24 @@
     return runWrite({
       kind: 'label',
       plan: function (targets) {
-        var ids = [];
-        targets.forEach(function (t) { ids = ids.concat(t.row.ids); });
+        var items = [], color = S.labelColor;
+        targets.forEach(function (t) { items = items.concat(t.row.items); });
         var swatches = C.LABELS.map(function (l, i) {
           return '<button data-color="' + i + '" title="' + esc(l[0]) + '" aria-label="' + esc(l[0]) + '"' + (i === S.labelColor ? ' class="on"' : '') + '><i style="background:' + l[1] + '"></i></button>';
         }).join('');
-        var args = { ids: ids, color: S.labelColor };
         return {
           fn: 'label',
-          args: args,
+          list: items,
+          sent: { items: items },
           title: 'Label ' + plural(targets.length, 'clip') + '?',
-          html: '<div class="swatches">' + swatches + '</div><p>Sets the label <b id="label-name">' + esc(labelName()) + '</b> on these project items. Clips and files keep their names.</p>' + undoText(ids.length),
+          html: '<div class="swatches">' + swatches + '</div><p>Sets the label <b id="label-name">' + esc(labelName()) + '</b> on these project items. Clips and files keep their names.</p>' + undoText(items.length),
           ok: 'Label ' + fmtInt(targets.length),
-          busy: 'Labelling ' + plural(ids.length, 'clip'),
-          confirm: function () { args.color = S.labelColor; },
+          busy: 'Labelling ' + plural(items.length, 'clip'),
+          verb: 'Labelling',
+          confirm: function () { color = S.labelColor; },
+          args: function (part, acc, project) { return { project: project, items: part, color: color }; },
+          head: function () { return { kind: 'label', color: color, items: [] }; },
+          meta: function () { return { label: labelName() }; },
           word: labelName
         };
       }
@@ -1216,22 +1408,30 @@
       kind: 'columns',
       plan: function (targets) {
         // Tier 2's fields are written only once every clip has them, so no column gets a blank for a value on its way.
-        var fields = C.columnFields(tier2Landed()), later = C.FIELDS.length - fields.length;
+        var fields = C.columnFields(tier2Landed()), later = C.FIELDS.length - fields.length, names = fields.map(function (f) { return f.name; });
         var width = String(S.order.length).length, rows = targets.map(function (t) {
           var all = C.columnValues(t.row, t.rank, Math.max(4, width)), values = {};
           fields.forEach(function (f) { values[f.name] = all[f.name]; });
-          return { ids: t.row.ids, values: values };
+          return { items: t.row.items, values: values };
         });
+        // One row per item, so a batch is a count of items.
+        var list = [];
+        rows.forEach(function (r) { r.items.forEach(function (pair) { list.push({ items: [pair], values: r.values }); }); });
         return {
           fn: 'columns',
-          args: { fields: fields, rows: rows },
+          list: list,
+          sent: { fields: fields, rows: rows },
           title: 'Add columns to ' + plural(targets.length, 'clip') + '?',
           html: '<p>Adds ' + fields.length + ' columns to the project metadata: ' + fields.map(function (f) { return esc(f.label.replace(/^Select /, '')); }).join(', ') + '. Their names start with Select. Writes the values and shows the columns in the Project panel. Empty scores stay empty. Rank is the place in the current view.</p>' +
             (later ? '<p class="warn">The other ' + later + ', such as People and Colour, come from looking closer, which is still running. Add Columns again when it is done to write them.</p>' : '') +
-            undoText(rows.reduce(function (n, r) { return n + r.ids.length; }, 0) * fields.length) +
-            '<p class="quiet">Undo does not cover the fields or the layout: they stay in this project, and the columns stay shown, because Premiere saves them in the workspace. Hide them with Metadata Display in the Project panel menu.</p>',
+            undoText(list.length * fields.length) +
+            '<p class="quiet">Undo Write does not cover the fields or the layout: they stay in this project, and the columns stay shown, because Premiere saves them in the workspace. Hide them with Metadata Display in the Project panel menu.</p>',
           ok: 'Add Columns',
-          busy: 'Adding columns'
+          busy: 'Adding columns to ' + plural(list.length, 'clip'),
+          verb: 'Adding columns to',
+          args: function (part, acc, project) { return { project: project, fields: fields, rows: part, show: !acc.columns }; },
+          head: function () { return { kind: 'columns', fields: names, items: [] }; },
+          meta: function () { return { fields: fields.length }; }
         };
       }
     });
@@ -1246,49 +1446,135 @@
         var buckets = C.bucketize(targets.map(function (t) { return t.row; }), S.view);
         if (!buckets) { note('Too many different values to make bins from. Choose what to show, or another sort.', 'warn'); return null; }
         var root = 'SELECT ' + C.localDate(new Date()) + ' ' + name;
-        var count = targets.length;
+        var count = targets.length, list = [];
+        var sent = buckets.map(function (b) {
+          var items = [];
+          b.rows.forEach(function (r) { items = items.concat(r.items); });
+          items.forEach(function (pair) { list.push({ name: b.name, pair: pair }); });
+          return { name: b.name, items: items };
+        });
         var listed = buckets.map(function (b) { return '<li><span>' + esc(b.name) + '</span><span>' + fmtInt(b.rows.length) + '</span></li>'; }).join('');
         return {
           fn: 'bins',
-          args: {
-            root: root,
-            buckets: buckets.map(function (b) {
-              var ids = [];
-              b.rows.forEach(function (r) { ids = ids.concat(r.ids); });
-              return { name: b.name, ids: ids };
-            })
-          },
+          list: list,
+          sent: { buckets: sent },
           title: 'Sort ' + plural(count, 'clip') + ' into bins?',
           html: '<p>Creates the bin <b>' + esc(root) + '</b> with:</p><ul>' + listed + '</ul>' +
-            '<p>This moves items in the Project panel, not files on disk.</p>' + undoText(count + 2 * (buckets.length + 1)),
+            '<p>This moves items in the Project panel, not files on disk.</p>' + undoText(list.length + 2 * (buckets.length + 1)),
           ok: 'Sort into Bins',
-          busy: 'Moving ' + plural(count, 'clip')
+          busy: 'Moving ' + plural(list.length, 'clip'),
+          verb: 'Moving',
+          args: function (part, acc, project) {
+            var a = { project: project, root: root, buckets: C.groupMoves(part) };
+            if (acc.top) { a.top = acc.top; }
+            return a;
+          },
+          // Read back once, at the end: what each bin holds now. With nothing moved, the empty bins go.
+          finish: function (acc, project) {
+            if (!acc.top) { return null; }
+            return host('binsCheck', { project: project, top: acc.top, clear: !acc.moved }).then(function (res) {
+              if (res.ok) { acc.buckets = res.buckets; acc.binRemoved = res.binRemoved; }
+            });
+          },
+          head: function () { return { kind: 'bins', top: null, items: [] }; },
+          meta: function () { return { root: root }; }
         };
       }
     });
   }
 
+  // ---------------------------------------------------------------- Undo Write
+
+  // Reverses the newest record of the project in front, with the same read-back as the write had, in batches too.
   function doUndoWrite() {
-    var w = S.lastWrite;
-    if (!w) { return Promise.resolve(); }
+    if (S.busy) { return Promise.resolve(); }
+    if (S.hostLate) { note(LATE, 'warn'); return Promise.resolve(); }
     note('');
     return preflight().then(function (r) {
       if (!r.ok) { note(r.message, 'warn'); return; }
-      return dialog('Undo this write?', '<p>Puts back: ' + esc(w.title) + '.</p><p class="quiet">The earlier values go back, item by item. An item changed by anything else since is left alone.</p>', 'Undo').then(function (yes) {
+      var u = undoState(), entry = u.top;
+      if (!entry) { note('There is no write to undo in this project.'); return; }
+      var more = u.count - 1;
+      var reach = more > 0 ? 'After this, Undo Write can still take back ' + plural(more, 'earlier write') + '.' : 'This is the last write Undo Write can take back in this project.';
+      return dialog('Undo Write?', '<p>' + esc(C.undoWords(entry)) + '</p><p class="quiet">The write was made ' + esc(C.whenWords(entry.at)) + '. An item changed by anything else since is left alone.</p><p class="quiet">' + reach + '</p>', 'Undo Write').then(function (yes) {
         if (!yes) { return; }
-        var refused = lockRefusal();
+        var refused = lockRefusal() || (S.busy ? 'Another write is running.' : '') || (S.hostLate ? LATE : '');
         if (refused) { note(refused, 'warn'); return; }
         S.outcome = null;
-        S.busy = 'Putting things back';
-        renderFoot();
-        return host('restore', { project: w.project, restore: w.restore }).then(function (res) {
-          S.busy = null;
-          if (!res.ok) { note(res.message, 'warn'); renderFoot(); return; }
-          S.lastWrite = res.remaining ? { title: w.title, restore: res.remaining, project: w.project } : null;
-          S.outcome = C.undoOutcome(res);
+        return undoBatches(entry).then(function (acc) {
+          var gaveUp = false;
+          if (!acc.left.length) {
+            dropRecord(entry);
+          } else if (!acc.restored && !acc.unsent && !acc.error) {
+            // Everything tried failed: keeping it would block every write before it.
+            dropRecord(entry);
+            gaveUp = true;
+          } else {
+            entry.restore.items = acc.left;
+            keepUndo(entry);
+          }
+          var after = undoState();
+          S.outcome = C.undoOutcome(acc, !!after.top);
+          if (gaveUp) { S.outcome.sentence += after.top ? ' Nothing more can go back from this write, so Undo Write moves on to the one before.' : ' Nothing more can go back from this write.'; }
           renderFoot();
         });
       });
+    });
+  }
+
+  function undoBatches(entry) {
+    var r = entry.restore, parts = C.batches(r.items, C.BATCH), i = 0;
+    var acc = { restored: 0, skipped: 0, failed: [], left: [], unsent: 0, error: '', binRemoved: null };
+    S.write = { kind: 'undo', verb: 'Putting back', unit: 'item', done: 0, total: r.items.length, stopping: false };
+    S.busy = 'Putting back ' + plural(r.items.length, 'item');
+    renderFoot();
+    function head(items) {
+      var o = { kind: r.kind, items: items };
+      if (r.color !== undefined) { o.color = r.color; }
+      if (r.fields) { o.fields = r.fields; }
+      if (r.top) { o.top = r.top; }
+      return o;
+    }
+    function waiting(from) {
+      return parts.slice(from).reduce(function (all, p) { return all.concat(p); }, []);
+    }
+    // What is left goes back to disk after every batch, so a reload part way never puts anything back twice.
+    function record(from) {
+      entry.restore.items = acc.left.concat(waiting(from));
+      keepUndo(entry);
+    }
+    function next() {
+      if (i >= parts.length) { return Promise.resolve(); }
+      if (S.write.stopping) {
+        var rest = waiting(i);
+        acc.unsent = rest.length;
+        acc.left = acc.left.concat(rest);
+        return Promise.resolve();
+      }
+      var part = parts[i++];
+      return host('restore', { project: entry.project, restore: head(part), final: i === parts.length }).then(function (res) {
+        if (!res.ok) {
+          var rest = waiting(i - 1);
+          acc.error = res.message;
+          acc.unsent = rest.length;
+          acc.left = acc.left.concat(rest);
+          return;
+        }
+        acc.restored += res.restored || 0;
+        acc.skipped += res.skipped || 0;
+        acc.failed = acc.failed.concat(res.failed || []);
+        if (res.remaining) { acc.left = acc.left.concat(res.remaining.items); }
+        if (res.binRemoved !== null && res.binRemoved !== undefined) { acc.binRemoved = res.binRemoved; }
+        S.write.done += part.length;
+        if (i < parts.length) { record(i); }
+        renderFoot();
+        return next();
+      });
+    }
+    return next().then(function () {
+      S.write = null;
+      S.busy = null;
+      return acc;
     });
   }
 
@@ -1301,20 +1587,20 @@
   // ---------------------------------------------------------------- open in the Source Monitor
 
   function openRow(row) {
-    var refused = lockRefusal();
+    var refused = lockRefusal() || (S.busy ? 'A write is running. Open the clip once it is done.' : '') || (S.hostLate ? LATE : '');
     if (refused) { note(refused, 'warn'); return Promise.resolve(); }
     return refreshProject().then(function (st) {
       if (!st.ok || !st.project) { note(st.message || 'No project is open.', 'warn'); return; }
       return resolveIds([{ row: row }]).then(function (found) {
         if (!found.ok) { note(found.message, 'warn'); return; }
-        if (row.ids.length) { return openId(row, st.project); }
+        if (row.items.length) { return openId(row, st.project); }
         return offerImport(row, st.project);
       });
     });
   }
 
   function openId(row, project) {
-    return host('open', { project: project.path, id: row.ids[0] }).then(function (res) {
+    return host('open', { project: project.path, id: row.items[0][0], path: row.items[0][1] }).then(function (res) {
       note(res.ok ? 'Opened ' + res.name + ' in the Source Monitor.' : res.message, res.ok ? '' : 'warn');
     });
   }
@@ -1328,7 +1614,9 @@
         if (!res.ok) { note(res.message, 'bad'); return; }
         var hit = res.items.filter(function (it) { return C.pathKey(it.path) === row.key; })[0];
         if (!hit) { note('Premiere did not import ' + row.name + '.', 'bad'); return; }
-        row.ids = [hit.id];
+        row.ids = [String(hit.id)];
+        row.items = [[String(hit.id), hit.path]];
+        if (row.scanIds) { row.scanIds.push(String(hit.id)); }
         return openId(row, project);
       });
     });
@@ -1380,15 +1668,17 @@
     $('more').setAttribute('aria-expanded', 'false');
   }
 
+  // While a write or an Undo Write runs, nothing here may start another, or reach for the record being written.
   function openMenu() {
-    var scanning = !!(S.listing || (S.scan && S.scan.handle));
+    var scanning = !!(S.listing || (S.scan && S.scan.handle)), busy = !!S.busy, u = undoState();
     var item = function (id) { return document.querySelector('#menu [data-menu="' + id + '"]'); };
-    item('rescan').disabled = scanning;
+    item('rescan').disabled = scanning || busy;
     item('rescan').textContent = S.scan ? 'Rescan' : 'Scan';
-    item('clear').disabled = scanning || !S.store.rows.length;
+    item('clear').disabled = scanning || busy || !S.store.rows.length;
     item('undo-view').hidden = !S.history.length;
-    item('undo').hidden = !S.lastWrite;
-    item('undo').disabled = scanning;
+    item('undo').hidden = !u.top;
+    item('undo').disabled = scanning || busy;
+    item('undo').title = u.top ? C.undoWords(u.top) : '';
     $('menu').hidden = false;
     $('more').setAttribute('aria-expanded', 'true');
     item('rescan').focus();
@@ -1453,7 +1743,7 @@
   function showAbout() {
     var version = N.available ? N.manifestVersion(extensionRoot()) : null;
     var timing = S.sortMs === null ? '' : '<p class="quiet">Last re-sort: ' + S.sortMs.toFixed(1) + ' ms, ' + fmtInt(S.sortRows) + ' rows.</p>';
-    return dialog('About Select', '<p>' + (version ? 'Version ' + esc(version) : 'Version unknown') + '</p><p class="quiet">' + esc(C.FORMATS_NOTE) + '</p><p class="quiet">Everything runs on this Mac: reading, looking closer, sorting and search. No network, no accounts, and the panel sends nothing.</p><p class="quiet">Every result is a suggestion. People and faces are counts, never who someone is.</p>' + timing, 'Done', null);
+    return dialog('About Select', '<p>' + (version ? 'Version ' + esc(version) : 'Version unknown') + '</p><p class="quiet">' + esc(C.FORMATS_NOTE) + '</p><p class="quiet">Everything runs on this Mac: reading, looking closer, sorting and search. No accounts. Once a day Select asks GitHub whether there\'s a new version. That request is the only thing it sends, and Check Automatically in this menu turns it off.</p><p class="quiet">Every result is a suggestion. People and faces are counts, never who someone is.</p>' + timing, 'Done', null);
   }
 
   var MENU = { rescan: startScan, columns: showColumns, 'undo-view': undoView, undo: doUndoWrite, clear: clearResults, bug: reportBug, about: showAbout };
@@ -1479,7 +1769,7 @@
     $('choose').onclick = chooseFolder;
     $('folder').addEventListener('input', renderFoot);
     $('scan').onclick = startScan;
-    $('stop').onclick = stopScan;
+    $('stop').onclick = pressStop;
     $('mode-list').onclick = function () { setMode('list'); };
     $('mode-grid').onclick = function () { setMode('grid'); };
     $('search').addEventListener('input', onSearch);
@@ -1575,6 +1865,7 @@
   // For the tests and for the integration pass, through the DevTools port.
   window.SelectApp = {
     state: S,
+    timeouts: TIMEOUT,
     startScan: startScan,
     stopScan: stopScan,
     applyView: applyView,

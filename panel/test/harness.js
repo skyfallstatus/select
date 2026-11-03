@@ -40,8 +40,16 @@ const SHIM = String.raw`
   }
   var kids = {};
   window.__mock = { accessError: null, spawnError: null, lockFile: null, config: null, manifest: null, playback: { program: false, source: false, modal: '' }, project: __PROJECT__,
-    items: [], calls: [], partial: false, misplaced: 0, unconfirmed: false, hidden: false, hostFail: null, folderFiles: [], projectItemsForFolder: [], skin: { red: 35, green: 35, blue: 35 }, listeners: {}, urls: [] };
+    items: [], calls: [], partial: false, misplaced: 0, unconfirmed: false, hidden: false, hostFail: null, folderFiles: [], projectItemsForFolder: [], skin: { red: 35, green: 35, blue: 35 }, listeners: {}, urls: [],
+    slow: {}, restoreSkip: 0, picked: null, readdirMs: 0, diskFull: false, binSeq: 0, subs: {} };
   var M = window.__mock;
+  // Undo records go to a disk that outlives a reload of the page, as ~/Library does.
+  var FS_KEY = '__fakefs';
+  function disk() { try { return JSON.parse(localStorage.getItem(FS_KEY) || '{}'); } catch (e) { return {}; } }
+  function keep(d) { localStorage.setItem(FS_KEY, JSON.stringify(d)); }
+  function onDisk(p) { return /\/undo(\/|$)/.test(p); }
+  function nofile(code) { var e = new Error(code); e.code = code; return e; }
+  window.__disk = { files: function () { return disk(); }, clear: function () { localStorage.removeItem(FS_KEY); } };
   window.__host = {
     feed: function (id, stream, b64) {
       var bin = atob(b64), u = new Uint8Array(bin.length);
@@ -72,49 +80,94 @@ const SHIM = String.raw`
     } },
     fs: { constants: { X_OK: 1 },
       accessSync: function () { if (M.accessError) { var e = new Error(M.accessError); e.code = M.accessError; throw e; } },
+      mkdirSync: function () { if (M.diskFull) { throw nofile('ENOSPC'); } },
+      writeFileSync: function (file, text) { if (M.diskFull) { throw nofile('ENOSPC'); } var d = disk(); d[file] = String(text); keep(d); },
+      renameSync: function (a, b) { var d = disk(); if (!(a in d)) { throw nofile('ENOENT'); } d[b] = d[a]; delete d[a]; keep(d); },
+      unlinkSync: function (file) { var d = disk(); if (!(file in d)) { throw nofile('ENOENT'); } delete d[file]; keep(d); },
+      readdirSync: function (dir) {
+        var d = disk(), out = [];
+        Object.keys(d).forEach(function (k) { if (k.indexOf(dir + '/') === 0 && k.slice(dir.length + 1).indexOf('/') === -1) { out.push(k.slice(dir.length + 1)); } });
+        if (!out.length) { throw nofile('ENOENT'); }
+        return out;
+      },
       readFileSync: function (file) {
+        if (onDisk(file)) { var d = disk(); if (!(file in d)) { throw nofile('ENOENT'); } return d[file]; }
         var text = /manifest\.xml$/.test(file) ? M.manifest : /config\.json$/.test(file) ? M.config : M.lockFile;
         if (text === null) { var e = new Error('ENOENT'); e.code = 'ENOENT'; throw e; }
         return text;
       },
-      readdir: function (dir, o, cb) { setTimeout(function () { cb(null, M.folderFiles.map(function (f) { return { name: f, isDirectory: function () { return false; }, isFile: function () { return true; } }; })); }, 0); } },
+      readdir: function (dir, o, cb) { setTimeout(function () { cb(null, M.folderFiles.map(function (f) { return { name: f, isDirectory: function () { return false; }, isFile: function () { return true; } }; })); }, M.readdirMs); } },
     os: { homedir: function () { return '/home/editor'; } },
     path: { join: function () { return Array.prototype.join.call(arguments, '/'); } },
     string_decoder: { StringDecoder: function () { var d = new TextDecoder('utf-8'); this.write = function (u) { return d.decode(u, { stream: true }); }; this.end = function () { return d.decode(); }; } }
   };
   window.require = function (n) { return shims[n]; };
   window.process = { env: {}, kill: function () { return true; } };
+  // The project in front decides, as in the host: an item is written only while its id still has its path.
+  function sorted(pairs, skipped) {
+    return pairs.filter(function (p) {
+      var ok = M.items.some(function (it) { return String(it.id) === String(p[0]) && it.path === p[1]; });
+      if (!ok) { skipped.push({ id: p[0], error: 'now a different clip' }); }
+      return ok;
+    });
+  }
   function answer(fn, a) {
     M.calls.push({ fn: fn, args: a });
     if (M.hostFail && M.hostFail.fn === fn) { return M.hostFail.reply; }
-    var bad = M.partial ? [{ id: 'x', name: 'C0001.MP4', error: 'simulated failure' }] : [];
+    var bad = M.partial ? [{ id: 'x', name: 'C0001.MP4', error: 'simulated failure' }] : [], skipped = [], ok, miss;
+    if (fn === 'label' || fn === 'columns' || fn === 'bins') { M.partial = false; }    // one failure per write, not per batch
     switch (fn) {
       case 'status': return { ok: true, version: 't', premiere: '26', project: M.project, playback: M.playback };
       case 'collect':
         if (!M.project) { return { ok: false, code: 'no-project', message: 'No project is open.' }; }
-        return { ok: true, project: M.project, mode: a.mode, items: M.items, sequences: 1, noPath: 0, ms: 3 };
-      case 'label': return { ok: true, changed: a.ids.length - bad.length, failed: bad, ms: 300, restore: { kind: 'label', color: a.color, items: a.ids.map(function (i) { return [i, 1]; }) } };
-      case 'columns': return { ok: true, changed: a.rows.length - bad.length, matched: M.unconfirmed ? undefined : a.rows.length - bad.length - M.misplaced, failed: bad, columns: { shown: !M.hidden, added: 6, columns: 30 }, ms: 2000, restore: { kind: 'columns', fields: [], items: [] } };
-      case 'bins': return { ok: true, root: a.root, moved: a.buckets.reduce(function (n, b) { return n + b.ids.length; }, 0) - bad.length, failed: bad, ms: 400,
-        buckets: a.buckets.map(function (b, i) {
-          var ids = b.ids.slice(0, i === 0 ? Math.max(0, b.ids.length - M.misplaced) : undefined);
-          var out = { name: b.name, moved: b.ids.length, inBin: ids.length };
-          if (!M.unconfirmed) { out.ids = ids; }
+        return { ok: true, project: M.project, mode: a.mode, items: M.items, sequences: 1, noPath: 0, ms: 3, picked: a.mode === 'selection' ? (M.picked || { clips: M.items.length, where: ['Day 2'] }) : null };
+      case 'find':
+        if (!M.project) { return { ok: false, code: 'no-project', message: 'No project is open.' }; }
+        return { ok: true, project: M.project, items: M.items.filter(function (it) { return a.paths.indexOf(it.path) !== -1; }), ms: 3 };
+      case 'label':
+        ok = sorted(a.items, skipped);
+        return { ok: true, changed: ok.length - bad.length, failed: bad, skipped: skipped, ms: 300, restore: { kind: 'label', color: a.color, items: ok.map(function (p) { return [p[0], 1, p[1]]; }) } };
+      case 'columns':
+        ok = sorted(a.rows.map(function (r) { return r.items[0]; }), skipped);
+        miss = M.misplaced;
+        M.misplaced = 0;
+        return { ok: true, changed: ok.length - bad.length, matched: M.unconfirmed ? undefined : ok.length - bad.length - miss, failed: bad, skipped: skipped, columns: a.show ? { shown: !M.hidden, added: 6, columns: 30 } : null, ms: 2000,
+          restore: { kind: 'columns', fields: a.fields.map(function (f) { return f.name; }), items: ok.map(function (p) { return { id: p[0], wrote: {}, was: {}, path: p[1] }; }) } };
+      case 'bins': {
+        if (!a.top) { M.binSeq++; M.subs = {}; }
+        var top = a.top || 't' + M.binSeq, moved = 0, items = [];
+        var report = a.buckets.map(function (b) {
+          var here = sorted(b.items, skipped).map(function (p) { items.push([p[0], 'r', 's', p[1]]); return String(p[0]); });
+          M.subs[b.name] = (M.subs[b.name] || []).concat(here);
+          moved += here.length;
+          return { name: b.name, moved: here };
+        });
+        return { ok: true, root: a.root, top: top, moved: moved - bad.length, buckets: report, failed: bad, skipped: skipped, ms: 400, restore: { kind: 'bins', top: top, items: items } };
+      }
+      case 'binsCheck':
+        return { ok: true, binRemoved: a.clear ? true : null, buckets: Object.keys(M.subs).map(function (name, i) {
+          var out = { name: name };
+          if (!M.unconfirmed) { out.ids = M.subs[name].slice(0, i === 0 ? Math.max(0, M.subs[name].length - M.misplaced) : undefined); }
           return out;
-        }), restore: { kind: 'bins', top: 't', items: [] } };
-      case 'restore': return { ok: true, restored: 5, skipped: 1, failed: [], binRemoved: true, ms: 100 };
+        }) };
+      case 'restore': {
+        var skip = Math.min(M.restoreSkip, a.restore.items.length);
+        M.restoreSkip -= skip;
+        return { ok: true, restored: a.restore.items.length - skip, skipped: skip, failed: [], remaining: null, binRemoved: a.restore.kind === 'bins' && a.final !== false ? true : null, ms: 100 };
+      }
       case 'open': return { ok: true, name: 'clip' };
       case 'importClips': return { ok: true, imported: true, items: a.paths.map(function (p, i) { return { id: 'new' + i, path: p, name: p }; }), bin: a.bin, ms: 200 };
       default: return { ok: false, code: 'unknown-call', message: fn };
     }
   }
   window.__adobe_cep__ = {
+    // The work happens when the call arrives; M.slow[fn] holds back only the answer, as a busy Premiere would.
     evalScript: function (script, cb) {
       setTimeout(function () {
-        if (script === 'typeof slCall') { cb('function'); return; }
-        var out = null;
-        new Function('slCall', script)(function (fn, json) { out = JSON.stringify(answer(fn, JSON.parse(json))); });
-        cb(out);
+        if (/SELECT_HOST_PROTOCOL/.test(script)) { cb('2'); return; }
+        var out = null, fn = null;
+        new Function('slCall', script)(function (name, json) { fn = name; out = JSON.stringify(answer(name, JSON.parse(json))); });
+        setTimeout(function () { cb(out); }, (fn && M.slow[fn]) || 0);
       }, 0);
     },
     getHostEnvironment: function () { return JSON.stringify({ appSkinInfo: { panelBackgroundColor: { color: M.skin } } }); },
@@ -628,7 +681,7 @@ async function main() {
     await waitModal();
     const about = await dialogText();
     check('About shows the sort time, and the version from the manifest', /Last re-sort: \d+\.\d ms, 1,000 rows/.test(about) && new RegExp('Version ' + (/ExtensionBundleVersion="([^"]+)"/.exec(fs.readFileSync(MANIFEST, 'utf8'))[1]).replace(/\./g, '\\.')).test(about), about);
-    check('About claims only the formats that work', /Reads \.mp4, \.mov and \.m4v/.test(about) && /\.mxf when ffmpeg is installed/.test(about) && /\.r3d/.test(about) && /sends nothing/.test(about));
+    check('About claims only the formats that work', /Reads \.mp4, \.mov and \.m4v/.test(about) && /\.mxf when ffmpeg is installed/.test(about) && /\.r3d/.test(about) && /only thing it sends/.test(about));
     await b.shot('11-about');
     await b.click('#dialog-ok');
 
@@ -665,7 +718,7 @@ async function main() {
     check('foot when finished: a grey tick, the sort as the verdict, three actions, Sort into Bins cobalt, Scan gone', finished.mark === 'done' && finished.verdict === 'Sharpest first' && /^400 clips in \d+\.\d s\. \d+ clips are listed with blank picture scores/.test(finished.sentence) && (finished.sentence.match(/blank/g) || []).length === 1 && finished.actions.join() === 'do-label,do-columns,do-bins*', finished);
     await b.click('#more');
     const menu = await b.evalIn(`Array.from(document.querySelectorAll('#menu button')).filter(function(x){return !x.hidden;}).map(function(x){return x.textContent;})`);
-    check('the menu holds Rescan, Columns, Undo View, Clear Results, Report a Bug and About', menu.join('|') === 'Rescan|Columns…|Undo View|Clear Results|Report a Bug|About Select', menu);
+    check('the menu holds Rescan, Columns, Previous View, Clear Results, Report a Bug and About', menu.join('|') === 'Rescan|Columns…|Previous View|Clear Results|Report a Bug|About Select', menu);
     await b.shot('12-menu');
     await b.mouse(300, 300);
     check('a click elsewhere closes the menu', await b.evalIn(`document.getElementById('menu').hidden`));
@@ -684,7 +737,7 @@ async function main() {
     await b.click('#do-label');
     await waitModal();
     const labelText = await dialogText();
-    check('Label confirmation gives the count and the undo truth', /Label 4 clips/.test(labelText) && /Mango/.test(labelText) && /4 clips/.test(labelText) && /Cmd\+Z/.test(labelText), labelText);
+    check('Label confirmation gives the count and the undo truth, and how far Undo Write reaches', /Label 4 clips/.test(labelText) && /Mango/.test(labelText) && /4 clips/.test(labelText) && /Cmd\+Z/.test(labelText) && /takes back the last 10 writes to this project, newest first, and keeps them when the panel reloads/.test(labelText), labelText);
     await b.shot('05-label-dialog');
     await b.click('#dialog-cancel');
     check('cancel writes nothing', (await calls('label')).length === 0 && /Cancelled/.test(await noteText()));
@@ -694,15 +747,18 @@ async function main() {
     await b.click('#dialog-ok');
     await b.waitFor(`__mock.calls.some(function(c){return c.fn==='label';})`);
     const lab = (await calls('label'))[0].args;
-    const want = await b.evalIn(`Array.from(SelectApp.state.selected).map(function(i){return SelectApp.state.store.rows[i].ids[0];})`);
-    check('Label sends one batch, for the selected rows only', lab.ids.length === 4 && lab.color === 7 && lab.project === PROJECT.path && want.every(i => lab.ids.includes(i)), lab);
+    const want = await b.evalIn(`Array.from(SelectApp.state.selected).map(function(i){var r=SelectApp.state.store.rows[i];return [r.ids[0],r.path];})`);
+    check('Label sends one batch, for the selected rows only, each item with its path', lab.items.length === 4 && lab.color === 7 && lab.project === PROJECT.path && want.every(w => lab.items.some(p => p[0] === w[0] && p[1] === w[1])), lab);
     await b.waitFor(`/Labelled/.test(${text('foot-verdict')})`);
     await sleep(320);
     const labelled = await footNow();
     check('labels read back: the foot turns green, with a white Undo', /green/.test(labelled.kind) && labelled.mark === 'seal' && labelled.background === GREEN && labelled.actions.join() === 'undo-write', labelled);
 
+    await b.evalIn(`__mock.restoreSkip=1`);
     await b.click('#undo-write');
     await waitModal();
+    const undoSheet = await dialogText();
+    check('Undo Write says what it puts back, in plain words, and when the write was made', /^Undo Write\?/.test(undoSheet) && /Takes Mango off 4 clips and puts back the labels they had before\./.test(undoSheet) && /The write was made today at \d\d:\d\d\./.test(undoSheet) && /This is the last write Undo Write can take back/.test(undoSheet), undoSheet);
     await b.click('#dialog-ok');
     await b.waitFor(`__mock.calls.some(function(c){return c.fn==='restore';})`);
     const rest = (await calls('restore'))[0].args;
@@ -716,13 +772,12 @@ async function main() {
     await b.click('#do-columns');
     await waitModal();
     const colText = await dialogText();
-    check('Add Columns confirmation: count, fields, undo limits', /400 clips/.test(colText) && /13 columns/.test(colText) && /Rank, Sharpness/.test(colText) && /start with Select/.test(colText) && /Premiere keeps only the last 50/.test(colText) && /Metadata Display/.test(colText), colText);
+    check('Add Columns confirmation: count, fields in the panel\'s words, undo limits', /400 clips/.test(colText) && /13 columns/.test(colText) && /Rank, Sharpness, Brightness, Highlights, Motion, Loudness, People/.test(colText) && /start with Select/.test(colText) && /keeps only the last 50, so Cmd\+Z can't reach this write/.test(colText) && /Metadata Display/.test(colText), colText);
     await b.shot('06-columns-dialog');
     await b.click('#dialog-ok');
-    await b.waitFor(`__mock.calls.some(function(c){return c.fn==='columns';})`);
-    const col = (await calls('columns'))[0].args;
-    check('Add Columns sends one call, rows ranked by view order', col.rows.length === 400 && col.rows[0].values.SelectRank === '0001' && col.rows[399].values.SelectRank === '0400' && col.fields.length === 13, col.rows[0]);
     await b.waitFor(`/Added 13 columns/.test(${text('foot-verdict')})`);
+    const cols = (await calls('columns')).map(c => c.args), colRows = cols.flatMap(c => c.rows);
+    check('Add Columns goes in batches of 100, rows ranked by view order, shown once', cols.length === 4 && cols.every(c => c.rows.length === 100 && c.fields.length === 13) && colRows[0].values.SelectRank === '0001' && colRows[399].values.SelectRank === '0400' && colRows.every((r, i) => r.values.SelectRank === String(i + 1).padStart(4, '0')) && cols.map(c => c.show).join() === 'true,false,false,false', cols.map(c => [c.rows.length, c.show]));
     await sleep(320);
     check('columns read back and shown: green', (await footNow()).background === GREEN, (await footNow()).sentence);
     await b.evalIn(`SelectApp.state.outcome=null;SelectApp.applyView()`);
@@ -731,13 +786,12 @@ async function main() {
     await waitModal();
     const binText = await dialogText();
     check('Sort into Bins confirmation says items move, not files', /moves items in the Project panel, not files on disk/.test(binText) && /SELECT \d{4}-\d\d-\d\d Sharpest first/.test(binText) && /01 Sharpest\s+\d+/.test(binText) && /05 Softest\s+\d+/.test(binText), binText);
-    check('the sheet has a radius of 14, one cobalt button and the undo truth', (await b.evalIn(`getComputedStyle(document.getElementById('dialog')).borderRadius`)) === '14px' && (await b.evalIn(`Array.from(document.querySelectorAll('#dialog button')).filter(function(x){return getComputedStyle(x).backgroundColor==='rgb(47, 111, 230)';}).length`)) === 1 && /Premiere keeps only the last 50/.test(binText));
+    check('the sheet has a radius of 14, one cobalt button and the undo truth', (await b.evalIn(`getComputedStyle(document.getElementById('dialog')).borderRadius`)) === '14px' && (await b.evalIn(`Array.from(document.querySelectorAll('#dialog button')).filter(function(x){return getComputedStyle(x).backgroundColor==='rgb(47, 111, 230)';}).length`)) === 1 && /keeps only the last 50/.test(binText));
     await b.shot('07-bins-dialog');
     await b.click('#dialog-ok');
-    await b.waitFor(`__mock.calls.some(function(c){return c.fn==='bins';})`);
-    const bin = (await calls('bins'))[0].args;
-    check('Sort into Bins sends one call with every clip in one bucket', bin.buckets.reduce((n, x) => n + x.ids.length, 0) === 400 && new Set(bin.buckets.flatMap(x => x.ids)).size === 400, bin.buckets.map(x => [x.name, x.ids.length]));
     await b.waitFor(`/Sorted into/.test(${text('foot-verdict')})`);
+    const binCalls = (await calls('bins')).map(c => c.args), moves = binCalls.flatMap(c => c.buckets.flatMap(x => x.items.map(p => p[0])));
+    check('Sort into Bins goes in batches of 100 into one top bin, every clip once, read back once', binCalls.length === 4 && !binCalls[0].top && new Set(binCalls.slice(1).map(c => c.top)).size === 1 && /^t\d+$/.test(binCalls[1].top) && moves.length === 400 && new Set(moves).size === 400 && (await calls('binsCheck')).length === 1, binCalls.map(c => [c.top || '-', c.buckets.map(x => x.items.length)]));
     await sleep(320);
     const sortedFoot = await b.evalIn(`(function(){var u=getComputedStyle(document.getElementById('undo-write'));return {f:${foot},undoBg:u.backgroundColor,undoColor:u.color,sentence:getComputedStyle(document.getElementById('foot-sentence')).color};})()`);
     check('bins read back: green foot, plain words, Undo in white', sortedFoot.f.background === GREEN && /^Sorted into 6 bins$/.test(sortedFoot.f.verdict) && /^400 clips moved\. Your files weren't touched\.$/.test(sortedFoot.f.sentence) && sortedFoot.undoBg === 'rgb(255, 255, 255)' && sortedFoot.undoColor === GREEN && sortedFoot.sentence === 'rgb(255, 255, 255)', sortedFoot);
@@ -847,7 +901,139 @@ async function main() {
     await b.click('#body .r[data-at="1"]', { count: 2 });
     await b.waitFor(`__mock.calls.some(function(c){return c.fn==='open';})`);
     const op = (await calls('open'))[0].args;
-    check('double-click opens the clip by id', /^id\d+$/.test(op.id) && op.project === PROJECT.path, op);
+    check('double-click opens the clip by id, with its path', /^id\d+$/.test(op.id) && op.project === PROJECT.path && typeof op.path === 'string' && op.path.length > 3, op);
+
+    // -------- 0.2: a long write goes in batches, shows its progress, and Stop leaves a clean write that Undo Write takes back
+    await b.evalIn(`SelectApp.state.selected.clear();SelectApp.state.outcome=null;SelectApp.applyView();__mock.calls.length=0;__mock.slow={label:700}`);
+    await b.click('#do-label');
+    await waitModal();
+    await b.click('#dialog-ok');
+    await b.waitFor(`SelectApp.state.write&&SelectApp.state.write.done>=100`, 'first batch landed');
+    const going = await b.evalIn(`({foot:${foot},meter:!document.getElementById('foot-meter').hidden,width:parseFloat(document.getElementById('foot-meter-fill').style.width),busy:SelectApp.state.busy})`);
+    check('a long write shows real progress: how many of how many, a meter, and Stop', going.foot.verdict === 'Labelling 100 of 400 clips' && /100 at a time\. Stop ends it after this batch/.test(going.foot.sentence) && going.meter && Math.round(going.width) === 25 && going.foot.actions.join() === 'stop' && going.busy === 'Labelling 400 clips', going);
+    await b.click('#more');
+    const busyMenu = await b.evalIn(`(function(){var q=function(id){return document.querySelector('#menu [data-menu="'+id+'"]');};return {undo:q('undo').disabled,undoShown:!q('undo').hidden,rescan:q('rescan').disabled,clear:q('clear').disabled};})()`);
+    await press(b, 'Escape');
+    check('while a write runs, Undo Write, Rescan and Clear Results in the ··· menu are off', busyMenu.undo && busyMenu.undoShown && busyMenu.rescan && busyMenu.clear, busyMenu);
+    await b.click('#stop');
+    await b.waitFor(`!SelectApp.state.busy`, 'write stops', 10000);
+    await sleep(80);
+    const stoppedWrite = { foot: await footNow(), sent: (await calls('label')).map(c => c.args.items.length) };
+    check('Stop ends the write after the batch in flight: what landed is said, never green, and Undo Write is offered', stoppedWrite.sent.join() === '100,100' && stoppedWrite.foot.verdict === 'Labelled 200 of 400 clips' && /Stopped, so the last 200 items weren't written\./.test(stoppedWrite.foot.sentence) && stoppedWrite.foot.background !== GREEN && stoppedWrite.foot.actions.includes('undo-write'), stoppedWrite);
+    await b.evalIn(`__mock.slow={}`);
+    await b.click('#undo-write');
+    await waitModal();
+    const partUndo = await dialogText();
+    check('Undo Write offers exactly what the stopped write did, and says how far it still reaches', /Takes Mango off 200 clips/.test(partUndo) && /After this, Undo Write can still take back \d+ earlier writes?\./.test(partUndo), partUndo);
+    await b.click('#dialog-ok');
+    await b.waitFor(`SelectApp.state.outcome&&/Undone/.test(SelectApp.state.outcome.verdict)&&!SelectApp.state.busy`);
+    const back200 = (await calls('restore')).map(c => c.args);
+    check('and puts it back in batches, in the project it was written to', back200.length === 2 && back200.reduce((n, c) => n + c.restore.items.length, 0) === 200 && back200.every(c => c.restore.kind === 'label' && c.project === PROJECT.path), back200.map(c => c.restore.items.length));
+
+    // -------- 0.2: Undo Write is a stack, newest first
+    await b.evalIn(`SelectApp.state.outcome=null;SelectApp.applyView();__mock.calls.length=0`);
+    await b.click('#do-label');
+    await waitModal();
+    await b.click('#dialog-ok');
+    await b.waitFor(`/^Labelled 400 clips/.test(${text('foot-verdict')})&&!SelectApp.state.busy`);
+    await b.evalIn(`SelectApp.state.outcome=null;SelectApp.applyView()`);
+    await b.click('#do-bins');
+    await waitModal();
+    await b.click('#dialog-ok');
+    await b.waitFor(`/^Sorted into/.test(${text('foot-verdict')})&&!SelectApp.state.busy`);
+    const records = await b.evalIn(`Object.keys(__disk.files()).filter(function(k){return k.indexOf('/undo/')>=0&&/[.]json$/.test(k);}).length`);
+    await b.click('#undo-write');
+    await waitModal();
+    const firstUndo = await dialogText();
+    await b.click('#dialog-ok');
+    await b.waitFor(`SelectApp.state.outcome&&SelectApp.state.outcome.kind==='undone'&&!SelectApp.state.busy`);
+    await b.click('#more');
+    await b.click('[data-menu="undo"]');
+    await waitModal();
+    const secondUndo = await dialogText();
+    await b.click('#dialog-ok');
+    await b.waitFor(`SelectApp.state.outcome&&SelectApp.state.outcome.kind==='undone'&&!SelectApp.state.busy&&__mock.calls.some(function(c){return c.fn==='restore'&&c.args.restore.kind==='label';})`);
+    const kinds = (await calls('restore')).map(c => c.args.restore.kind);
+    check('Undo Write goes back one write at a time, newest first: the bins, then the labels before them', /^Undo Write\?\s*Moves 400 clips back to the bins they came from/.test(firstUndo) && /Takes Mango off 400 clips/.test(secondUndo) && kinds.includes('bins') && kinds.indexOf('label') > kinds.lastIndexOf('bins') && records >= 2 && records <= 10, { kinds, records, first: firstUndo.slice(0, 90), second: secondUndo.slice(0, 90) });
+
+    // -------- 0.2: Undo Write outlives a reload of the panel
+    await b.evalIn(`SelectApp.state.outcome=null;SelectApp.applyView();__mock.calls.length=0`);
+    await b.click('#do-columns');
+    await waitModal();
+    await b.click('#dialog-ok');
+    await b.waitFor(`/^Added/.test(${text('foot-verdict')})&&!SelectApp.state.busy`);
+    await b.open();
+    await b.waitFor(`document.getElementById('project-name').textContent==='lantern-spring'`, 'project after reload');
+    await b.click('#more');
+    const afterReload = await b.evalIn(`(function(){var u=document.querySelector('#menu [data-menu="undo"]');return {shown:!u.hidden,off:u.disabled,tip:u.title};})()`);
+    await b.click('[data-menu="undo"]');
+    await waitModal();
+    const reloadSheet = await dialogText();
+    await b.click('#dialog-ok');
+    await b.waitFor(`SelectApp.state.outcome&&!SelectApp.state.busy`);
+    const reloadRestore = (await calls('restore')).map(c => c.args);
+    check('after the panel reloads, Undo Write is still in the menu and puts the last write back', afterReload.shown && !afterReload.off && /Puts back what the Select columns held on 400 clips/.test(afterReload.tip) && /Puts back what the Select columns held on 400 clips before this write/.test(reloadSheet) && reloadRestore.length === 4 && reloadRestore.every(c => c.restore.kind === 'columns' && c.project === PROJECT.path), { afterReload, n: reloadRestore.length });
+    // The page came back fresh: give it the scan the rest of the run expects.
+    await setItems(b, 400);
+    await scanAndWait(b);
+    await pickSort(b, 'sharpness');
+
+    // -------- 0.2: a clip that changed in the project while the sheet was open is left alone
+    await b.evalIn(`SelectApp.state.outcome=null;SelectApp.state.selected.clear();SelectApp.state.anchor=null;SelectApp.applyView();__mock.calls.length=0`);
+    await b.click(rowSel(0));
+    await b.click(rowSel(1), { shift: true });
+    await b.click('#do-label');
+    await waitModal();
+    await b.evalIn(`(function(){var id=SelectApp.state.store.rows[SelectApp.state.order[0]].ids[0];__mock.items=__mock.items.map(function(it){return it.id===id?{id:it.id,path:it.path+'.other.mp4',name:'other'}:it;});})()`);
+    await b.click('#dialog-ok');
+    await b.waitFor(`/^Labelled/.test(${text('foot-verdict')})&&!SelectApp.state.busy`);
+    const changedSince = await footNow();
+    check('a clip whose id changed while the sheet was open is left alone, and the foot says so', changedSince.verdict === 'Labelled 1 of 2 clips' && /1 item was left alone: it has changed in the project since Select found it\./.test(changedSince.sentence) && changedSince.background !== GREEN && changedSince.actions.includes('foot-details'), changedSince);
+    await setItems(b, 400);
+
+    // -------- 0.2: a call Premiere doesn't answer in time frees the panel, and a late answer still reaches Undo Write
+    await b.evalIn(`SelectApp.timeouts.other=1000;__mock.slow={label:2500};__mock.calls.length=0;SelectApp.state.outcome=null;SelectApp.applyView()`);
+    await b.click('#do-label');
+    await waitModal();
+    await b.click('#dialog-ok');
+    await b.waitFor(`/didn't answer within 1 second/.test(${text('status-note')})`, 'deadline', 6000);
+    const lateBusy = await b.evalIn(`SelectApp.state.busy`);
+    await b.click('#do-label');
+    await sleep(120);
+    const refusedLate = { modal: await modalOpen(), note: await noteText() };
+    check('a call past its deadline frees the panel and says so, and nothing new goes to Premiere until it answers', lateBusy === null && refusedLate.modal === false && /hasn't answered Select's last call yet/.test(refusedLate.note), refusedLate);
+    await b.waitFor(`/answered late: 2 more items changed, and Undo Write covers them/.test(${text('status-note')})`, 'late answer', 8000);
+    await b.click('#more');
+    const lateTip = await b.evalIn(`document.querySelector('#menu [data-menu="undo"]').title`);
+    await press(b, 'Escape');
+    check('the late answer still goes into Undo Write', /Takes Mango off 2 clips/.test(lateTip), lateTip);
+    await b.evalIn(`SelectApp.timeouts.other=120000;__mock.slow={};SelectApp.state.selected.clear();SelectApp.applyView()`);
+    await b.evalIn(`__mock.diskFull=true;__mock.calls.length=0;SelectApp.state.outcome=null;SelectApp.applyView()`);
+    await b.click('#do-label');
+    await waitModal();
+    await b.click('#dialog-ok');
+    await b.waitFor(`/couldn't save its Undo record/.test(${text('status-note')})`, 'refused for the disk');
+    check('no write without a way back: when the Undo record can\'t be saved, nothing goes to Premiere', (await calls('label')).length === 0 && /\(ENOSPC\), so nothing was written/.test(await noteText()), await noteText());
+    await b.evalIn(`__mock.diskFull=false`);
+
+    // -------- 0.2: a Selection scan says where its clips come from, and never swaps a picked clip for another copy
+    await b.evalIn(`__mock.items=__mock.items.slice(0,2);__mock.picked={clips:2,where:['Day 2']}`);
+    await b.click('#source button[data-src="selection"]');
+    await pressScan(b);
+    await b.waitFor(`SelectApp.state.scan&&SelectApp.state.scan.state==='Done'&&SelectApp.state.store.rows.length===2`, 'selection scan');
+    const pickedNote = await noteText();
+    check('a Selection scan says how many clips, and from which bin, as it starts', pickedNote === 'Scanning the 2 clips selected in “Day 2”.', pickedNote);
+    await b.evalIn(`__mock.items=[{id:'copy9',path:__mock.items[0].path,name:'copy'},__mock.items[1]];__mock.calls.length=0;SelectApp.state.selected.clear();SelectApp.state.outcome=null;SelectApp.applyView()`);
+    await b.click('#do-label');
+    await waitModal();
+    const gonePick = await dialogText();
+    await b.click('#dialog-ok');
+    await b.waitFor(`__mock.calls.some(function(c){return c.fn==='label';})&&!SelectApp.state.busy`);
+    const pickItems = (await calls('label'))[0].args.items;
+    check('a picked clip that left the project is skipped, never replaced by another copy of its file', /1 clip picked for this scan isn't in the project any more, so it will be skipped\. Other copies of the same files stay as they are\./.test(gonePick) && pickItems.length === 1 && pickItems[0][0] === 'id1', { gonePick, pickItems });
+    await b.evalIn(`__mock.picked=null`);
+    await setItems(b, 400);
+    await scanAndWait(b);
 
     // -------- the menu's other doors
     await b.evalIn(`SelectApp.state.selected.clear();SelectApp.state.outcome=null;SelectApp.applyView()`);
@@ -883,6 +1069,14 @@ async function main() {
     await b.click('#scan');
     await b.waitFor(`SelectApp.state.scan && SelectApp.state.scan.state==='Done'&&SelectApp.state.store.rows.length===2`, 'folder scan');
     check('folder source lists video only', (await b.evalIn(`SelectApp.state.store.rows.map(function(r){return r.name;}).sort().join()`)) === 'A0001.MP4,B0002.mov');
+    await b.evalIn(`__mock.readdirMs=3000`);
+    await pressScan(b);
+    await b.waitFor(`document.getElementById('foot').className==='listing'`, 'listing');
+    const listing = await footNow();
+    await b.click('#stop');
+    await b.waitFor(`/Stopped listing/.test(${text('status-note')})`, 'listing stopped', 2000);
+    check('listing a folder offers Stop, and Stop ends it at once with nothing new scanned', listing.verdict === 'Listing clips' && listing.actions.join() === 'stop' && (await b.evalIn(`SelectApp.state.listing`)) === false && (await b.evalIn(`SelectApp.state.store.rows.length`)) === 2, listing);
+    await b.evalIn(`__mock.readdirMs=0`);
     const atOf = await b.evalIn(`SelectApp.state.order.map(function(i){return SelectApp.state.store.rows[i].name;}).indexOf('B0002.mov')`);
     await b.click(`#body .r[data-at="${atOf}"]`, { count: 2 });
     await waitModal();
@@ -891,7 +1085,7 @@ async function main() {
     await b.shot('09-import-offer');
     await b.click('#dialog-ok');
     await b.waitFor(`__mock.calls.some(function(c){return c.fn==='importClips';})`);
-    await b.waitFor(`__mock.calls.filter(function(c){return c.fn==='open';}).length>=2`);
+    await b.waitFor(`__mock.calls.some(function(c){return c.fn==='open'&&c.args.id==='new0';})`);
     const imp = (await calls('importClips'))[0].args;
     const open2 = (await calls('open')).pop().args;
     check('import then open uses the new item', imp.paths[0] === '/Volumes/Field SSD/f/B0002.mov' && open2.id === 'new0', { imp, open2 });
@@ -907,7 +1101,7 @@ async function main() {
     check('rows not in the project are counted as skipped', /1 clip not in this project will be skipped/.test(skipped), skipped);
     await b.click('#dialog-ok');
     await b.waitFor(`__mock.calls.some(function(c){return c.fn==='label';})`);
-    check('ids come from the project in front, never from an old scan', JSON.stringify((await calls('label'))[0].args.ids) === '["p9"]', (await calls('label'))[0].args.ids);
+    check('ids come from the project in front, never from an old scan', JSON.stringify((await calls('label'))[0].args.items) === '[["p9","/Volumes/Field SSD/f/A0001.MP4"]]', (await calls('label'))[0].args.items);
     await b.evalIn(`SelectApp.state.outcome=null;SelectApp.applyView()`);
     // another project in front, same clip path: the write lands on that project's item
     await b.evalIn(`__mock.project={path:'/Volumes/Field SSD/Projects/other.prproj',name:'other.prproj'};__mock.items=[{id:'q1',path:'/Volumes/Field SSD/f/A0001.MP4',name:'A0001.MP4'}];__mock.calls.length=0`);
@@ -1102,6 +1296,7 @@ async function main() {
     await resetView(b);
 
     // a Tier 1 write in stage three works, and Add Columns writes only Tier 1 fields. Pictures fade in as they arrive.
+    b.engineEnv.FAKE_DELAY_MS = '8';
     await pressScan(b);
     await b.waitFor(`SelectApp.state.scan.handle&&document.querySelectorAll('#body img.arrive').length>0`, 'pictures arriving', 30000).catch(() => {});
     const arriving = await b.evalIn(`(function(){var a=document.querySelectorAll('#body img.arrive');return {n:a.length,anim:a.length?getComputedStyle(a[0]).animationName:'',running:!!SelectApp.state.scan.handle};})()`);
@@ -1123,6 +1318,10 @@ async function main() {
     await b.waitFor(`__mock.calls.some(function(c){return c.fn==='columns';})`);
     const earlyCols = (await calls('columns'))[0].args;
     check('Add Columns in stage three writes the 6 Tier 1 fields and says the rest come later', earlyCols.fields.length === 6 && !earlyCols.fields.some(f => f.name === 'SelectColour') && /Adds 6 columns/.test(earlySheet) && /The other 7/.test(earlySheet), earlyCols.fields.map(f => f.name));
+    await b.waitFor(`SelectApp.state.outcome&&!SelectApp.state.busy`, 'columns landed in stage three');
+    const midWrite = await b.evalIn(`({running:!!SelectApp.state.scan.handle,foot:${foot},meter:!document.getElementById('foot-meter').hidden})`);
+    check('a write made during stage three keeps the scan\'s Stop and its meter in the foot', midWrite.running && midWrite.foot.actions[0] === 'stop' && midWrite.meter && /^(Added|Wrote)/.test(midWrite.foot.verdict), midWrite);
+    b.engineEnv.FAKE_DELAY_MS = '3';
     await b.waitFor(`SelectApp.state.scan.state==='Done'`, 'done', 30000);
     await b.evalIn(`SelectApp.state.outcome=null;SelectApp.applyView()`);
     await resetView(b);
@@ -1168,7 +1367,7 @@ async function main() {
     await b.click('#dialog-ok');
     await b.waitFor(`/Labelled 4 clips/.test(${text('foot-verdict')})`);
     const fromGrid = (await calls('label'))[0].args;
-    check('a write from the grid covers exactly the selected tiles', fromGrid.ids.length === 4, fromGrid.ids);
+    check('a write from the grid covers exactly the selected tiles', fromGrid.items.length === 4, fromGrid.items);
     await b.evalIn(`SelectApp.state.selected.clear();SelectApp.state.outcome=null;SelectApp.applyView();__mock.calls.length=0`);
     await b.click(tile(2), { count: 2 });
     await b.waitFor(`__mock.calls.some(function(c){return c.fn==='open';})`);
@@ -1190,7 +1389,7 @@ async function main() {
     await b.waitFor(`/Sorted into 1 bin/.test(${text('foot-verdict')})`);
     await sleep(320);
     const tealBins = (await calls('bins'))[0].args;
-    check('Sort into Bins by category names the bins, reads back, and goes green', /01 Teal/.test(tealSheet) && tealBins.buckets[0].name === '01 Teal' && tealBins.buckets[0].ids.length === teal.n && (await footNow()).background === GREEN, tealBins.buckets.map(x => x.name));
+    check('Sort into Bins by category names the bins, reads back, and goes green', /01 Teal/.test(tealSheet) && tealBins.buckets[0].name === '01 Teal' && tealBins.buckets[0].items.length === teal.n && (await footNow()).background === GREEN, tealBins.buckets.map(x => x.name));
     await b.click('#undo-write');
     await waitModal();
     await b.click('#dialog-ok');
@@ -1218,7 +1417,7 @@ async function main() {
     const today = await b.evalIn(`SelectCore.localDate(new Date())`);
     const valuesInOrder = of => b.evalIn(`(function(){var seen=[],n={};${ids}.forEach(function(r){var v=(${of})(r)||'No value';if(!(v in n)){seen.push(v);n[v]=0;}n[v]++;});var named=seen.filter(function(v){return v!=='No value';});if(n['No value']){named.push('No value');}return named.map(function(v,i){return [(i<9?'0':'')+(i+1)+' '+v,n[v]];});})()`);
     await pickSort(b, 'createdAt');
-    const days = await binsSheet(), wantDays = await valuesInOrder(`function(r){return r.createdAt?String(r.createdAt).slice(0,10):null;}`);
+    const days = await binsSheet(), wantDays = await valuesInOrder(`function(r){return r.time===r.time?SelectCore.localDate(new Date(r.time)):null;}`);
     const dayNames = days.bins.map(x => x[0].slice(3)).filter(x => x !== 'No value');
     check('Sort into Bins on Shoot order: a bin per day, earliest first', days.root === `SELECT ${today} Earliest first` && JSON.stringify(days.bins) === JSON.stringify(wantDays) && dayNames.length > 3 && dayNames.every(d => /^\d{4}-\d\d-\d\d$/.test(d)) && dayNames.join() === dayNames.slice().sort().join() && days.bins.reduce((n, x) => n + x[1], 0) === 400, days);
     await b.click('#mode-list');

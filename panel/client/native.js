@@ -1,4 +1,5 @@
-// Everything in the panel that needs Node: the engine process, the optional write lock, the folder walk and the manifest.
+// Everything in the panel that needs Node: the engine process, the optional write lock, the Undo records, the folder walk
+// and the manifest.
 (function (root, factory) {
   var req = root.cep_node ? root.cep_node.require : (typeof require === 'function' ? require : null);
   var core = root.SelectCore || (typeof module === 'object' && module && module.exports ? require('./core.js') : null);
@@ -91,10 +92,71 @@
     }
   }
 
+  function supportDir(home) {
+    return nodePath.join(home || os.homedir(), 'Library', 'Application Support', 'com.skyfallstatus.select');
+  }
+
   // One optional setting: {"writeLockFile": "<path>"}, for anyone who drives Premiere with their own tools. Anything
   // wrong with this file means no setting, because a stray file must never stop the panel.
   function configFile(home) {
-    return nodePath.join(home || os.homedir(), 'Library', 'Application Support', 'com.skyfallstatus.select', 'config.json');
+    return nodePath.join(supportDir(home), 'config.json');
+  }
+
+  // ---------------------------------------------------------------- Undo records
+
+  // One file per write, in a folder per project: undo/<projectKey>/<ms>-<seq>.json, so names sort oldest first and a
+  // batch rewrites only its own record. A record names its project, and one that names another is ignored.
+  var RECORD = /^\d{13}-\d{4}\.json$/;
+  var seq = 0;
+
+  function undoDir(project, home) {
+    return nodePath.join(supportDir(home), 'undo', core.projectKey(project));
+  }
+
+  function newUndoId(now) {
+    seq = (seq + 1) % 10000;
+    return String(now === undefined ? Date.now() : now) + '-' + ('000' + seq).slice(-4);
+  }
+
+  // Record ids, oldest first. A folder that isn't there is no records.
+  function listUndo(project, home) {
+    try {
+      return fs.readdirSync(undoDir(project, home)).filter(function (n) { return RECORD.test(n); }).sort().map(function (n) { return n.slice(0, -5); });
+    } catch (e) {
+      return [];
+    }
+  }
+
+  function readUndo(project, id, home) {
+    try {
+      var e = JSON.parse(fs.readFileSync(nodePath.join(undoDir(project, home), id + '.json'), 'utf8'));
+      if (!e || e.project !== project || !e.restore || !Array.isArray(e.restore.items)) { return null; }
+      e.id = id;
+      return e;
+    } catch (x) {
+      return null;
+    }
+  }
+
+  // Written whole to a temporary file and renamed over the record, so a crash leaves the old record or the new one.
+  // Then only the newest `keep` records stay. Returns {ok} or {ok: false, error}.
+  function saveUndo(project, entry, keep, home) {
+    var dir = undoDir(project, home), file = nodePath.join(dir, entry.id + '.json'), tmp = file + '.tmp';
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(tmp, JSON.stringify(entry));
+      fs.renameSync(tmp, file);
+    } catch (e) {
+      try { fs.unlinkSync(tmp); } catch (x) {}
+      return { ok: false, error: e.code || String(e.message || e) };
+    }
+    var all = listUndo(project, home);
+    for (var i = 0; keep && i < all.length - keep; i++) { dropUndo(project, all[i], home); }
+    return { ok: true };
+  }
+
+  function dropUndo(project, id, home) {
+    try { fs.unlinkSync(nodePath.join(undoDir(project, home), id + '.json')); return true; } catch (e) { return false; }
   }
 
   function readConfig(file) {
@@ -138,12 +200,23 @@
     }
   }
 
-  // Every video file under a folder, hidden files and folders left out. Reads names only.
-  function walkFolder(root, done) {
-    var found = [], pending = 0, failed = null;
+  // Every video file under a folder, hidden files and folders left out. Reads names only. Stops at `most` video files,
+  // so a drive root can't run for minutes, and stop() ends it at once. done(err, paths, {capped, stopped}); onCount(n)
+  // as the count climbs.
+  var MOST_FILES = 50000;
+
+  function walkFolder(root, done, opts) {
+    var o = opts || {}, most = o.most || MOST_FILES, found = [], pending = 0, failed = null, finished = false, capped = false, stopped = false;
+    function finish() {
+      if (finished) { return; }
+      finished = true;
+      if (!capped && !stopped) { found.sort(); }
+      done(failed, capped || stopped ? [] : found, { capped: capped, stopped: stopped });
+    }
     function visit(dir) {
       pending++;
       fs.readdir(dir, { withFileTypes: true }, function (err, entries) {
+        if (finished) { return; }
         if (err) {
           if (dir === root) { failed = err; }
         } else {
@@ -153,14 +226,14 @@
             var full = nodePath.join(dir, e.name);
             if (e.isDirectory()) { visit(full); } else if (e.isFile() && core.isVideoPath(full)) { found.push(full); }
           }
+          if (found.length > most) { capped = true; finish(); return; }
+          if (o.onCount) { o.onCount(found.length); }
         }
-        if (--pending === 0) {
-          found.sort();
-          done(failed, found);
-        }
+        if (--pending === 0) { finish(); }
       });
     }
     visit(root);
+    return { stop: function () { if (!finished) { stopped = true; finish(); } } };
   }
 
   // A folder dialog in its own process. CEP's cep.fs.showOpenDialog is synchronous, and inside Premiere 26.5 it showed
@@ -198,6 +271,13 @@
     runEngine: runEngine,
     configFile: configFile,
     readConfig: readConfig,
+    undoDir: undoDir,
+    newUndoId: newUndoId,
+    listUndo: listUndo,
+    readUndo: readUndo,
+    saveUndo: saveUndo,
+    dropUndo: dropUndo,
+    MOST_FILES: MOST_FILES,
     writeLock: writeLock,
     manifestVersion: manifestVersion,
     walkFolder: walkFolder
