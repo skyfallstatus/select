@@ -50,7 +50,7 @@ Coming from Select 0.1? Install the package once, as above. 0.1 can't update its
 
 1. Choose **Selection**, **Project** or **Folder** at the top, and press **Scan**.
 2. Pick from **Show** and **Sort**, tap a colour dot, or search.
-3. Happy with the view? **Label**, **Add Columns** or **Sort into Bins** puts it in your project. **Undo Write** in the **···** menu takes it back, up to your last 10 writes.
+3. Happy with the view? **Label**, **Add Columns** or **Sort into Bins** puts it in your project. **Undo Write** in the **···** menu takes it back. Select keeps the last 10 writes for each project, and they stay when the panel reloads.
 
 Your media files are never changed. What each option measures, and how accurate it is, is in [What Select looks at](docs/WHAT-IT-LOOKS-AT.md).
 

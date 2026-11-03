@@ -941,7 +941,12 @@ test('product: the panel agrees with product.conf', () => {
   const conf = Object.fromEntries(fs.readFileSync(file, 'utf8').split('\n').filter(l => /^[A-Z_]+=/.test(l)).map(l => l.split('=')));
   const app = fs.readFileSync(path.join(root, 'panel/client/app.js'), 'utf8');
   assert.ok(app.includes(`/bin/${conf.ENGINE}'`), 'engine name');
-  assert.ok(app.includes(`https://github.com/${conf.REPO}/issues/new`), 'bug link');
+  // The repository is stamped from product.conf at build time (scripts/stamp-panel.sh), so the source only has to name
+  // one, the same in both places, for the build to replace.
+  const update = fs.readFileSync(path.join(root, 'panel/client/update.js'), 'utf8');
+  const repo = /^  var REPO = '([^']+)';$/m.exec(update)[1];
+  assert.ok(app.includes(`var ISSUES_URL = 'https://github.com/${repo}/issues/new';`), 'bug link and updates name one repository');
+  assert.match(fs.readFileSync(path.join(root, 'scripts/build-panel.sh'), 'utf8'), /^scripts\/stamp-panel\.sh \$OUT$/m, 'and the build stamps it');
   assert.equal(N.configFile('/h'), `/h/Library/Application Support/${conf.BUNDLE_ID}/config.json`);
   assert.equal(fs.readFileSync(path.join(root, 'panel/client/index.html'), 'utf8').match(/<title>(.*)<\/title>/)[1], conf.NAME);
 });
@@ -1737,6 +1742,72 @@ test('H1: Undo records live on disk per project, newest last, ten kept, and read
   }
 });
 
+test('S2: an Undo record is found in either Unicode form of its path, and one that does not read is skipped, never deleted', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'sl-undo-'));
+  try {
+    const nfc = '/Volumes/Field SSD/Projects/Cr\u00e9me br\u00fbl\u00e9e.prproj', nfd = nfc.normalize('NFD');
+    assert.notEqual(nfc, nfd);
+    assert.equal(N.undoDir(nfc, home), N.undoDir(nfd, home), 'one folder for both forms');
+    const record = (id, project, items, extra) => ({ v: 1, id, project, at: new Date().toISOString(), kind: 'label', meta: { label: 'Mango' }, restore: { kind: 'label', color: 7, items }, ...extra });
+    const written = N.newUndoId(1790000000000);
+    // Written while Premiere gave the path decomposed, read back while it gives it composed.
+    assert.ok(N.saveUndo(nfd, record(written, nfd, [['1', 0, '/v/C1.MP4']]), C.UNDO_KEEP, home).ok);
+    const back = N.readUndo(nfc, written, home);
+    assert.ok(back, 'the record is this project\'s whatever the form');
+    assert.equal(back.restore.items.length, 1);
+    assert.equal(N.topUndo(nfc, null, home).top.id, written);
+    // Newer files that don't read as this panel's records: damaged, a newer format, another project, no format at all.
+    const dir = N.undoDir(nfc, home), file = id => path.join(dir, id + '.json');
+    const odd = {
+      [N.newUndoId(1790000000001)]: '{"v":1,"project":',
+      [N.newUndoId(1790000000002)]: JSON.stringify(record('x', nfc, [['2', 0, '/v/C2.MP4']], { v: 2 })),
+      [N.newUndoId(1790000000003)]: JSON.stringify(record('x', '/Volumes/Field SSD/Projects/north-pier.prproj', [['3', 0, '/v/C3.MP4']])),
+      [N.newUndoId(1790000000004)]: JSON.stringify({ project: nfc, restore: { items: [['4', 0, '/v/C4.MP4']] } })
+    };
+    for (const [id, text] of Object.entries(odd)) { fs.writeFileSync(file(id), text); }
+    for (const id of Object.keys(odd)) { assert.equal(N.readUndo(nfc, id, home), null, odd[id].slice(0, 40)); }
+    const found = N.topUndo(nfc, null, home);
+    assert.equal(found.top.id, written, 'Undo Write reaches past them to the last record it can read');
+    assert.equal(found.ids.length, 5, 'they still count, as the newest ten kept on disk count them');
+    for (const id of Object.keys(odd)) { assert.equal(fs.readFileSync(file(id), 'utf8'), odd[id], 'left exactly as it was'); }
+    // An empty record of this format is a write whose first batch never answered: cleared, unless a write is filling it.
+    const empty = N.newUndoId(1790000000005), filling = N.newUndoId(1790000000006);
+    assert.ok(N.saveUndo(nfc, record(empty, nfc, []), 0, home).ok);
+    assert.ok(N.saveUndo(nfc, record(filling, nfc, []), 0, home).ok);
+    const again = N.topUndo(nfd, filling, home);
+    assert.equal(again.top.id, written);
+    assert.ok(!fs.existsSync(file(empty)), 'the empty one is cleared');
+    assert.ok(fs.existsSync(file(filling)), 'the one a running write is filling stays');
+    for (const id of Object.keys(odd)) { assert.ok(fs.existsSync(file(id))); }
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('S2: the panel finds Undo records by the project\'s path in either form, and asks Premiere by the path it gives now', () => {
+  const app = fs.readFileSync(path.join(__dirname, '../client/app.js'), 'utf8');
+  assert.match(app, /N\.topUndo\(path, S\.activeRecord\)/, 'loadUndo leaves the choice of what to clear to N.topUndo');
+  assert.doesNotMatch(app, /N\.readUndo|N\.listUndo/, 'and reads no record itself');
+  assert.doesNotMatch(app, /\.project === path|\.path !== path/, 'project paths are compared with samePath');
+  assert.match(app, /undoBatches\(entry, r\.project\.path\)/);
+});
+
+test('N6: the docs say what the panel does: Undo Write\'s reach per project, which log is converted, and where updates come from', () => {
+  const root = path.join(__dirname, '../..');
+  const readme = fs.readFileSync(path.join(root, 'README.md'), 'utf8');
+  assert.match(readme, new RegExp(`keeps the last ${C.UNDO_KEEP} writes for each project`));
+  assert.doesNotMatch(readme, /up to your last \d+ writes/, 'not ten in all');
+  const looks = fs.readFileSync(path.join(root, 'docs/WHAT-IT-LOOKS-AT.md'), 'utf8');
+  assert.doesNotMatch(looks, /reads log footage through its own curve/i, 'not every log');
+  assert.match(looks, /S-Log3 with S-Gamut3\.Cine is read through that curve and gamut/);
+  assert.match(looks, /left as recorded[^.]*tooltip says so/);
+  const privacy = /## Privacy\n([\s\S]*?)\n## /.exec(readme)[1];
+  const about = /dialog\('About Select'.*Once a day (.*?)<\/p>/.exec(fs.readFileSync(path.join(root, 'panel/client/app.js'), 'utf8'))[1].replace(/\\'/g, '\'');
+  for (const said of ['That request is the only thing it sends', 'When there is a new version, Select downloads it from the same GitHub release.']) {
+    assert.ok(privacy.includes(said) && about.includes(said), said);
+  }
+});
+
 test('H1: the write sheets say how far Undo Write reaches, and Undo Write says what it will put back', () => {
   assert.equal(C.undoReach(3), 'Undo Write in Select takes back the last 10 writes to this project, newest first, and keeps them when the panel reloads.');
   assert.match(C.undoReach(10), /pushes the oldest of them out of reach/);
@@ -1888,6 +1959,84 @@ test('wording: project columns use the panel\'s words, Undo has one name, and re
   assert.match(twin.message, /^The project in front is another p, in a different folder\./);
   const long = C.footState({ ...facts({}), busy: 'x', write: { kind: 'write', verb: 'Labelling', done: 100, total: 973 } });
   assert.ok(!/busy for a moment/.test(long.sentence));
+});
+
+// ExtendScript is ES3. Code with strings, regex literals and comments blanked out (same length, lines kept), so the
+// patterns below see code alone.
+function codeOnly(src) {
+  let out = '', i = 0, prev = '';   // prev: the last word or character of code, to tell a regex from a division
+  const n = src.length, blank = t => t.replace(/[^\n]/g, ' ');
+  const regexMayStart = () => prev === '' || /[(,=:[!&|?{};+\-*%<>~^]$/.test(prev) || /^(return|typeof|in|new|delete|void|throw|case|do|else)$/.test(prev);
+  while (i < n) {
+    const c = src[i], d = src[i + 1];
+    if (c === '/' && (d === '/' || d === '*')) {
+      const e = d === '/' ? src.indexOf('\n', i) : src.indexOf('*/', i + 2) + 2;
+      const end = e < (d === '/' ? 0 : 2) ? n : e;
+      out += blank(src.slice(i, end)); i = end; continue;
+    }
+    if (c === '"' || c === "'" || c === '`') {
+      let j = i + 1;
+      while (j < n && src[j] !== c) { if (src[j] === '\\') { j++; } j++; }
+      out += c + blank(src.slice(i + 1, j)) + c; i = j + 1; prev = 'string'; continue;
+    }
+    if (c === '/' && regexMayStart()) {
+      let j = i + 1, inClass = false;
+      while (j < n && (src[j] !== '/' || inClass)) { if (src[j] === '\\') { j++; } else if (src[j] === '[') { inClass = true; } else if (src[j] === ']') { inClass = false; } j++; }
+      let k = j + 1;
+      while (k < n && /[a-z]/i.test(src[k])) { k++; }
+      out += '/' + blank(src.slice(i + 1, j)) + '/' + src.slice(j + 1, k); i = k; prev = 'regex'; continue;
+    }
+    if (/[A-Za-z_$]/.test(c)) { let j = i; while (j < n && /[\w$]/.test(src[j])) { j++; } prev = src.slice(i, j); out += prev; i = j; continue; }
+    if (!/\s/.test(c)) { prev = c; }
+    out += c; i++;
+  }
+  return out;
+}
+
+// What ExtendScript doesn't have. Array.prototype.indexOf is missing there too, but a read can't tell it from String's,
+// which is fine: the host's own header keeps indexOf to strings.
+const ES3_RULES = [
+  [/\blet\s+[\w$[{]/, '`let`'], [/\bconst\s+[\w$[{]/, '`const`'], [/=>/, 'an arrow function'], [/`/, 'a template literal'],
+  [/\bclass\s+[\w$]/, '`class`'], [/\.\.\.\s*[\w$[({]/, 'spread or rest'], [/\bfor\s*\([^)]*\bof\b/, 'for…of'],
+  [/\b(async|await|yield)\b/, 'async, await or yield'], [/\bfunction\s*\*/, 'a generator'],
+  [/,\s*\)/, 'a trailing comma in a call or parameter list'], [/,\s*\}/, 'a trailing comma in an object literal'], [/,\s*\]/, 'a trailing comma in an array literal'],
+  [/\b(get|set)\s+[\w$]+\s*\(/, 'a getter or setter'], [/[{,]\s*(?!(?:if|for|while|switch|catch|with|function|return)\b)[\w$]+\s*\([^)]*\)\s*\{/, 'a method shorthand'],
+  [/\.(forEach|map|filter|reduce|reduceRight|some|every|find|findIndex|includes|fill|flat|flatMap)\s*\(/, 'an array method ExtendScript lacks'],
+  [/\.(trim|trimStart|trimEnd|startsWith|endsWith|padStart|padEnd|repeat|codePointAt|normalize|toISOString|toJSON)\s*\(/, 'a string or date method ExtendScript lacks'],
+  [/\.bind\s*\(/, 'Function.prototype.bind'],
+  [/\b(Array\.(isArray|from|of)|Object\.(keys|values|entries|assign|create|defineProperty|defineProperties|freeze|seal|getPrototypeOf|getOwnPropertyNames)|Date\.now|Number\.(isFinite|isNaN|isInteger|parseFloat|parseInt)|String\.(raw|fromCodePoint))\b/, 'an ES5 or later built-in'],
+  [/\b(JSON|Promise|Map|Set|WeakMap|WeakSet|Symbol|Proxy|Reflect)\b/, 'a global ExtendScript lacks'],
+  [/(^|[^\w$.])\d+n\b/, 'a BigInt'], [/\?\?|\?\.(?!\d)|\*\*/, 'an ES2016 or later operator']
+];
+
+function es3Problems(src) {
+  const code = codeOnly(src), lines = src.split('\n'), found = [];
+  for (const [re, what] of ES3_RULES) {
+    const g = new RegExp(re.source, 'g');
+    let m;
+    while ((m = g.exec(code))) {
+      const line = code.slice(0, m.index).split('\n').length;
+      found.push(`line ${line}: ${what}: ${lines[line - 1].trim()}`);
+    }
+  }
+  return found;
+}
+
+test('N7: the ExtendScript host uses ES3 only, and the check catches what ExtendScript lacks', () => {
+  const host = fs.readFileSync(path.join(__dirname, '../host/select.jsx'), 'utf8');
+  assert.deepStrictEqual(es3Problems(host), []);
+  // It parses JSON by eval and writes it with slJson, because ExtendScript has no JSON object.
+  assert.match(host, /eval\('\(' \+ json \+ '\)'\)/);
+  assert.match(host, /^function slJson\(v\)/m);
+  // The check itself: each of these is caught...
+  const bad = ['[1].forEach(function (x) {});', 'x = list.map(f);', 'x = list.filter(f);', 'let a = 1;', 'const a = 1;', 'var g = (x) => x;',
+    'var s = `a${b}`;', 'f(a, b,\n);', 'var o = { a: 1, };', 'var k = Object.keys(o);', 'var j = JSON.stringify(o);', 's = s.trim();',
+    't = Date.now();', 'Array.isArray(x);', 'f.bind(this);', 'var o = { m(x) { return x; } };', 'var o = { get x() { return 1; } };', 'f(...args);', 'for (var x of y) {}'];
+  for (const src of bad) { assert.equal(es3Problems(src).length > 0, true, src); }
+  // ...and the same words in strings, comments and regex literals, or ES3 that looks close, are not.
+  const fine = "// a.forEach(x => x) `t` let const JSON\nvar s = 'a.map(f) => `x` let b, ) JSON.parse'; var r = /,\\s*\\)|=>|`/g; var d = a / b / c;\n" +
+    "var o = { 'k': 1 }; if (x) { y(); } for (k in o) { if (o.hasOwnProperty(k)) { z(k); } }\nfunction f(a, b) { return a ? .5 : b; }\n/* JSON.stringify(x, ) */ var t = \"Object.keys(o)\"; var i = s.indexOf('x');";
+  assert.deepStrictEqual(es3Problems(fine), []);
 });
 
 test('host: quoting stays pure ASCII for accents, quotes, controls and line separators', () => {

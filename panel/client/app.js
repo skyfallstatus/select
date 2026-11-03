@@ -1229,21 +1229,22 @@
   // The records of the project in front, read once per project and again after every write or Undo Write.
   function undoState() {
     var path = S.project ? S.project.path : null;
-    if (!S.undo || S.undo.path !== path) { S.undo = loadUndo(path); }
+    if (!S.undo || !samePath(S.undo.path, path)) { S.undo = loadUndo(path); }
     return S.undo;
+  }
+
+  // Project paths compared the way their records' folders are named: macOS may give one path in either Unicode form.
+  function samePath(a, b) {
+    return a === b || (typeof a === 'string' && typeof b === 'string' && C.pathKey(a) === C.pathKey(b));
   }
 
   function forgetUndo() { S.undo = null; }
 
-  // The newest record with something left to put back. Empty ones, from a write whose first batch never answered,
-  // are cleared on the way, except the one a running write is filling.
+  // The newest record with something left to put back: N.topUndo says which, and what it clears or leaves on disk.
   function loadUndo(path) {
-    var mem = S.memoryUndo && S.memoryUndo.project === path ? S.memoryUndo : null;
-    var ids = path && N.available ? N.listUndo(path) : [], top = null;
-    for (var i = ids.length - 1; i >= 0 && !top; i--) {
-      var e = N.readUndo(path, ids[i]);
-      if (e && e.restore.items.length) { top = e; } else if (ids[i] !== S.activeRecord) { N.dropUndo(path, ids[i]); ids.splice(i, 1); }
-    }
+    var mem = S.memoryUndo && samePath(S.memoryUndo.project, path) ? S.memoryUndo : null;
+    var found = path && N.available ? N.topUndo(path, S.activeRecord) : { ids: [], top: null };
+    var ids = found.ids, top = found.top;
     if (mem && (!top || mem.id > top.id)) { return { path: path, count: ids.length + 1, top: mem }; }
     return { path: path, count: ids.length, top: top };
   }
@@ -1501,7 +1502,7 @@
         var refused = lockRefusal() || (S.busy ? 'Another write is running.' : '') || (S.hostLate ? LATE : '');
         if (refused) { note(refused, 'warn'); return; }
         S.outcome = null;
-        return undoBatches(entry).then(function (acc) {
+        return undoBatches(entry, r.project.path).then(function (acc) {
           var gaveUp = false;
           if (!acc.left.length) {
             dropRecord(entry);
@@ -1522,7 +1523,9 @@
     });
   }
 
-  function undoBatches(entry) {
+  // project: the path Premiere gives for the project in front now. It's the record's project, maybe in the other Unicode
+  // form, and Premiere's own check compares the text.
+  function undoBatches(entry, project) {
     var r = entry.restore, parts = C.batches(r.items, C.BATCH), i = 0;
     var acc = { restored: 0, skipped: 0, failed: [], left: [], unsent: 0, error: '', binRemoved: null };
     S.write = { kind: 'undo', verb: 'Putting back', unit: 'item', done: 0, total: r.items.length, stopping: false };
@@ -1552,7 +1555,7 @@
         return Promise.resolve();
       }
       var part = parts[i++];
-      return host('restore', { project: entry.project, restore: head(part), final: i === parts.length }).then(function (res) {
+      return host('restore', { project: project || entry.project, restore: head(part), final: i === parts.length }).then(function (res) {
         if (!res.ok) {
           var rest = waiting(i - 1);
           acc.error = res.message;
@@ -1743,7 +1746,7 @@
   function showAbout() {
     var version = N.available ? N.manifestVersion(extensionRoot()) : null;
     var timing = S.sortMs === null ? '' : '<p class="quiet">Last re-sort: ' + S.sortMs.toFixed(1) + ' ms, ' + fmtInt(S.sortRows) + ' rows.</p>';
-    return dialog('About Select', '<p>' + (version ? 'Version ' + esc(version) : 'Version unknown') + '</p><p class="quiet">' + esc(C.FORMATS_NOTE) + '</p><p class="quiet">Everything runs on this Mac: reading, looking closer, sorting and search. No accounts. Once a day Select asks GitHub whether there\'s a new version. That request is the only thing it sends, and Check Automatically in this menu turns it off.</p><p class="quiet">Every result is a suggestion. People and faces are counts, never who someone is.</p>' + timing, 'Done', null);
+    return dialog('About Select', '<p>' + (version ? 'Version ' + esc(version) : 'Version unknown') + '</p><p class="quiet">' + esc(C.FORMATS_NOTE) + '</p><p class="quiet">Everything runs on this Mac: reading, looking closer, sorting and search. No accounts. Once a day Select asks GitHub whether there\'s a new version. That request is the only thing it sends, and Check Automatically in this menu turns it off. When there is a new version, Select downloads it from the same GitHub release.</p><p class="quiet">Every result is a suggestion. People and faces are counts, never who someone is.</p>' + timing, 'Done', null);
   }
 
   var MENU = { rescan: startScan, columns: showColumns, 'undo-view': undoView, undo: doUndoWrite, clear: clearResults, bug: reportBug, about: showAbout };

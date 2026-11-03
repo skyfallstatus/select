@@ -106,7 +106,9 @@
 
   // One file per write, in a folder per project: undo/<projectKey>/<ms>-<seq>.json, so names sort oldest first and a
   // batch rewrites only its own record. A record names its project, and one that names another is ignored.
+  // UNDO_FORMAT is the record's `v`. A record in another format, from a newer Select, is left for that Select to read.
   var RECORD = /^\d{13}-\d{4}\.json$/;
+  var UNDO_FORMAT = 1;
   var seq = 0;
 
   function undoDir(project, home) {
@@ -127,15 +129,32 @@
     }
   }
 
+  // The record, or null when it can't be read, is in another format, or names another project. The project is compared
+  // the way the folder is named, in one Unicode form: macOS may give the same path in either.
   function readUndo(project, id, home) {
     try {
       var e = JSON.parse(fs.readFileSync(nodePath.join(undoDir(project, home), id + '.json'), 'utf8'));
-      if (!e || e.project !== project || !e.restore || !Array.isArray(e.restore.items)) { return null; }
+      if (!e || typeof e !== 'object' || e.v !== UNDO_FORMAT || typeof e.project !== 'string' || core.pathKey(e.project) !== core.pathKey(project)) { return null; }
+      if (!e.restore || typeof e.restore !== 'object' || !Array.isArray(e.restore.items)) { return null; }
       e.id = id;
       return e;
     } catch (x) {
       return null;
     }
+  }
+
+  // What Undo Write reaches in a project: {ids, top}, every record id oldest first, and the newest record with something
+  // left to put back. A record of this format with nothing in it, from a write whose first batch never answered, is
+  // removed on the way, except `filling`, the one a running write is filling. A record that doesn't read is skipped and
+  // stays on disk: it may be damaged, or a newer Select's, and only the newest UNDO_KEEP are kept anyway.
+  function topUndo(project, filling, home) {
+    var ids = listUndo(project, home), top = null;
+    for (var i = ids.length - 1; i >= 0 && !top; i--) {
+      var e = readUndo(project, ids[i], home);
+      if (!e) { continue; }
+      if (e.restore.items.length) { top = e; } else if (ids[i] !== filling && dropUndo(project, ids[i], home)) { ids.splice(i, 1); }
+    }
+    return { ids: ids, top: top };
   }
 
   // Written whole to a temporary file and renamed over the record, so a crash leaves the old record or the new one.
@@ -275,6 +294,8 @@
     newUndoId: newUndoId,
     listUndo: listUndo,
     readUndo: readUndo,
+    topUndo: topUndo,
+    UNDO_FORMAT: UNDO_FORMAT,
     saveUndo: saveUndo,
     dropUndo: dropUndo,
     MOST_FILES: MOST_FILES,

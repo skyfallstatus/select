@@ -308,7 +308,11 @@ async function launch() {
     await P('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 2, mobile: false });
     await sleep(120);
   }
-  return { evalIn, open, waitFor, click, mouse, shot, close, size, problems, requests, engineEnv, engineLog, send: P };
+  // SIGSTOP and SIGCONT to the fake engines, so a check can hold a scan exactly where it is.
+  function signalEngines(sig) {
+    for (const child of engines.values()) { if (child.exitCode === null && child.signalCode === null) { try { child.kill(sig); } catch (e) {} } }
+  }
+  return { evalIn, open, waitFor, click, mouse, shot, close, size, problems, requests, engineEnv, engineLog, signalEngines, send: P };
 }
 
 // ---------------------------------------------------------------- helpers in the page
@@ -681,7 +685,7 @@ async function main() {
     await waitModal();
     const about = await dialogText();
     check('About shows the sort time, and the version from the manifest', /Last re-sort: \d+\.\d ms, 1,000 rows/.test(about) && new RegExp('Version ' + (/ExtensionBundleVersion="([^"]+)"/.exec(fs.readFileSync(MANIFEST, 'utf8'))[1]).replace(/\./g, '\\.')).test(about), about);
-    check('About claims only the formats that work', /Reads \.mp4, \.mov and \.m4v/.test(about) && /\.mxf when ffmpeg is installed/.test(about) && /\.r3d/.test(about) && /only thing it sends/.test(about));
+    check('About claims only the formats that work', /Reads \.mp4, \.mov and \.m4v/.test(about) && /\.mxf when ffmpeg is installed/.test(about) && /\.r3d/.test(about) && /only thing it sends/.test(about) && /When there is a new version, Select downloads it from the same GitHub release\./.test(about));
     await b.shot('11-about');
     await b.click('#dialog-ok');
 
@@ -977,6 +981,32 @@ async function main() {
     await setItems(b, 400);
     await scanAndWait(b);
     await pickSort(b, 'sharpness');
+
+    // -------- S2: Premiere gives the project's path in the other Unicode form, and the newest files in its Undo folder
+    // don't read as records: Undo Write still reaches the last write, asks Premiere by the path it gives now, and leaves
+    // the files it couldn't read where they are.
+    const CREME = { path: '/Volumes/Field SSD/Projects/Crème.prproj', name: 'Crème.prproj' };
+    const cremeNfd = { path: CREME.path.normalize('NFD'), name: CREME.name.normalize('NFD') };
+    await b.evalIn(`__mock.project=${JSON.stringify(CREME)};SelectApp.state.outcome=null;SelectApp.state.selected.clear();SelectApp.state.anchor=null;SelectApp.applyView();__mock.calls.length=0`);
+    await b.click(`#body .r[data-at="0"]`);
+    await b.click('#do-label');
+    await waitModal();
+    await b.click('#dialog-ok');
+    await b.waitFor(`/^Labelled 1 clip/.test(${text('foot-verdict')})&&!SelectApp.state.busy`);
+    const oddRecords = { '1999999999999-0001': '{"v":1,"project":', '1999999999998-0001': JSON.stringify({ v: 2, project: CREME.path, restore: { kind: 'label', items: [['9', 0, '/v/x.mp4']] } }) };
+    const undoFolder = await b.evalIn(`SelectNative.undoDir(${JSON.stringify(CREME.path)})`);
+    await b.evalIn(`(function(){var fs=require('fs'),o=${JSON.stringify(oddRecords)};Object.keys(o).forEach(function(id){fs.writeFileSync(${JSON.stringify(undoFolder)}+'/'+id+'.json',o[id]);});})()`);
+    await b.evalIn(`__mock.project=${JSON.stringify(cremeNfd)};SelectApp.state.outcome=null;SelectApp.applyView();__mock.calls.length=0`);
+    await b.click('#more');
+    await b.evalIn(`SelectApp.state.undo=null`);
+    await b.click('[data-menu="undo"]');
+    const nfdSheet = await b.waitFor(`!document.getElementById('modal').hidden`, 'the Undo Write sheet', 3000).then(() => dialogText(), () => noteText());
+    if (await modalOpen()) { await b.click('#dialog-ok'); await b.waitFor(`SelectApp.state.outcome&&!SelectApp.state.busy`); }
+    const nfdRestore = (await calls('restore')).map(c => c.args.project);
+    const left = await b.evalIn(`Object.keys(__disk.files()).filter(function(k){return k.indexOf(${JSON.stringify(undoFolder + '/')})===0;}).map(function(k){return k.slice(${undoFolder.length + 1});}).sort()`);
+    check('S2: with the project\'s path in the other Unicode form, Undo Write reaches the last write past records it can\'t read, asks Premiere by today\'s path, and keeps those files',
+      /Takes Mango off 1 clip/.test(nfdSheet) && nfdRestore.length === 1 && nfdRestore[0] === cremeNfd.path && left.join() === Object.keys(oddRecords).map(id => id + '.json').sort().join(), { sheet: nfdSheet.slice(0, 80), nfdRestore, left });
+    await b.evalIn(`__mock.project=${JSON.stringify(PROJECT)};SelectApp.state.undo=null;SelectApp.state.outcome=null;SelectApp.applyView();__mock.calls.length=0`);
 
     // -------- 0.2: a clip that changed in the project while the sheet was open is left alone
     await b.evalIn(`SelectApp.state.outcome=null;SelectApp.state.selected.clear();SelectApp.state.anchor=null;SelectApp.applyView();__mock.calls.length=0`);
@@ -1278,11 +1308,21 @@ async function main() {
     const holding = await b.evalIn(`({bins:document.getElementById('do-bins').disabled,label:document.getElementById('do-label').disabled,columns:document.getElementById('do-columns').disabled,shown:!document.getElementById('do-bins').hidden,why:document.getElementById('status-unread').textContent,title:document.getElementById('do-bins').title,running:!!SelectApp.state.scan.handle})`);
     check('in stage three, a Colour write waits: visible, off, with a plain reason', holding.running && holding.shown && holding.bins && holding.label && holding.columns && /^Colour needs every clip looked at/.test(holding.why) && holding.why.startsWith(holding.title), holding);
     await b.shot('35-stage-three-waiting');
-    await b.evalIn(`__mock.calls.length=0`);
-    await b.evalIn(`document.getElementById('do-bins').disabled=false`);
-    await b.click('#do-bins');
-    await sleep(80);
-    check('even forced, a held write refuses before any sheet or host call', !(await modalOpen()) && (await b.evalIn(`__mock.calls.filter(function(c){return c.fn!=='status';}).length`)) === 0 && /needs every clip/.test(await noteText()));
+    // Forced: the button turned on and pressed in one task. The foot redraws every 66 ms while lines arrive and turns it
+    // off again, so turning it on in one call and clicking in later ones raced that redraw: a click on a button that was
+    // off again did nothing, and the check failed about one run in three. The engine is paused meanwhile, so the write
+    // is still held when it's pressed, however long the steps above took.
+    b.signalEngines('SIGSTOP');
+    let forced;
+    try {
+      await b.evalIn(`__mock.calls.length=0`);
+      forced = await b.evalIn(`(function(){var held=SelectApp.foot().held||[],e=document.getElementById('do-bins');e.disabled=false;e.click();return {held:held.indexOf('bins')>=0,running:!!SelectApp.state.scan.handle};})()`);
+      await sleep(80);
+    } finally {
+      b.signalEngines('SIGCONT');
+    }
+    const forcedAfter = { modal: await modalOpen(), calls: await b.evalIn(`__mock.calls.filter(function(c){return c.fn!=='status';}).map(function(c){return c.fn;})`), note: await noteText() };
+    check('even forced, a held write refuses before any sheet or host call', forced.held && forced.running && !forcedAfter.modal && forcedAfter.calls.length === 0 && /needs every clip/.test(forcedAfter.note), { forced, forcedAfter });
     await b.waitFor(`!document.getElementById('do-bins').disabled`, 'writes turn on by themselves', 30000);
     const turned = await b.evalIn(`({clicked:__mock.calls.length,landed:SelectCore.understandingShare(SelectApp.state.store).landed||!SelectApp.state.scan.handle})`);
     check('and turns on by itself once every clip has landed', turned.landed, turned);
