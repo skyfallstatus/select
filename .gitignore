@@ -1,0 +1,17 @@
+# Private material and everything built
+.local/
+build/
+dist/
+out/
+panel/bin/
+panel/.debug
+.DS_Store
+
+# Packages and signing material never belong here
+*.zxp
+*.pkg
+*.p12
+*.pfx
+*.pem
+*.key
+*.cer

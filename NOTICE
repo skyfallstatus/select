@@ -1,0 +1,29 @@
+Select
+Copyright (c) 2026 skyfallstatus. Licensed under the MIT License: see LICENSE.
+
+This file credits material from others that this project includes or relies on.
+No footage is included in this repository.
+
+
+INCLUDED IN THIS REPOSITORY
+
+None. Everything here was written for this project, and there are no third-party
+libraries, fonts or samples in it.
+
+
+USED, NOT INCLUDED
+
+ffmpeg
+  Optional. When someone has installed it, the engine runs it as a separate program
+  to read formats that macOS can't. It isn't bundled, and the tests use it to make
+  tiny clips. https://ffmpeg.org
+
+Adobe ZXPSignCmd
+  Used by the maintainer to sign the panel. It isn't bundled.
+  https://github.com/Adobe-CEP/CEP-Resources
+
+Adobe Common Extensibility Platform and Premiere Pro
+  The panel runs inside them. Premiere Pro is a trademark of Adobe.
+
+Apple VideoToolbox, AudioToolbox and other macOS frameworks
+  The engine links against them as they ship with macOS.
