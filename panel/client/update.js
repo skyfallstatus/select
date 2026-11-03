@@ -1,7 +1,9 @@
 // Select updates itself. Once a day it asks GitHub's releases API whether there is a newer version. When there is, it
-// downloads the release's signed manifest and Select.zxp, checks the Ed25519 signature, the size and the SHA-256,
-// unpacks it outside Adobe's extensions folder, and swaps it into the user's extensions folder when no scan or write
-// is running. The old copy is kept for rollback. Then one quiet line offers a restart.
+// downloads the release's signed manifest and checks its Ed25519 signature before it believes anything the release
+// says, then downloads Select.zxp, checks the size and the SHA-256, unpacks it outside Adobe's extensions folder, and
+// swaps it into the user's extensions folder when no scan or write is running. The old copy is kept for rollback. Then
+// one quiet line offers a restart. A release without a manifest signed with the release key is never mentioned on its
+// own: anyone who can make a release could have made it.
 // Self-contained: it wires itself to the panel and only reads window.SelectApp.state. docs/PACKAGING.md says why.
 (function (root, factory) {
   var req = root.cep_node ? root.cep_node.require : (typeof require === 'function' ? require : null);
@@ -14,6 +16,7 @@
 })(typeof window !== 'undefined' ? window : globalThis, function (req) {
   'use strict';
 
+  // Stamped from product.conf's REPO by scripts/stamp-panel.sh at build time. Change it there, not here.
   var REPO = 'skyfallstatus/select';
   var ENGINE = 'select-engine';
   // The release key. Its private half never leaves the maintainer's Mac: see docs/RELEASING.md.
@@ -22,7 +25,8 @@
   // GitHub answers on api.github.com, and a release file redirects from github.com to one of its asset hosts.
   var HOSTS = ['api.github.com', 'github.com', 'objects.githubusercontent.com', 'release-assets.githubusercontent.com', 'github-releases.githubusercontent.com'];
   var DAY = 24 * 3600 * 1000;
-  var LIMITS = { api: 1024 * 1024, manifest: 64 * 1024, zxp: 500 * 1024 * 1024, idleMs: 30000, apiMs: 20000, zxpMs: 15 * 60000, unzipMs: 120000, engineMs: 15000, lockMs: 30 * 60000 };
+  // lockNewMs: how long a lock folder may be without its owner file, which its maker writes right after it.
+  var LIMITS = { api: 1024 * 1024, manifest: 64 * 1024, zxp: 500 * 1024 * 1024, idleMs: 30000, apiMs: 20000, zxpMs: 15 * 60000, unzipMs: 120000, engineMs: 15000, lockNewMs: 2 * 60000 };
   var VERSION_RE = /^(\d{1,4})\.(\d{1,4})\.(\d{1,4})$/;
 
   // ---------------------------------------------------------------- pure parts, no Node needed
@@ -81,10 +85,17 @@
       JSON.stringify(version) + ') ? "current" : ($.evalFile(' + JSON.stringify(file) + '), "loaded " + SELECT_HOST_VERSION)';
   }
 
+  // The page of one release, never releases/latest: that could be another release by the time it's opened.
+  function releasePage(version) {
+    return parseVersion(version) ? 'https://github.com/' + REPO + '/releases/tag/v' + String(version).replace(/^v/, '') : null;
+  }
+
   // The words for the line at the bottom of the panel, or null for nothing. Automatic checks speak only when there's
-  // something to act on, and only once per version.
+  // something to act on, and only once per version. Every status that names a version comes from the Updater only
+  // after a manifest signed with the release key named that version: 'unverified' is all an unsigned release gets.
   function lineFor(result, name, manual) {
     var v = result.version ? name + ' ' + shortVersion(result.version) : name;
+    var page = releasePage(result.version);
     switch (result.status) {
       case 'checking': return manual ? { text: 'Checking for updates…' } : null;
       case 'downloading': return manual ? { text: 'Downloading ' + v + '…' } : null;
@@ -96,8 +107,10 @@
       case 'off': return null;
       case 'busy': return manual ? { text: 'Another Premiere is updating ' + name + ' right now.', fades: true } : null;
       case 'offline': return manual ? { text: 'Couldn\'t reach GitHub. Try again later.', fades: true } : null;
-      case 'manual': return { text: v + ' is out. Install it with ' + name + '.pkg.', link: true };
-      case 'blocked': return { text: v + ' is out. This copy can\'t replace itself, so install it with ' + name + '.pkg.', link: true };
+      case 'manual': return page ? { text: v + ' is out. Install it with ' + name + '.pkg.', link: page } : null;
+      case 'blocked': return page ? { text: v + ' is out. This copy can\'t replace itself, so install it with ' + name + '.pkg.', link: page } : null;
+      case 'quarantined': return page ? { text: v + ' is out, but macOS quarantined the download, so it wasn\'t installed. Install it with ' + name + '.pkg.', link: page } : null;
+      case 'unverified': return manual ? { text: 'No verified update is available.', detail: result.message } : null;
       case 'dev': return manual ? { text: v + ' is out. This is a development copy, so it\'s left as it is.' } : null;
       case 'rejected': return manual ? { text: v + ' didn\'t pass its checks, so it wasn\'t installed.', detail: result.message } : null;
       case 'failed': return manual ? { text: (result.version ? v + ' couldn\'t be installed' : 'The update check failed') + '. Nothing changed.', detail: result.message } : null;
@@ -108,7 +121,7 @@
   var pure = {
     REPO: REPO, ENGINE: ENGINE, KEYS: KEYS, HOSTS: HOSTS, DAY: DAY, LIMITS: LIMITS,
     parseVersion: parseVersion, compareVersions: compareVersions, shortVersion: shortVersion, readManifestText: readManifestText,
-    manifestShape: manifestShape, allowedUrl: allowedUrl, hostRefreshScript: hostRefreshScript, lineFor: lineFor
+    manifestShape: manifestShape, allowedUrl: allowedUrl, hostRefreshScript: hostRefreshScript, lineFor: lineFor, releasePage: releasePage
   };
 
   var mods = null;
@@ -161,9 +174,11 @@
 
   // ---------------------------------------------------------------- the signed manifest
 
+  // Own keys only: an id such as __proto__ or toString names nothing here.
   function keyFor(id, keys) {
-    var b64 = (keys || KEYS)[id];
-    return b64 ? crypto.createPublicKey({ key: Buffer.from(b64, 'base64'), format: 'der', type: 'spki' }) : null;
+    var table = keys || KEYS;
+    if (!Object.prototype.hasOwnProperty.call(table, id) || typeof table[id] !== 'string') { return null; }
+    try { return crypto.createPublicKey({ key: Buffer.from(table[id], 'base64'), format: 'der', type: 'spki' }); } catch (e) { return null; }
   }
 
   // The signed manifest: {format, key, payload, signature}. payload is base64 of the JSON that was signed, so nothing
@@ -345,11 +360,15 @@
     this.isBusy = o.isBusy || function () { return null; };
     this.inFlight = null;
     this.staged = null;
+    this.locked = false;
+    this.loadedXml = null;
   }
 
   Updater.prototype.running = function () {
     var text;
     try { text = this.F.readFileSync(nodePath.join(this.root, 'CSXS', 'manifest.xml'), 'utf8'); } catch (e) { return null; }
+    // The manifest this page was loaded with, as far as this object knows: the first one it read.
+    if (this.loadedXml === null) { this.loadedXml = text; }
     var m = readManifestText(text);
     return m.bundleId && parseVersion(m.version) ? { bundleId: m.bundleId, version: m.version, name: m.name || 'Select', script: m.script, xml: text } : null;
   };
@@ -422,13 +441,21 @@
 
   Updater.prototype.lockDir = function () { return nodePath.join(this.dir, 'lock'); };
 
+  // Held while its owner is alive, however long that is: a Premiere waiting for a long scan to end before it installs
+  // still needs its staged copy. A folder with no owner file yet is one another Premiere has just made, so it's held
+  // unless it's older than LIMITS.lockNewMs. This page's own process holds it only while this page is using it: a
+  // lock from before a reload is free.
   Updater.prototype.lockHeld = function () {
-    var F = this.F, dir = this.lockDir(), info;
+    var F = this.F, dir = this.lockDir(), st, info;
+    try { st = F.statSync(dir); } catch (e) { return false; }
     try { info = JSON.parse(F.readFileSync(nodePath.join(dir, 'owner.json'), 'utf8')); } catch (e) { info = null; }
-    if (!exists(F, dir)) { return false; }
-    if (!info || this.now() - info.at > LIMITS.lockMs || info.at > this.now()) { return false; }
-    if (info.pid === process.pid) { return !!this.inFlight; }
-    try { process.kill(info.pid, 0); return true; } catch (e) { return e.code === 'EPERM'; }
+    var pid = info && typeof info === 'object' ? info.pid : null;
+    if (typeof pid !== 'number' || !(pid > 0) || Math.floor(pid) !== pid) {
+      var age = Date.now() - st.mtimeMs;
+      return age < LIMITS.lockNewMs;
+    }
+    if (pid === process.pid) { return !!(this.locked || this.inFlight || this.staged); }
+    try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; }
   };
 
   Updater.prototype.lock = function () {
@@ -493,7 +520,9 @@
   // ---- the check
 
   // One check, start to end. Resolves to {status, version, running, ...} and never rejects.
-  // status: current, ready, waiting, offline, failed, rejected, manual, blocked, dev, off, busy.
+  // status: current, ready, waiting, offline, failed, rejected, manual, blocked, quarantined, dev, unverified, off, busy.
+  // Only current, offline, failed, unverified, off and busy can come from a release whose signed manifest didn't verify,
+  // and none of them names its version.
   Updater.prototype.check = function (opts) {
     var me = this;
     opts = opts || {};
@@ -509,7 +538,7 @@
       var mine = me.running();
       r.running = r.running || (mine && mine.version);
       var change = { lastAttempt: me.now(), lastResult: { status: r.status, version: r.version || null, message: r.message || null, at: me.now() } };
-      if (r.status === 'current' || r.status === 'ready' || r.status === 'manual' || r.status === 'blocked' || r.status === 'dev') { change.lastCheck = me.now(); }
+      if (['current', 'ready', 'manual', 'blocked', 'dev', 'quarantined', 'unverified'].indexOf(r.status) >= 0) { change.lastCheck = me.now(); }
       if (r.status !== 'busy') { me.save(change); }
       return r;
     });
@@ -538,23 +567,26 @@
       if (state.ready && state.ready.version === version && me.holds(mine, version)) {
         return { status: 'ready', version: version, running: mine.version, needsPremiereRestart: state.ready.needsPremiereRestart, again: true };
       }
-      var assets = {};
-      (release.assets || []).forEach(function (a) { if (a && a.name) { assets[a.name] = a.browser_download_url; } });
+      var assets = Object.create(null);
+      (release.assets || []).forEach(function (a) { if (a && typeof a.name === 'string' && typeof a.browser_download_url === 'string') { assets[a.name] = a.browser_download_url; } });
       var manifestName = mine.name + '-update.json', zxpName = mine.name + '.zxp';
-      if (!assets[manifestName] || !assets[zxpName]) {
-        return { status: 'manual', version: version, message: 'The release has no ' + manifestName + ' and ' + zxpName + '.' };
-      }
-      var plan = me.target(mine);
-      if (plan.problem) { return { status: plan.problem, version: version }; }
-      if (!ed25519Works()) { return { status: 'manual', version: version, message: 'This Premiere\'s Node can\'t check an Ed25519 signature.' }; }
+      // Until a manifest signed with the release key names this version, nothing about this release is believed or
+      // shown: not its version, not whether it can be installed here.
+      var unverified = function (why) { return problem('unverified', why); };
+      if (!assets[manifestName]) { throw unverified('The latest release has no signed manifest.'); }
+      if (!ed25519Works()) { throw unverified('This Premiere\'s Node can\'t check an Ed25519 signature.'); }
       return getText(assets[manifestName], { policy: me.policy, accept: 'application/octet-stream', max: LIMITS.manifest, totalMs: LIMITS.apiMs }).then(function (text) {
         var signed;
-        try { signed = openManifest(text, me.keys); } catch (e) { e.version = version; throw e; }
+        try { signed = openManifest(text, me.keys); } catch (e) { throw unverified(e.message); }
         var why = signed.bundleId !== mine.bundleId ? 'is for ' + signed.bundleId
           : signed.version !== version ? 'says ' + signed.version + ', and the release is ' + version
           : signed.file !== zxpName ? 'names ' + signed.file
           : compareVersions(signed.version, mine.version) <= 0 ? 'isn\'t newer than ' + mine.version : null;
-        if (why) { throw problem('rejected', 'The signed manifest ' + why + '.', { version: version }); }
+        if (why) { throw unverified('The signed manifest ' + why + '.'); }
+        // From here on, the version is one the release key signed.
+        if (!assets[zxpName]) { return { status: 'manual', version: version, message: 'The release has no ' + zxpName + '.' }; }
+        var plan = me.target(mine);
+        if (plan.problem) { return { status: plan.problem, version: version }; }
         progress({ status: 'downloading', version: version });
         var work = nodePath.join(me.dir, 'work-' + process.pid + '-' + me.now());
         F.mkdirSync(work, { recursive: true, mode: 448 });
@@ -600,7 +632,7 @@
       F.chmodSync(engine, 493);
       // Nothing here removes quarantine. If macOS marked the files, the package is the honest way in.
       return run(me.execFile, '/usr/bin/xattr', ['-p', 'com.apple.quarantine', engine], 10000).then(function (q) {
-        if (q.ok) { throw problem('blocked', 'macOS quarantined the downloaded engine.'); }
+        if (q.ok) { throw problem('quarantined', 'macOS quarantined the downloaded engine.'); }
         return run(me.execFile, engine, ['version'], LIMITS.engineMs);
       }).then(function (v) {
         if (!v.ok || v.stdout.trim() !== signed.version) { throw problem('rejected', 'The new engine didn\'t run' + (v.ok ? ' as version ' + signed.version : '') + '.'); }
@@ -622,11 +654,20 @@
     try {
       if (plan.problem) { throw problem(plan.problem, 'The extension folder changed while the update was downloading.'); }
       var oldXml = me.manifestAt(plan.target) || (mine && mine.xml);
-      me.swap(st.dir, plan.target, st.version);
-      var newXml = me.manifestAt(plan.target);
-      var restart = !plan.here || !oldXml || manifestShape(oldXml) !== manifestShape(newXml);
-      me.save({ ready: { version: st.version, needsPremiereRestart: restart, at: me.now() } });
-      result = { status: 'ready', version: st.version, needsPremiereRestart: restart, here: plan.here };
+      var there = readManifestText(oldXml || '').version;
+      if (there && compareVersions(there, st.version) >= 0) {
+        // Another Premiere put this version, or a newer one, in place since the download. Swapping now would move it into
+        // previous/ over the copy a rollback needs, so the folder is left as it is, and this page can still restart into it.
+        var loaded = me.loadedXml || oldXml;
+        result = { status: 'ready', version: there, needsPremiereRestart: !plan.here || manifestShape(loaded) !== manifestShape(oldXml), here: plan.here };
+      } else {
+        if (!exists(F, nodePath.join(st.dir, 'CSXS', 'manifest.xml'))) { throw problem('failed', 'The downloaded copy was removed before it could be installed. Nothing changed.'); }
+        me.swap(st.dir, plan.target, st.version);
+        var newXml = me.manifestAt(plan.target);
+        var restart = !plan.here || !oldXml || manifestShape(oldXml) !== manifestShape(newXml);
+        me.save({ ready: { version: st.version, needsPremiereRestart: restart, at: me.now() } });
+        result = { status: 'ready', version: st.version, needsPremiereRestart: restart, here: plan.here };
+      }
     } catch (e) {
       result = { status: e.status || 'failed', version: st.version, message: e.message, rolledBack: !!e.rolledBack };
     }
@@ -651,6 +692,9 @@
 
   // Two renames in one volume: the old folder aside, the new one in. If the second fails, or the result doesn't read
   // as the new version, the old one goes back. The previous copy stays in the support folder for a manual rollback.
+  // install() calls this only when the folder holds an older version, so previous/ is always the one before.
+  // Not handled: the Mac stopping between the two renames. The extensions folder then has no Select at all, and the
+  // old copy is whole in previous/: PACKAGING.md's rollback steps move it back, or Select.pkg installs again.
   Updater.prototype.swap = function (staged, target, version) {
     var F = this.F, previous = this.previousDir(nodePath.basename(target)), aside = false;
     F.mkdirSync(nodePath.dirname(previous), { recursive: true, mode: 448 });
@@ -698,7 +742,6 @@
     '#menu button[data-update="auto"][aria-checked="true"]::after { visibility: visible; }'
   ].join('\n');
 
-  var RELEASES = 'https://github.com/' + REPO + '/releases/latest';
   var SCAN_AFTER = 'select.update.scanAfterRestart';
 
   // testing: the Updater's test-only options. The panel itself never passes any.
@@ -708,7 +751,9 @@
     if (!line || !check || !auto || typeof app.extensionRoot !== 'function') { return null; }
     var busy = function () {
       var s = app.state || {};
-      if (s.busy) { return 'write'; }
+      // A Premiere call past its deadline can still land, and a write's batch that lands late goes into its Undo record.
+      // A reload before then would lose that, so it counts as a write until Premiere answers.
+      if (s.busy || s.hostLate > 0) { return 'write'; }
       if (s.listing || (s.scan && s.scan.handle)) { return 'scan'; }
       if (s.modalOpen) { return 'panel'; }
       return null;
@@ -758,7 +803,7 @@
         var a = doc.createElement('button');
         a.className = 'link';
         a.textContent = 'Get it';
-        a.onclick = function () { if (win.cep && win.cep.util && win.cep.util.openURLInDefaultBrowser) { win.cep.util.openURLInDefaultBrowser(RELEASES); } };
+        a.onclick = function () { if (win.cep && win.cep.util && win.cep.util.openURLInDefaultBrowser) { win.cep.util.openURLInDefaultBrowser(words.link); } };
         line.appendChild(a);
       }
       line.hidden = false;
@@ -856,6 +901,5 @@
   pure.openManifest = openManifest;
   pure.ed25519Works = ed25519Works;
   pure.attach = attach;
-  pure.RELEASES = RELEASES;
   return pure;
 });

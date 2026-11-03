@@ -6,8 +6,8 @@
 # ~/.config/skyfallstatus/signing. The steps are in docs/RELEASING.md.
 #
 # A mistake here reaches every tester, and a bad signature fails quietly: the panel just isn't there. So this refuses a
-# changed tree, a version that isn't higher than the last, private words, and anything unsigned, and looks at GitHub,
-# read-only, only on a real run.
+# changed tree, a version that isn't higher than the last, an update key the copies already installed don't trust,
+# private words, and anything unsigned, and looks at GitHub, read-only, only on a real run.
 set -e -o pipefail
 cd "${0:A:h}/.."
 refuse() { print -u2 -- "$1"; exit 1 }
@@ -33,8 +33,28 @@ fi
 for tool in ffmpeg ffprobe node; do
   command -v $tool >/dev/null || refuse "$tool isn't installed, so tests would be skipped. A release runs all of them."
 done
-# Before the long part: installed copies only take a release signed with the key they carry.
+# Before the long part: installed copies only take a release signed with the key they carry. That's the key in this
+# panel for the copies this release installs, and the key in the last release's panel for every copy already out there.
 node scripts/sign-update.js check-key || refuse "Without the update key, installed copies couldn't update to this release."
+if (( DRY )); then
+  # No GitHub on a dry run: the newest release tag here stands in for the last release.
+  LAST=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -1)
+  LAST_REF=$LAST
+elif [[ -n $LAST ]]; then
+  # The tag as GitHub has it for $REPO, read-only and without making a local tag: a local one could be a rehearsal's.
+  git fetch --quiet --no-tags "https://github.com/$REPO.git" "refs/tags/$LAST" || refuse "Can't fetch $LAST from GitHub, so can't check the key the copies installed from it carry."
+  LAST_REF=FETCH_HEAD
+fi
+if [[ -n $LAST ]]; then
+  if git cat-file -e "$LAST_REF:panel/client/update.js" 2>/dev/null; then
+    OLD_PANEL=$(mktemp -d)
+    git show "$LAST_REF:panel/client/update.js" > $OLD_PANEL/update.js
+    node scripts/sign-update.js check-key $OLD_PANEL/update.js || { rm -rf $OLD_PANEL; refuse "Copies installed from $LAST couldn't update to this release: the panel they carry doesn't trust this update key."; }
+    rm -rf $OLD_PANEL
+  else
+    print "$LAST has no updater, so no copy installed from it checks the update key."
+  fi
+fi
 scripts/test.sh
 scripts/privacy-scan.sh
 scripts/build-panel.sh

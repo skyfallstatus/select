@@ -221,13 +221,23 @@ test('the words: automatic checks speak only when there is something to do', () 
   const ready = U.lineFor({ status: 'ready', version: '0.2.0' }, 'Select', false);
   assert.deepEqual(ready, { text: 'Select 0.2 is ready.', restart: true });
   assert.equal(U.lineFor({ status: 'ready', version: '0.2.0', needsPremiereRestart: true }, 'Select', false).text, 'Select 0.2 is ready. Restart Premiere to use it.');
-  for (const status of ['checking', 'downloading', 'current', 'offline', 'rejected', 'failed', 'waiting', 'dev', 'off']) {
+  for (const status of ['checking', 'downloading', 'current', 'offline', 'rejected', 'failed', 'waiting', 'dev', 'off', 'unverified']) {
     assert.equal(U.lineFor({ status, version: '0.2.0', running: '0.1.0' }, 'Select', false), null, status);
   }
+  // An unsigned release gets one plain sentence, on a check by hand only, and its version isn't in it.
+  assert.deepEqual(U.lineFor({ status: 'unverified', message: 'The latest release has no signed manifest.' }, 'Select', true),
+    { text: 'No verified update is available.', detail: 'The latest release has no signed manifest.' });
+  // A line with a link links to that release's own page, never to releases/latest.
+  for (const status of ['manual', 'blocked', 'quarantined']) {
+    assert.equal(U.lineFor({ status, version: '0.2.0' }, 'Select', false).link, 'https://github.com/skyfallstatus/select/releases/tag/v0.2.0', status);
+    assert.equal(U.lineFor({ status }, 'Select', false), null, status + ' with no version says nothing');
+  }
+  assert.equal(U.lineFor({ status: 'quarantined', version: '0.2.0' }, 'Select', false).text, 'Select 0.2 is out, but macOS quarantined the download, so it wasn\'t installed. Install it with Select.pkg.');
+  assert.equal(U.releasePage('0.2.0'), 'https://github.com/skyfallstatus/select/releases/tag/v0.2.0');
+  assert.equal(U.releasePage('../x'), null);
   assert.equal(U.lineFor({ status: 'current', running: '0.1.0' }, 'Select', true).text, 'Select 0.1 is the latest version.');
   assert.equal(U.lineFor({ status: 'offline' }, 'Select', true).text, 'Couldn\'t reach GitHub. Try again later.');
   assert.equal(U.lineFor({ status: 'waiting', version: '0.2.0', busy: 'scan' }, 'Select', true).text, 'Select 0.2 is downloaded. It installs as soon as this scan ends.');
-  assert.ok(U.lineFor({ status: 'blocked', version: '0.2.0' }, 'Select', false).link);
 });
 
 // ---------------------------------------------------------------- end to end
@@ -273,12 +283,13 @@ test('the same version, or an older one, is left alone and nothing is downloaded
   assert.equal((await m.u.check({ manual: true })).status, 'current', 'a draft is never an update');
 });
 
-test('a bad signature is refused before the zxp is fetched', async () => {
+test('a bad signature is refused before the zxp is fetched, and the release is never named', async () => {
   const m = mac();
   const zxp = makeZxp('0.2.0');
   publish('0.2.0', { zxp, sign: { key: other } });
   const r = await m.u.check({ manual: true });
-  assert.equal(r.status, 'rejected');
+  assert.equal(r.status, 'unverified');
+  assert.equal(r.version, null);
   assert.match(r.message, /key this version doesn't know/);
   assert.deepEqual(server.downloads(), ['/asset/Select-update.json']);
   assert.equal(versionAt(m.target), '0.1.0');
@@ -286,7 +297,7 @@ test('a bad signature is refused before the zxp is fetched', async () => {
   // The right key id, the payload changed after signing.
   publish('0.2.0', { zxp, sign: { tamper: p => { p.size += 1; } } });
   const t = await m.u.check({ manual: true });
-  assert.equal(t.status, 'rejected');
+  assert.equal(t.status, 'unverified');
   assert.match(t.message, /signature doesn't verify/);
   assert.deepEqual(server.downloads(), ['/asset/Select-update.json']);
   assert.equal(versionAt(m.target), '0.1.0');
@@ -323,7 +334,7 @@ test('the wrong bundle id is refused, signed or inside the zxp', async () => {
   let m = mac();
   publish('0.2.0', { sign: { bundleId: 'com.example.other' } });
   let r = await m.u.check({ manual: true });
-  assert.equal(r.status, 'rejected');
+  assert.equal(r.status, 'unverified', 'a manifest signed for another panel says nothing about this one');
   assert.match(r.message, /is for com\.example\.other/);
 
   m = mac();
@@ -337,27 +348,31 @@ test('the wrong bundle id is refused, signed or inside the zxp', async () => {
 });
 
 test('versions that disagree are refused: tag, signed manifest, zxp manifest, engine', async () => {
+  // A signed manifest that doesn't name this release verifies nothing about it. The rest come after it did.
   const cases = [
-    [{ sign: { version: '0.3.0' } }, /says 0\.3\.0, and the release is 0\.2\.0/],
-    [{ ext: { manifestVersion: '0.3.0' } }, /manifest says 0\.3\.0, and the signed version is 0\.2\.0/],
-    [{ ext: { engineVersion: '0.1.0' } }, /engine didn't run/],
-    [{ ext: { signed: false } }, /isn't signed for Adobe/],
-    [{ sign: { file: 'Other.zxp' } }, /names Other\.zxp/]
+    [{ sign: { version: '0.3.0' } }, /says 0\.3\.0, and the release is 0\.2\.0/, 'unverified'],
+    [{ ext: { manifestVersion: '0.3.0' } }, /manifest says 0\.3\.0, and the signed version is 0\.2\.0/, 'rejected'],
+    [{ ext: { engineVersion: '0.1.0' } }, /engine didn't run/, 'rejected'],
+    [{ ext: { signed: false } }, /isn't signed for Adobe/, 'rejected'],
+    [{ sign: { file: 'Other.zxp' } }, /names Other\.zxp/, 'unverified']
   ];
-  for (const [o, why] of cases) {
+  for (const [o, why, status] of cases) {
     const m = mac();
     publish('0.2.0', o);
     const r = await m.u.check({ manual: true });
-    assert.equal(r.status, 'rejected', JSON.stringify(o));
+    assert.equal(r.status, status, JSON.stringify(o));
     assert.match(r.message, why);
     assert.equal(versionAt(m.target), '0.1.0');
     assert.deepEqual(leftovers(m), []);
   }
-  // A signed manifest for an older version, replayed under a newer tag, is refused as well.
+  // A signed manifest for an older version, replayed under a newer tag, is refused as well, and 0.4 is never named.
   const m = mac({ version: '0.3.0' });
   const old = makeZxp('0.2.0');
   publish('0.4.0', { zxp: old, manifest: signed(old, '0.2.0') });
-  assert.equal((await m.u.check({ manual: true })).status, 'rejected');
+  const r = await m.u.check({ manual: false });
+  assert.equal(r.status, 'unverified');
+  assert.equal(U.lineFor(r, 'Select', false), null);
+  assert.deepEqual(server.downloads(), ['/asset/Select-update.json']);
 });
 
 test('a redirect off the allowed hosts is refused', async () => {
@@ -395,13 +410,64 @@ test('the network down, a server error, or nonsense: nothing changes', async () 
   assert.equal(versionAt(m.target), '0.1.0');
 });
 
-test('a release without the signed manifest asks for the package, and installs nothing', async () => {
+// The review's forged releases: anyone who can make a release, or an asset host that answers for one, must not be able to
+// make an installed copy announce a version.
+test('a release with no signed manifest says nothing on its own, and "no verified update" when asked', async () => {
+  for (const without of ['Select-update.json', 'both']) {
+    const m = mac();
+    if (without === 'both') { server.release = { tag: '9.9.9', assets: {} }; server.log = []; } else { publish('0.2.0', { without }); }
+    const r = await m.u.check({ manual: false });
+    assert.equal(r.status, 'unverified', without);
+    assert.equal(r.version, null);
+    assert.equal(U.lineFor(r, 'Select', false), null, 'an automatic check shows nothing');
+    assert.deepEqual(server.downloads(), []);
+    assert.equal(versionAt(m.target), '0.1.0');
+    assert.ok(m.u.load().lastCheck > 0, 'GitHub answered, so it isn\'t asked again until tomorrow');
+    const byHand = await m.u.check({ manual: true });
+    assert.equal(U.lineFor(byHand, 'Select', true).text, 'No verified update is available.');
+    assert.doesNotMatch(JSON.stringify(U.lineFor(byHand, 'Select', true)), /9\.9|0\.2|pkg|releases/);
+  }
+});
+
+test('forged assets on a copy that can\'t replace itself: the manifest is checked first, and nothing is announced', async () => {
   const m = mac();
-  publish('0.2.0', { without: 'Select-update.json' });
+  fs.chmodSync(m.extensions, 0o555);
+  try {
+    server.release = { tag: '9.9.9', assets: { 'Select-update.json': Buffer.from('not signed'), 'Select.zxp': Buffer.from('junk') } };
+    server.log = [];
+    const r = await m.u.check({ manual: false });
+    assert.equal(r.status, 'unverified');
+    assert.equal(r.version, null);
+    assert.equal(U.lineFor(r, 'Select', false), null);
+    assert.deepEqual(server.downloads(), ['/asset/Select-update.json'], 'the junk zxp is never fetched');
+    // A forged manifest signed by another key says the same.
+    const fake = makeZxp('9.9.9');
+    publish('9.9.9', { zxp: fake, sign: { key: other } });
+    const f = await m.u.check({ manual: false });
+    assert.equal(f.status, 'unverified');
+    assert.equal(U.lineFor(f, 'Select', false), null);
+  } finally {
+    fs.chmodSync(m.extensions, 0o755);
+  }
+});
+
+test('a verified release with no zxp asks for the package, linking to that release', async () => {
+  const m = mac();
+  publish('0.2.0', { without: 'Select.zxp' });
   const r = await m.u.check({ manual: false });
   assert.equal(r.status, 'manual');
-  assert.deepEqual(server.downloads(), []);
+  assert.equal(r.version, '0.2.0');
+  assert.deepEqual(server.downloads(), ['/asset/Select-update.json']);
+  assert.deepEqual(U.lineFor(r, 'Select', false), { text: 'Select 0.2 is out. Install it with Select.pkg.', link: 'https://github.com/skyfallstatus/select/releases/tag/v0.2.0' });
   assert.equal(versionAt(m.target), '0.1.0');
+});
+
+test('key ids that are Object.prototype names are unknown keys, not a crash', () => {
+  for (const id of ['__proto__', 'constructor', 'toString', 'hasOwnProperty', 'valueOf']) {
+    const text = JSON.stringify({ format: 1, key: id, payload: 'e30=', signature: Buffer.alloc(64).toString('base64') });
+    assert.throws(() => U.openManifest(text, KEYS), e => e.status === 'rejected' && /key this version doesn't know/.test(e.message), id);
+    assert.throws(() => U.openManifest(text), e => e.status === 'rejected' && /key this version doesn't know/.test(e.message), id + ', the built-in keys');
+  }
 });
 
 test('a swap that fails half way puts the old version back', async () => {
@@ -519,18 +585,20 @@ test('a development copy is never replaced', async () => {
   publish('0.2.0');
   const r = await m.u.check({ manual: true });
   assert.equal(r.status, 'dev');
-  assert.deepEqual(server.downloads(), []);
+  assert.deepEqual(server.downloads(), ['/asset/Select-update.json'], 'the manifest is checked first, the zxp never fetched');
   assert.equal(versionAt(m.target), '0.1.0');
 });
 
-test('a copy the user can\'t change asks for the package', async () => {
+test('a copy the user can\'t change asks for the package, once its manifest verified', async () => {
   const m = mac();
   fs.chmodSync(path.join(m.target, 'host'), 0o555);
   try {
     publish('0.2.0');
     const r = await m.u.check({ manual: false });
     assert.equal(r.status, 'blocked');
-    assert.deepEqual(server.downloads(), []);
+    assert.equal(r.version, '0.2.0');
+    assert.deepEqual(server.downloads(), ['/asset/Select-update.json']);
+    assert.equal(U.lineFor(r, 'Select', false).link, 'https://github.com/skyfallstatus/select/releases/tag/v0.2.0');
     assert.equal(versionAt(m.target), '0.1.0');
   } finally {
     fs.chmodSync(path.join(m.target, 'host'), 0o755);
@@ -547,10 +615,14 @@ test('a quarantined download is refused and never run', async () => {
   const m = mac({ updater: { execFile } });
   publish('0.2.0');
   const r = await m.u.check({ manual: true });
-  assert.equal(r.status, 'blocked');
+  assert.equal(r.status, 'quarantined');
   assert.match(r.message, /quarantined/);
   assert.deepEqual(runs, ['ditto', 'xattr'], 'the engine never ran');
   assert.equal(versionAt(m.target), '0.1.0');
+  // It says what happened, not that this copy can't replace itself.
+  const words = U.lineFor(r, 'Select', false).text;
+  assert.match(words, /macOS quarantined the download/);
+  assert.doesNotMatch(words, /can't replace itself/);
 });
 
 test('running from another folder (0.1 in /Library): installs for the user, and says restart Premiere', async () => {
@@ -593,6 +665,57 @@ test('two checks at once share one run; another live Premiere holding the lock i
   assert.equal((await m2.u.check({ manual: true })).status, 'ready');
 });
 
+test('the lock: a folder just made is held, a live owner holds it however old, and only a dead or abandoned one is free', () => {
+  const m = mac();
+  const lock = path.join(m.support, 'updates', 'lock');
+  const owner = path.join(lock, 'owner.json');
+  // Another Premiere has just made the folder and hasn't written who it is yet.
+  fs.mkdirSync(lock, { recursive: true });
+  assert.equal(m.u.lock(), false, 'a folder with no owner file yet is held');
+  assert.ok(fs.existsSync(lock));
+  const old = (Date.now() - 3 * 60000) / 1000;
+  fs.utimesSync(lock, old, old);
+  assert.equal(m.u.lock(), true, 'one that stayed without an owner for minutes was abandoned');
+  m.u.unlock();
+  // A live Premiere waiting on a long scan keeps its lock, however long ago it took it.
+  fs.mkdirSync(lock, { recursive: true });
+  fs.writeFileSync(owner, JSON.stringify({ pid: process.ppid, at: Date.now() - 31 * 60000 }));
+  assert.equal(m.u.lock(), false, 'a live owner\'s lock never expires');
+  fs.writeFileSync(owner, JSON.stringify({ pid: process.ppid, at: Date.now() - 10 * U.DAY }));
+  assert.equal(m.u.lockHeld(), true);
+  fs.writeFileSync(owner, JSON.stringify({ pid: 999999, at: Date.now() }));
+  assert.equal(m.u.lockHeld(), false, 'a dead owner\'s lock is free');
+  fs.writeFileSync(owner, '{"pid": "nope"}');
+  fs.utimesSync(lock, old, old);
+  assert.equal(m.u.lockHeld(), false, 'an owner file nobody can read, in an old folder, is free');
+  // This process's own lock, from before a reload, is free once nothing here is using it.
+  fs.writeFileSync(owner, JSON.stringify({ pid: process.pid, at: Date.now() }));
+  assert.equal(m.u.lockHeld(), false);
+  rmLock(m);
+});
+
+const rmLock = m => fs.rmSync(path.join(m.support, 'updates', 'lock'), { recursive: true, force: true });
+
+test('a staged update finds its version already installed by another Premiere: previous/ keeps the one before', async () => {
+  const m = mac();
+  m.setBusy('scan');
+  publish('0.2.0');
+  assert.equal((await m.u.check({ manual: false })).status, 'waiting');
+  // Meanwhile another Premiere installed 0.2.0 the same way: 0.1.0 aside into previous/, 0.2.0 in.
+  const previous = path.join(m.support, 'updates', 'previous', BUNDLE);
+  fs.mkdirSync(path.dirname(previous), { recursive: true });
+  fs.renameSync(m.target, previous);
+  makeExtension(m.target, '0.2.0');
+  m.setBusy(null);
+  const r = await m.u.install();
+  assert.equal(r.status, 'ready');
+  assert.equal(r.version, '0.2.0');
+  assert.equal(versionAt(m.target), '0.2.0');
+  assert.equal(versionAt(previous), '0.1.0', 'the copy a rollback needs is still the previous version');
+  assert.deepEqual(leftovers(m), []);
+  assert.ok(!fs.existsSync(path.join(m.support, 'updates', 'lock')));
+});
+
 test('the settings file can be missing or broken', () => {
   const m = mac();
   assert.equal(m.u.load().automatic, true);
@@ -602,6 +725,93 @@ test('the settings file can be missing or broken', () => {
   assert.equal(m.u.setAutomatic(false), false);
   assert.equal(JSON.parse(fs.readFileSync(path.join(m.support, 'updates', 'state.json'), 'utf8')).automatic, false);
   assert.equal(fs.statSync(path.join(m.support, 'updates', 'state.json')).mode & 0o777, 0o600);
+});
+
+// A rehearsal of the first update points two builds at a throwaway repository. That's REPO in product.conf, which the
+// build stamps into the panel: nobody edits update.js by hand.
+test('the build stamps product.conf\'s REPO into the panel: updates and the bug link follow it', async () => {
+  const root = path.join(__dirname, '..', '..');
+  const dir = fresh('stamp');
+  for (const f of ['CSXS', 'client', 'host']) { fs.cpSync(path.join(root, 'panel', f), path.join(dir, f), { recursive: true }); }
+  const conf = path.join(fresh('conf'), 'product.conf');
+  fs.writeFileSync(conf, fs.readFileSync(path.join(root, 'product.conf'), 'utf8').replace(/^REPO=.*$/m, 'REPO=someone/select-rehearsal').replace(/^VERSION=.*$/m, 'VERSION=0.2.1'));
+  const out = cp.execFileSync('/bin/zsh', [path.join(root, 'scripts', 'stamp-panel.sh'), dir, conf], { timeout: 30000 }).toString();
+  assert.match(out, /updates from someone\/select-rehearsal/);
+  const R = require(path.join(dir, 'client', 'update.js'));
+  assert.equal(R.REPO, 'someone/select-rehearsal');
+  assert.equal(R.releasePage('0.2.1'), 'https://github.com/someone/select-rehearsal/releases/tag/v0.2.1');
+  assert.match(fs.readFileSync(path.join(dir, 'client', 'app.js'), 'utf8'), /var ISSUES_URL = 'https:\/\/github\.com\/someone\/select-rehearsal\/issues\/new';/);
+  assert.equal(U.readManifestText(fs.readFileSync(path.join(dir, 'CSXS', 'manifest.xml'), 'utf8')).version, '0.2.1');
+  assert.match(fs.readFileSync(path.join(dir, 'host', 'select.jsx'), 'utf8'), /^var SELECT_HOST_VERSION = '0\.2\.1';/m);
+  // The stamped panel asks the throwaway repository, and only it.
+  const m = mac();
+  const u = new R.Updater({ root: m.root, isBusy: () => null, ...m.testing });
+  server.release = null;
+  server.log = [];
+  assert.equal((await u.check({ manual: true })).status, 'current');
+  assert.deepEqual(server.log, ['/repos/someone/select-rehearsal/releases/latest']);
+  // The source is left as it was.
+  assert.equal(U.REPO, 'skyfallstatus/select');
+  // A REPO that isn't owner/name is refused before anything is changed.
+  fs.writeFileSync(conf, fs.readFileSync(conf, 'utf8').replace(/^REPO=.*$/m, "REPO='not a repo'"));
+  assert.throws(() => cp.execFileSync('/bin/zsh', [path.join(root, 'scripts', 'stamp-panel.sh'), dir, conf], { timeout: 30000, stdio: 'pipe' }), /should look like owner\/name/);
+});
+
+// release.sh, dry run, in a throwaway repository: only the steps up to the key checks are real. scripts/test.sh is a
+// stub that stops the run there, so nothing long runs, nothing is built or signed, and nothing reaches GitHub.
+test('release.sh refuses an update key the last release\'s panel doesn\'t trust', () => {
+  const root = path.join(__dirname, '..', '..');
+  const keyA = crypto.generateKeyPairSync('ed25519'), keyB = crypto.generateKeyPairSync('ed25519');
+  const line = k => `  var KEYS = { '${SIGN.keyId(k.publicKey)}': '${k.publicKey.export({ type: 'spki', format: 'der' }).toString('base64')}' };`;
+  const pem = path.join(fresh('key'), 'update.pem');
+  fs.writeFileSync(pem, keyB.privateKey.export({ type: 'pkcs8', format: 'pem' }), { mode: 0o600 });
+  const bin = fresh('bin');
+  for (const tool of ['ffmpeg', 'ffprobe']) { fs.writeFileSync(path.join(bin, tool), '#!/bin/sh\nexit 0\n', { mode: 0o755 }); }
+  const panel = fs.readFileSync(path.join(root, 'panel', 'client', 'update.js'), 'utf8');
+  assert.match(panel, /^  var KEYS = \{.*\};$/m);
+  const withKey = k => panel.replace(/^  var KEYS = \{.*\};$/m, line(k));
+
+  function repo(tagged) {
+    const dir = fresh('repo');
+    const put = (rel, text, mode) => { fs.mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true }); fs.writeFileSync(path.join(dir, rel), text, { mode: mode || 0o644 }); };
+    const git = (...args) => cp.execFileSync('/usr/bin/git', ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', '-c', 'commit.gpgsign=false', '-c', 'tag.gpgsign=false', ...args], { cwd: dir, timeout: 30000, stdio: 'pipe' });
+    put('product.conf', fs.readFileSync(path.join(root, 'product.conf'), 'utf8').replace(/^VERSION=.*$/m, 'VERSION=0.1.5'));
+    put('scripts/release.sh', fs.readFileSync(path.join(root, 'scripts', 'release.sh')), 0o755);
+    put('scripts/sign-update.js', fs.readFileSync(path.join(root, 'scripts', 'sign-update.js')), 0o755);
+    put('scripts/test.sh', '#!/bin/zsh\nprint "STUB: the key checks passed"\nexit 7\n', 0o755);
+    if (tagged) { put('panel/client/update.js', tagged); }
+    git('init', '-q', '-b', 'main');
+    git('add', '-A');
+    git('commit', '-q', '-m', 'last release');
+    git('tag', 'v0.1.5');
+    put('panel/client/update.js', withKey(keyB));
+    put('product.conf', fs.readFileSync(path.join(dir, 'product.conf'), 'utf8').replace(/^VERSION=.*$/m, 'VERSION=0.2.0'));
+    git('add', '-A');
+    git('commit', '-q', '-m', 'this release');
+    return dir;
+  }
+  function dryRun(dir) {
+    const r = cp.spawnSync('/bin/zsh', [path.join(dir, 'scripts', 'release.sh'), '--dry-run'], {
+      cwd: dir, timeout: 60000, encoding: 'utf8',
+      env: { HOME: process.env.HOME, PATH: [bin, path.dirname(process.execPath), '/usr/bin', '/bin'].join(':'), ZXP_CERT: 'unused', ZXP_PASSWORD: 'unused', SELECT_UPDATE_KEY: pem, GIT_CONFIG_NOSYSTEM: '1' }
+    });
+    assert.equal(r.error, undefined);
+    return { code: r.status, out: r.stdout + r.stderr };
+  }
+
+  // Copies installed from v0.1.5 trust key A, and this release would be signed with key B.
+  let r = dryRun(repo(withKey(keyA)));
+  assert.notEqual(r.code, 0);
+  assert.match(r.out, /Copies installed from v0\.1\.5 couldn't update to this release/);
+  assert.doesNotMatch(r.out, /STUB/, 'refused before the long part');
+  // The same key in both: on to the tests.
+  r = dryRun(repo(withKey(keyB)));
+  assert.equal(r.code, 7, r.out);
+  assert.match(r.out, /STUB: the key checks passed/);
+  // A last release with no updater has no key to keep.
+  r = dryRun(repo(null));
+  assert.equal(r.code, 7, r.out);
+  assert.match(r.out, /v0\.1\.5 has no updater/);
 });
 
 // The real thing, when a release has been built here: Adobe's ZXP layout, its signature file and the real engine.
@@ -748,6 +958,37 @@ test('the panel: Restart waits for a scan, and an automatic install speaks once'
   assert.equal(p.reloads.length, 1);
   // Told once: the same news again stays quiet.
   assert.equal(u.tellOnce('ready 0.2.0'), false);
+});
+
+test('the panel: a Premiere call past its deadline counts as a write, for Restart, a scan after an install, and installing', async () => {
+  const m = mac();
+  const state = { scan: null, busy: null, listing: false, modalOpen: false, hostLate: 0 };
+  const p = fakePanel(m, state);
+  const u = U.attach(p.win, p.doc, m.testing);
+  publish('0.2.0');
+  // A write's last batch missed its deadline: the write is over, but Premiere may still answer with what it changed.
+  state.hostLate = 1;
+  p.click(p.check);
+  await u.inFlight;
+  await settle();
+  assert.equal(versionAt(m.target), '0.1.0', 'nothing is swapped while the late batch may still land');
+  assert.match(p.els['update-line'].words, /installs as soon as this write ends/);
+  state.hostLate = 0;
+  p.timers.filter(t => !t.once && t.ms === 5000).pop().f();
+  await settle(); await settle();
+  assert.equal(versionAt(m.target), '0.2.0');
+  assert.equal(p.els['update-line'].words, 'Select 0.2 is ready. | Restart');
+  // Late again: Restart is off and does nothing, and Scan doesn't reload into the new version.
+  state.hostLate = 2;
+  p.timers.find(t => !t.once && t.ms === 1000).f();
+  const restart = p.els['update-line'].kids[1];
+  assert.equal(restart.disabled, true);
+  restart.onclick();
+  assert.equal(p.click(p.els.scan).stopped, false, 'the scan click goes on to the panel, which refuses it itself');
+  assert.equal(p.reloads.length, 0, 'no reload while a late answer is due');
+  state.hostLate = 0;
+  restart.onclick();
+  assert.equal(p.reloads.length, 1);
 });
 
 test('the panel stays out of the way where Node is missing, as in the browser harness', () => {
