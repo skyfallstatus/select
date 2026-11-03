@@ -1586,6 +1586,18 @@ async function main() {
     await setItems(b, 400);
     await resetView(b);
 
+    // -------- a project opened after the panel started (a docked panel opens with Premiere, before any project)
+    const keep = await b.evalIn(`JSON.stringify(__mock.project)`);
+    await b.evalIn(`__mock.project=null`);
+    await sleep(1600);
+    await b.evalIn(`window.dispatchEvent(new Event('focus'))`);
+    await b.waitFor(`SelectApp.state.project===null`, 'project gone', 5000);
+    await b.evalIn(`__mock.project=${keep}`);
+    await sleep(1600);
+    await b.evalIn(`window.dispatchEvent(new Event('focus'))`);
+    const seen = await b.waitFor(`!!SelectApp.state.project`, 'project seen', 5000).then(() => true, () => false);
+    check('a project opened after the panel started is noticed when the panel is used again', seen && (await b.evalIn(`SelectApp.state.project.path`)) === JSON.parse(keep).path);
+
     // -------- the panel sends nothing
     const outside = b.requests.filter(u => !/^(file|data|about|blob):/.test(u));
     check('the panel made no network request in the whole run', outside.length === 0, outside.slice(0, 5));

@@ -132,6 +132,21 @@
     });
   }
 
+  // Premiere can open a project after the panel starts: a panel docked in the workspace opens with Premiere, before any
+  // project. So the panel asks again whenever it's used: on focus, on a click, and when it comes into view. At most every
+  // 1.5 s, and never while a write, a listing or a late call is talking to Premiere.
+  var lastAsked = 0;
+  function askAgain() {
+    var now = Date.now();
+    if (now - lastAsked < 1500 || S.busy || S.listing || S.hostLate || S.modalOpen) { return; }
+    lastAsked = now;
+    var before = S.project ? S.project.path : null;
+    refreshProject().then(function () {
+      var after = S.project ? S.project.path : null;
+      if (before !== after && !$('menu').hidden) { openMenu(); }
+    }, function () {});
+  }
+
   // ---------------------------------------------------------------- header
 
   function projectTitle(project) {
@@ -1863,6 +1878,9 @@
     applyView();
     if (mode === 'grid') { setMode('grid'); }
     ensureHost().then(refreshProject);
+    window.addEventListener('focus', askAgain);
+    document.addEventListener('visibilitychange', function () { if (!document.hidden) { askAgain(); } });
+    document.addEventListener('mousedown', askAgain, true);
   }
 
   // For the tests and for the integration pass, through the DevTools port.

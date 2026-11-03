@@ -158,6 +158,29 @@ const inExtensions = m => fs.readdirSync(m.extensions).filter(f => f !== '.DS_St
 
 // ---------------------------------------------------------------- the pure parts
 
+// Inside Premiere, update.js runs in the page, so URL is the page's and Node doesn't recognise it as a URL. Given one, Node
+// 17 read the options as the callback and threw "The listener argument must be of type function" (found in Premiere 26.5).
+test('a check works with the page\'s own URL, as inside Premiere', async () => {
+  const NodeURL = globalThis.URL;
+  class PageURL {
+    constructor(u, b) { const x = new NodeURL(u, b); for (const k of ['href', 'protocol', 'host', 'hostname', 'port', 'pathname', 'search', 'hash', 'origin', 'username', 'password']) { this[k] = x[k]; } }
+    toString() { return this.href; }
+  }
+  // Node 17, as in Premiere, takes a string or its own URL; newer Node also takes anything shaped like one. Act as 17 does.
+  const mods = [require('http'), require('https')], real = mods.map(m => m.request);
+  mods.forEach((m, i) => { m.request = function (input) {
+    if (typeof input !== 'string' && !(input instanceof NodeURL)) { throw new TypeError('The "listener" argument must be of type function. Received an instance of Object'); }
+    return real[i].apply(this, arguments);
+  }; });
+  globalThis.URL = PageURL;
+  try {
+    const m = mac();
+    publish('0.2.0');
+    const r = await m.u.check({ manual: true });
+    assert.equal(r.status, 'ready', r.message);
+  } finally { globalThis.URL = NodeURL; mods.forEach((m, i) => { m.request = real[i]; }); }
+});
+
 test('versions compare as numbers, and anything else is refused', () => {
   assert.equal(U.compareVersions('0.10.0', '0.9.9'), 1);
   assert.equal(U.compareVersions('v0.2.0', '0.2.0'), 0);

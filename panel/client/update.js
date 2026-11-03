@@ -221,7 +221,8 @@
         if (!allowedUrl(u, o.policy)) { return stop(problem('rejected', 'Refused to fetch from ' + safeHost(u) + '.')); }
         var parsed = new URL(u);
         var mod = parsed.protocol === 'https:' ? mods.https : mods.http;
-        var request = mod.request(parsed, { method: 'GET', agent: false, headers: { 'User-Agent': 'Select', 'Accept': o.accept } }, function (res) {
+        // The address goes as text: inside Premiere, URL is the page's, which Node 17 doesn't take as a URL.
+        var request = mod.request(u, { method: 'GET', agent: false, headers: { 'User-Agent': 'Select', 'Accept': o.accept } }, function (res) {
           var code = res.statusCode;
           if (code === 301 || code === 302 || code === 303 || code === 307 || code === 308) {
             res.resume();
