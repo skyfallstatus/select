@@ -1,6 +1,6 @@
 # Select beta: a note for testers
 
-Thank you for trying this. Select is a Premiere Pro panel that looks at every clip you give it and lets you sort them in seconds: softest first, darkest, most clipped, silent, near duplicates. You're among the first people to use it, which is the point, and also why this page exists.
+Thank you for trying this. Select is a Premiere Pro panel that looks at every clip you give it and lets you sort and search them in seconds: softest first, darkest, people, close-ups, speech, music, similar shots, and every clip by colour. Everything happens on your Mac. You're among the first people to use it, which is the point, and also why this page exists.
 
 ## Download
 
@@ -17,7 +17,8 @@ Get **Select.pkg** from the [latest release](https://github.com/skyfallstatus/se
 2. Quit Premiere if it's open, then open it again. Select is under **Window › Extensions**.
 3. Open a project you know well. Choose **Selection**, **Project** or **Folder**, and press **Scan**.
 4. Try the sorts. Soft clips, dark clips, clipped clips, silent clips. Do the clips at the top deserve to be there? Did a clip you know is bad stay down in the list?
-5. Try it on a big shoot, a messy one, and a mix of cameras.
+5. Try search and the grid. Look for something you know you shot. Sort by colour. Look at Similar shots on a day with lots of takes.
+6. Try it on a big shoot, a messy one, and a mix of cameras.
 
 ## Which Mac, which Premiere
 
@@ -40,7 +41,12 @@ Please don't throw a clip away because Select put it at the bottom. It looks at 
 - Sharpness finds soft clips. It doesn't rank in-focus ones, and it reads one frame per clip.
 - Motion is a stand-in, and it's weak on all-intra footage.
 - Most clipped can do little on log footage, because log rarely clips.
-- Near duplicates hasn't been tested on real repeated takes. If you shoot lots of takes, your footage is especially useful here.
+- Similar shots was checked on one set of real repeated takes: 31 of 33 groups were true repeats, and the misses were flat textures. It only compares clips in the same folder. Near duplicates is much stricter, and found 2 pairs where Similar shots found 45 groups. If you shoot lots of takes, your footage is especially useful here.
+- Labels are often right and sometimes odd, and art gets taken literally. Treat them as a way to find things, not as facts.
+- Text on screen finds about half of what's readable, and about two words in five are misreads.
+- People undercounts crowds and misses people in the dark. Close-ups are rarely called.
+- Speech and music come from six seconds of sound, so anything elsewhere in the clip can be missed.
+- Shake needs a gyro in the file. So far that means Sony clips, and not their 100 fps modes.
 - Camera and lens depend on sidecar files.
 - MP4 and MOV work on their own, MXF needs [ffmpeg](https://ffmpeg.org), and RED and BRAW don't work yet.
 
@@ -56,6 +62,8 @@ The most useful things to hear about:
 - Whether the install steps worked as written, and anything macOS said that isn't described here.
 - A clip that clearly sits in the wrong place in a sort.
 - Blank scores, with the message, and the camera and recording format.
+- Labels, faces or words that are clearly wrong, and shots it should have grouped and didn't.
+- What ISO, shutter, aperture and shake look like on anything that isn't Sony.
 - How long a scan took and how many clips it had, if it felt slow.
 - Anything in a write that surprised you, or an Undo that didn't put things back.
 - Any message you didn't understand, or anything that made you hesitate.

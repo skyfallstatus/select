@@ -18,6 +18,21 @@ ffmpeg
   to read formats that macOS can't. It isn't bundled, and the tests use it to make
   tiny clips. https://ffmpeg.org
 
+ExifTool by Phil Harvey
+  Used in the tests, when it's installed, to check the engine's reading of Sony's rtmd
+  data track. Its published tag tables were the reference for that track's layout.
+  None of its code is in Select. https://exiftool.org
+
+Oklab by Bjorn Ottosson
+  The colour space the engine measures dominant colours in. The published matrices are
+  used. https://bottosson.github.io/posts/oklab/
+
+Sony S-Log3 and S-Gamut3.Cine
+  The engine uses Sony's published curve and primaries to read log footage.
+
+Apple Vision and SoundAnalysis
+  The models that label pictures and sounds ship with macOS and run on the Mac.
+
 Adobe ZXPSignCmd
   Used by the maintainer to sign the panel. It isn't bundled.
   https://github.com/Adobe-CEP/CEP-Resources

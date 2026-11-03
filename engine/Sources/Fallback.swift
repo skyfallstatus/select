@@ -37,6 +37,22 @@ private let childSlots: UnsafeMutablePointer<pid_t> = {
 
 private let slotLock = NSLock()
 
+/// Which thread started each child, so a stuck clip's ffmpeg can be stopped on its own.
+private let childThreads: UnsafeMutablePointer<UInt32> = {
+    let p = UnsafeMutablePointer<UInt32>.allocate(capacity: 16)
+    p.initialize(repeating: 0, count: 16)
+    return p
+}()
+
+func currentThreadID() -> UInt32 { pthread_mach_thread_np(pthread_self()) }
+
+/// Stops the tool a given thread is running, if any.
+func stopChild(ofThread thread: UInt32) {
+    slotLock.lock()
+    defer { slotLock.unlock() }
+    for i in 0..<16 where childSlots[i] > 0 && childThreads[i] == thread { kill(childSlots[i], SIGKILL) }
+}
+
 /// Must run before a signal handler can, so the handler never builds `childSlots` itself.
 func prepareChildTracking() { _ = childSlots }
 
@@ -81,6 +97,7 @@ private func capture(_ args: [String], timeout: Double = 30) -> Data? {
     slotLock.lock()
     for i in 0..<16 where childSlots[i] == 0 {
         childSlots[i] = pid
+        childThreads[i] = currentThreadID()
         slot = i
         break
     }
@@ -195,6 +212,7 @@ func fallbackTier0(path: String, size: Int64, mtime: Double, reason: String) thr
     plan.hasAudio = !audio.isEmpty
     plan.bitDepth = depth
     plan.formatName = info.displayName
+    plan.isLog = meta.gamma?.lowercased().contains("log") ?? false
     let mbps = duration > 0 ? Double(size) * 8 / duration / 1e6 : nil
     let fields = tier0Fields(path: path, size: size, duration: duration, fps: fps, w: w, h: h, rotation: rotation,
                              info: info, allIntra: nil, mbps: mbps, hasAudio: !audio.isEmpty,
@@ -228,6 +246,29 @@ func fallbackFrame<T>(path: String, plan: ClipPlan, body: (FrameView) -> T) -> T
             body(FrameView(y: yp.baseAddress!, yStride: w, width: w, height: h, uv: up.baseAddress!, uvStride: cw * 2))
         }
     }
+}
+
+/// One moment as BGRA at the given size, for Tier 2, through an ffmpeg process. ffmpeg rotates nothing here, like the decoder.
+func fallbackImage(path: String, at time: Double, width: Int, height: Int) -> Data? {
+    guard let tool = ffmpegPath else { return nil }
+    guard let raw = capture([tool, "-v", "error", "-nostdin", "-noautorotate", "-ss", String(format: "%.3f", max(0, time)), "-i", path,
+                             "-map", "0:v:0", "-frames:v", "1", "-vf", "scale=\(width):\(height)", "-f", "rawvideo", "-pix_fmt", "bgra", "-"]),
+          raw.count == width * height * 4 else { return nil }
+    return raw
+}
+
+/// A few seconds of mono sound through ffmpeg, for clips the direct reader can't take.
+func fallbackMono(path: String, duration: Double) -> MonoAudio? {
+    guard let tool = ffmpegPath, duration > 0 else { return nil }
+    var out = MonoAudio()
+    out.rate = 16000
+    let span = min(2.0, duration / 3)
+    for fraction in [1.0, 3.0, 5.0] {
+        guard let raw = capture([tool, "-v", "error", "-nostdin", "-ss", String(format: "%.3f", max(0, duration * fraction / 6 - span / 2)),
+                                 "-t", String(format: "%.3f", span), "-i", path, "-map", "0:a:0", "-ac", "1", "-ar", "16000", "-f", "f32le", "-"]) else { continue }
+        raw.withUnsafeBytes { out.samples.append(contentsOf: $0.bindMemory(to: Float.self)) }
+    }
+    return out.samples.isEmpty ? nil : out
 }
 
 func fallbackAudioDb(path: String, duration: Double) -> Double? {

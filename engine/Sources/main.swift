@@ -1,3 +1,4 @@
+import CoreVideo
 import Foundation
 
 func log(_ s: String) {
@@ -5,7 +6,7 @@ func log(_ s: String) {
 }
 
 func usage() -> Never {
-    log("usage: \(engineName) scan --paths-file <file|-> [--tier 0|1] [--cache <dir>] [--workers <n>] [--no-thumbs]")
+    log("usage: \(engineName) scan --paths-file <file|-> [--tier 0|1|2] [--cache <dir>] [--workers <n>] [--no-thumbs] [--cache-limit-mb <n>]")
     log("       \(engineName) version | --version")
     exit(2)
 }
@@ -42,10 +43,12 @@ final class Output {
 
 struct Options {
     var pathsFile = ""
-    var tier = 1
+    var tier = 2
     var cacheDir = NSString(string: "~/Library/Caches/\(bundleId)").expandingTildeInPath
     var workers: Int?
     var thumbs = true
+    /// The cache is kept under this many bytes, oldest first. 2 GB holds about 50,000 clips.
+    var cacheLimit: Int64 = 2 << 30
 }
 
 func parseOptions(_ a: [String]) -> Options {
@@ -60,13 +63,16 @@ func parseOptions(_ a: [String]) -> Options {
         switch a[i] {
         case "--paths-file": o.pathsFile = value()
         case "--tier":
-            guard let t = Int(value()), t == 0 || t == 1 else { usage() }
+            guard let t = Int(value()), (0...2).contains(t) else { usage() }
             o.tier = t
         case "--cache": o.cacheDir = NSString(string: value()).expandingTildeInPath
         case "--workers":
             guard let n = Int(value()), n > 0, n <= 128 else { usage() }
             o.workers = n
         case "--no-thumbs": o.thumbs = false
+        case "--cache-limit-mb":
+            guard let n = Int64(value()), n >= 1 else { usage() }
+            o.cacheLimit = n << 20
         default: usage()
         }
         i += 1
@@ -94,6 +100,12 @@ final class Trace {
     private let lock = NSLock()
     let path = ProcessInfo.processInfo.environment["ENGINE_TRACE"]
     var routes: [String: Int] = [:]
+    var totals: [String: Double] = [:]
+    func add(_ name: String, _ ms: Double) {
+        lock.lock()
+        totals[name, default: 0] += ms
+        lock.unlock()
+    }
     func route(_ r: String) {
         lock.lock()
         routes[r, default: 0] += 1
@@ -112,30 +124,6 @@ final class Trace {
 }
 
 let trace = Trace()
-
-func runWorkers(_ count: Int, items: Int, _ body: @escaping (Int) -> Void) {
-    let lock = NSLock()
-    var next = 0
-    let group = DispatchGroup()
-    for _ in 0..<min(count, max(items, 1)) {
-        group.enter()
-        let t = Thread {
-            while true {
-                lock.lock()
-                let i = next
-                next += 1
-                lock.unlock()
-                if i >= items { break }
-                body(i)
-            }
-            group.leave()
-        }
-        t.qualityOfService = .userInitiated
-        t.stackSize = 1 << 20
-        t.start()
-    }
-    group.wait()
-}
 
 struct Tier1Timing {
     var read = 0.0, decode = 0.0, analyze = 0.0, audio = 0.0, thumb = 0.0
@@ -156,22 +144,26 @@ func noPictureReason(_ plan: ClipPlan, _ why: DecodeFailure?) -> String {
 }
 
 /// `remember` is false for a result that installing ffmpeg would change.
-func tier1(path: String, plan: ClipPlan, pool: DecoderPool, thumbPath: String?) throws -> (fields: String, timing: Tier1Timing, remember: Bool) {
+func tier1(path: String, plan: ClipPlan, pool: DecoderPool, thumbPath: String?, shrinker: FrameShrinker?) throws
+    -> (fields: String, timing: Tier1Timing, remember: Bool, middle: CVPixelBuffer?, isLog: Bool) {
     var timing = Tier1Timing()
     let file = try MediaFile(path: path)
     var metrics: Metrics?
     var refused: DecodeFailure?
+    var middle: CVPixelBuffer?
     var t = now()
+    let isLog = plan.isLog || (plan.rtmd.map { rtmdSaysLog($0, file: file) } ?? false)
     if let v = plan.video, !plan.fallback {
         let sample = try file.read(at: v.offset, count: v.size)
         guard sample.count == v.size else { throw MP4Error.truncated }
         timing.read = now() - t
         t = now()
         var decodedAt = 0.0
-        let result = pool.decode(v, sample: sample) { frame, hw -> Metrics? in
+        let result = pool.decode(v, sample: sample) { frame, hw, image -> Metrics? in
             decodedAt = now()
             timing.route = hw ? "vt-hw" : "vt-sw"
-            return analyze(frame, rotation: plan.rotation, sourceBits: plan.bitDepth, thumbPath: thumbPath)
+            middle = shrinker?.shrink(image, plan: v)
+            return analyze(frame, rotation: plan.rotation, sourceBits: plan.bitDepth, isLog: isLog, thumbPath: thumbPath)
         }
         switch result {
         case .frame(let m): metrics = m
@@ -193,7 +185,7 @@ func tier1(path: String, plan: ClipPlan, pool: DecoderPool, thumbPath: String?) 
         } else if !plan.fallback, plan.rotation == 90 || plan.rotation == 270 {
             swap(&slowPlan.width, &slowPlan.height)
         }
-        metrics = fallbackFrame(path: path, plan: slowPlan) { analyze($0, rotation: plan.rotation, sourceBits: plan.bitDepth, thumbPath: thumbPath) } ?? nil
+        metrics = fallbackFrame(path: path, plan: slowPlan) { analyze($0, rotation: plan.rotation, sourceBits: plan.bitDepth, isLog: isLog, thumbPath: thumbPath) } ?? nil
         timing.decode = now() - t
     }
     if metrics == nil { timing.route = "none" }
@@ -224,10 +216,38 @@ func tier1(path: String, plan: ClipPlan, pool: DecoderPool, thumbPath: String?) 
     out.add("thumb", metrics?.thumbWritten == true ? thumbPath : nil)
     if metrics == nil { out.add("reason", noPictureReason(plan, refused)) }
     // A blank is never remembered: the cause may be one failed ffmpeg run, and the next scan should try again.
-    return (out.joined, timing, metrics != nil)
+    return (out.joined, timing, metrics != nil, middle, isLog)
 }
 
 let silenceDb = -50.0
+
+/// A Tier 1 line for a clip that ran out of time.
+let blankTier1Fields: String = {
+    var f = Fields()
+    for k in ["sharpness", "luma", "contrast", "clipHighPct", "clipLowPct", "saturation", "warmth"] { f.add(k, nil as Double?) }
+    f.add("dhash", nil as String?)
+    f.add("audioDb", nil as Double?)
+    f.add("silent", nil as Bool?)
+    f.add("thumb", nil as String?)
+    f.add("reason", "Decoding this clip took too long, so picture scores are blank. File details are fine.")
+    return f.joined
+}()
+
+/// A Tier 2 line with nothing in it, and why.
+func blankTier2Fields(_ reason: String?) -> String {
+    var f = Fields()
+    f.add("moments", 0)
+    for k in ["people", "faces", "iso"] { f.add(k, nil as Int?) }
+    f.add("shotSize", nil as String?)
+    for k in ["labels", "text", "sounds", "palette"] { f.addRaw(k, nil) }
+    f.add("speech", nil as Bool?)
+    f.add("music", nil as Bool?)
+    for k in ["shutterS", "aperture", "shake", "colorHue", "colorChroma", "colorLight"] { f.add(k, nil as Double?) }
+    f.add("whiteBalanceK", nil as Int?)
+    f.add("colorName", nil as String?)
+    if let reason { f.add("reason", reason) }
+    return f.joined
+}
 
 func clipLine(tier: Int, path: String, cached: Bool, ms: Double, fields: String) -> String {
     "{\"type\":\"clip\",\"tier\":\(tier),\"path\":\(path),\"cached\":\(cached),\"ms\":\(String(format: "%.1f", ms)),\(fields)}"
@@ -258,6 +278,11 @@ func scan(_ o: Options) {
     let noPicture = UnsafeMutablePointer<Bool>.allocate(capacity: max(count, 1))
     noPicture.initialize(repeating: false, count: max(count, 1))
 
+    var middles: MiddleQueue?
+    // Plans are kept from Tier 0 to save reading the file again. Past this many clips they're read again instead, so memory
+    // stays flat on a huge project.
+    let keepPlans = count <= 4096
+
     func fail(_ i: Int, _ error: Error, size: Int64 = -1, mtime: Double = 0) {
         status[i] = 2
         var f = Fields()
@@ -267,11 +292,18 @@ func scan(_ o: Options) {
         if size >= 0, !transient { cache.store(kind: "e", jsonPath: jsonPaths[i], size: size, mtime: mtime, value: f.joined) }
     }
 
-    runWorkers(workers0, items: count) { i in
+    // Each slot remembers its thread, so a late clip's ffmpeg can be stopped.
+    let slotThreads = UnsafeMutablePointer<UInt32>.allocate(capacity: 256)
+    slotThreads.initialize(repeating: 0, count: 256)
+    func noteThread(_ slot: Int) { if slot < 256 { slotThreads[slot] = currentThreadID() } }
+    func stopSlot(_ slot: Int) { if slot < 256 { stopChild(ofThread: slotThreads[slot]) } }
+
+    runGuarded(workers0, items: count, stack: 1 << 20, deadline: tier0Deadline, body: { i, slot, claim in
+        noteThread(slot)
         let path = paths[i]
         var st = stat()
         guard stat(path, &st) == 0 else {
-            fail(i, MP4Error.io(String(cString: strerror(errno))))
+            if claim() { fail(i, MP4Error.io(String(cString: strerror(errno)))) }
             return
         }
         let size = Int64(st.st_size)
@@ -279,12 +311,14 @@ func scan(_ o: Options) {
         sizes[i] = (size, mtime)
         if let e = cache.lookup(jsonPaths[i], size: size, mtime: mtime) {
             if let err = e.error {
+                guard claim() else { return }
                 status[i] = 2
                 output.emit("{\"type\":\"error\",\"path\":\(jsonPaths[i]),\(err)}")
                 fromCache[i] = true
                 return
             }
             if let fields = e.tier0 {
+                guard claim() else { return }
                 status[i] = 1
                 fromCache[i] = true
                 output.emit(clipLine(tier: 0, path: jsonPaths[i], cached: true, ms: 0, fields: fields))
@@ -292,9 +326,11 @@ func scan(_ o: Options) {
             }
         }
         let t0 = now()
+        testHang("tier0", path: path)
         do {
             let r = try tier0(path: path)
             let ms = now() - t0
+            guard claim() else { return }
             trace.route(r.plan.fallback ? "tier0-ffprobe" : "tier0-direct")
             trace.row("0\t\(ms)\t\(r.plan.fallback ? "ffprobe" : "direct")\t\(path)")
             plans[i] = r.plan
@@ -302,14 +338,21 @@ func scan(_ o: Options) {
             output.emit(clipLine(tier: 0, path: jsonPaths[i], cached: false, ms: ms, fields: r.fields))
             cache.store(kind: "0", jsonPath: jsonPaths[i], size: size, mtime: mtime, value: r.fields)
         } catch {
-            fail(i, error, size: size, mtime: mtime)
+            if claim() { fail(i, error, size: size, mtime: mtime) }
         }
-    }
+    }, late: { i in
+        fail(i, MP4Error.io("Reading this file took too long, so it was skipped. The drive may be slow or busy."))
+    }, cancel: stopSlot)
 
     log(String(format: "tier0 phase %.0f ms", now() - start))
-    if o.tier == 1 {
+    if o.tier >= 1 {
         let pool = DecoderPool(capacity: max(8, workers1 * 2))
-        runWorkers(workers1, items: count) { i in
+        middles = o.tier == 2 ? MiddleQueue(threads: 6) : nil
+        let wantsMiddle = o.tier == 2
+        let shrinkers = UnsafeMutablePointer<FrameShrinker?>.allocate(capacity: workers1 + 64)
+        shrinkers.initialize(repeating: nil, count: workers1 + 64)
+        runGuarded(workers1, items: count, stack: 1 << 20, deadline: tier1Deadline, body: { i, slot, claim in
+            noteThread(slot)
             guard status[i] == 1 else { return }
             let path = paths[i]
             let (size, mtime) = sizes[i]
@@ -317,6 +360,7 @@ func scan(_ o: Options) {
             if let e = cache.lookup(jsonPaths[i], size: size, mtime: mtime), let fields = e.tier1 {
                 let thumbReady = !o.thumbs || e.noPicture || (e.thumb.map { access($0, R_OK) == 0 } ?? false)
                 if thumbReady {
+                    guard claim() else { return }
                     if e.noPicture { noPicture[i] = true }
                     output.emit(clipLine(tier: 1, path: jsonPaths[i], cached: true, ms: 0, fields: fields))
                     return
@@ -324,24 +368,96 @@ func scan(_ o: Options) {
             }
             fromCache[i] = false
             let t0 = now()
+            testHang("tier1", path: path)
             do {
                 let plan: ClipPlan
                 if let p = plans[i] { plan = p } else { plan = try tier0(path: path).plan }
-                let r = try tier1(path: path, plan: plan, pool: pool, thumbPath: thumb)
+                let wantsLook = wantsMiddle && cache.lookup(jsonPaths[i], size: size, mtime: mtime)?.tier2 == nil
+                if wantsLook, slot < workers1 + 64, shrinkers[slot] == nil { shrinkers[slot] = FrameShrinker() }
+                let r = try tier1(path: path, plan: plan, pool: pool, thumbPath: thumb,
+                                  shrinker: wantsLook && slot < workers1 + 64 ? shrinkers[slot] : nil)
                 let ms = now() - t0
+                guard claim() else { return }
                 let tm = r.timing
                 trace.route("tier1-" + tm.route)
                 trace.row(String(format: "1\t%.2f\t%@\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%@", ms, tm.route, tm.read, tm.decode, tm.analyze, tm.thumb, tm.audio, path))
                 output.emit(clipLine(tier: 1, path: jsonPaths[i], cached: false, ms: ms, fields: r.fields))
                 if tm.route == "none" { noPicture[i] = true }
                 if r.remember { cache.store(kind: "1", jsonPath: jsonPaths[i], size: size, mtime: mtime, value: r.fields) }
+                if let image = r.middle, let offset = plan.video?.offset {
+                    middles?.offer(i, image: image, isLog: r.isLog, rotation: plan.rotation, offset: offset, path: path)
+                }
+                if !keepPlans { plans[i] = nil }
             } catch {
-                fail(i, error, size: size, mtime: mtime)
+                if claim() { fail(i, error, size: size, mtime: mtime) }
             }
-            plans[i] = nil
-        }
+        }, late: { i in
+            noPicture[i] = true
+            output.emit(clipLine(tier: 1, path: jsonPaths[i], cached: false, ms: tier1Deadline * 1000, fields: blankTier1Fields))
+        }, cancel: stopSlot)
         pool.closeAll()
     }
+
+    log(String(format: "tier1 phase done at %.0f ms", now() - start))
+    middles?.finish()
+    if o.tier == 2 {
+        let workers2 = o.workers ?? defaultTier2Workers
+        let sources = UnsafeMutablePointer<PrintSource?>.allocate(capacity: max(count, 1))
+        sources.initialize(repeating: nil, count: max(count, 1))
+        let pool = DecoderPool(capacity: max(8, workers2 * 2))
+        let local = UnsafeMutablePointer<Tier2Worker?>.allocate(capacity: workers2 + 64)
+        local.initialize(repeating: nil, count: workers2 + 64)
+        runGuarded(workers2, items: count, stack: 1 << 22, deadline: tier2Deadline, body: { i, slot, claim in
+            noteThread(slot)
+            guard status[i] == 1 else { return }
+            let (size, mtime) = sizes[i]
+            // A result without its print can't take part in grouping, and neither can a print from another Vision revision,
+            // so both count as not there.
+            if let fields = cache.lookup(jsonPaths[i], size: size, mtime: mtime)?.tier2,
+               let stored = cache.storedPrint(jsonPaths[i], size: size, mtime: mtime), stored.revision == currentPrintRevision {
+                guard claim() else { return }
+                output.emit(clipLine(tier: 2, path: jsonPaths[i], cached: true, ms: 0, fields: fields))
+                sources[i] = .stored(stored)
+                return
+            }
+            fromCache[i] = false
+            let t0 = now()
+            let plan: ClipPlan?
+            if let p = plans[i] { plan = p } else { plan = try? tier0(path: paths[i]).plan }
+            plans[i] = nil
+            guard let plan else {
+                if claim() { output.emit(clipLine(tier: 2, path: jsonPaths[i], cached: false, ms: 0, fields: blankTier2Fields(nil))) }
+                return
+            }
+            guard slot < workers2 + 64 else { return }
+            if local[slot] == nil { local[slot] = Tier2Worker() }
+            let r = tier2(path: paths[i], plan: plan, pool: pool, worker: local[slot]!, middle: middles?.take(i))
+            guard claim() else { return }
+            output.emit(clipLine(tier: 2, path: jsonPaths[i], cached: false, ms: now() - t0, fields: r.fields))
+            var stored: PrintRef?
+            if r.remember {
+                cache.store(kind: "2", jsonPath: jsonPaths[i], size: size, mtime: mtime, value: r.fields)
+                if let p = r.print { stored = cache.storePrint(p, jsonPath: jsonPaths[i], size: size, mtime: mtime) }
+            }
+            if let stored { sources[i] = .stored(stored) } else if let p = r.print { sources[i] = .held(p) }
+        }, late: { i in
+            output.emit(clipLine(tier: 2, path: jsonPaths[i], cached: false, ms: tier2Deadline * 1000,
+                                 fields: blankTier2Fields("Looking at this clip took too long, so these results are blank. The rest of the scan carried on.")))
+        }, cancel: { slot in
+            if slot < workers2 + 64 { local[slot]?.vision.cancel() }
+            stopSlot(slot)
+        })
+        pool.closeAll()
+        log(String(format: "tier2 phase done at %.0f ms", now() - start))
+        let groups = similarGroups(sources: (0..<count).map { sources[$0] }, folders: paths.map { ($0 as NSString).deletingLastPathComponent },
+                                   sortKey: paths, revision: currentPrintRevision, load: cache.readPrint)
+        let json = groups.enumerated().map { n, members in
+            "{\"id\":\(n + 1),\"paths\":[" + members.map { jsonPaths[$0] }.joined(separator: ",") + "]}"
+        }
+        output.emit("{\"type\":\"groups\",\"groups\":[" + json.joined(separator: ",") + "]}")
+        log(String(format: "groups done at %.0f ms", now() - start))
+    }
+    cache.maintain(limit: o.cacheLimit)
 
     var failed = 0, cached = 0, degraded = 0
     for i in 0..<count {
@@ -352,11 +468,13 @@ func scan(_ o: Options) {
     let wall = Int(now() - start)
     output.emit("{\"type\":\"done\",\"clips\":\(count - failed),\"failed\":\(failed),\"cached\":\(cached),\"wallMs\":\(wall),\"degraded\":\(degraded)}")
     trace.flush()
+    if !trace.totals.isEmpty { log("totals " + trace.totals.sorted { $0.value > $1.value }.map { "\($0.key)=\(Int($0.value))" }.joined(separator: " ")) }
     log("routes \(trace.routes.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: " ")) wall \(wall) ms")
 }
 
 let defaultTier0Workers = 12
 let defaultTier1Workers = 12
+let defaultTier2Workers = 16
 
 signal(SIGPIPE, SIG_IGN)
 prepareChildTracking()
@@ -366,6 +484,7 @@ signal(SIGTERM) { _ in
 }
 
 let args = Array(CommandLine.arguments.dropFirst())
+if args.first == "scan" { watchForClosedOutput() }
 switch args.first {
 case "version", "--version":
     print(engineVersion)

@@ -8,8 +8,10 @@
 
   // Clips a near-duplicate group's members may differ from its first clip by, in dhash bits out of 64.
   var NEAR_DUP_BITS = 8;
-  // Interviews keeps clips in the calmest share of the scan.
-  var CALM_SHARE = 0.4;
+  // Interviews keeps clips in the steadier share of the scan, among those whose shake is known.
+  var STEADY_SHARE = 0.6;
+  // Below this a clip's colour is too flat to sit among vivid clips in the rainbow.
+  var MUTED_CHROMA = 0.15;
 
   // ---------------------------------------------------------------- formatting: null is always an empty cell
 
@@ -31,13 +33,29 @@
 
   function fmtText(v) { return v === null || v === undefined ? '' : String(v); }
 
+  function fmtCount(v) { return typeof v === 'number' ? String(v) : ''; }
+
+  function fmtShutter(v) {
+    if (typeof v !== 'number' || !(v > 0)) { return ''; }
+    return v >= 0.3 ? v.toFixed(1) + ' s' : '1/' + Math.round(1 / v);
+  }
+
+  function fmtAperture(v) { return typeof v === 'number' ? 'f/' + (v % 1 ? v.toFixed(1) : v) : ''; }
+
+  var SHOT_WORD = { closeup: 'Close-up', medium: 'Medium', wide: 'Wide' };
+  var SHOT_RANK = { closeup: 0, medium: 1, wide: 2 };
+
+  function fmtShot(v) { return SHOT_WORD[v] || ''; }
+
+  function fmtColour(v) { return v ? v.charAt(0).toUpperCase() + v.slice(1) : ''; }
+
   // ---------------------------------------------------------------- columns
 
   // words: bucket names from the highest values to the lowest, for "Sort into Bins" and the foot's verdict.
   // hidden: off by default, switchable from the menu. A hidden column still shows while the view sorts by it.
   var COLUMNS = [
     { key: 'thumb', label: '', width: 74, kind: 'thumb', sortable: false, fixed: true },
-    { key: 'name', label: 'Name', width: 150, kind: 'text', grow: true, fixed: true, tip: 'File name.' },
+    { key: 'name', label: 'Name', width: 120, kind: 'text', grow: true, fixed: true, tip: 'File name.' },
     { key: 'dupGroup', label: 'Group', width: 48, kind: 'number', fmt: fmtText, onlyWithGroups: true, fixed: true, tip: 'Near-duplicate group.' },
     { key: 'durationS', label: 'Duration', width: 66, kind: 'number', fmt: fmtDuration, words: ['Longest', 'Longer', 'Middle', 'Shorter', 'Shortest'], tip: 'Duration.' },
     { key: 'sharpness', label: 'Sharpness', width: 72, kind: 'number', fmt: fixed(3), words: ['Sharpest', 'Sharper', 'Middle', 'Softer', 'Softest'],
@@ -47,11 +65,23 @@
     { key: 'audioDb', label: 'Audio', width: 56, kind: 'number', fmt: fixed(1), words: ['Loudest', 'Louder', 'Middle', 'Quieter', 'Quietest'], tip: 'Mean level in dB from sampled windows, not a full read. Empty when the clip has no audio or none could be read.' },
     { key: 'createdAt', label: 'Date', width: 132, kind: 'date', fmt: fmtDate, words: ['Latest', 'Later', 'Middle', 'Earlier', 'Earliest'], tip: 'Camera time when present.' },
     { key: 'camera', label: 'Camera', width: 112, kind: 'text', tip: 'Maker and model.' },
+    { key: 'colorName', label: 'Colour', width: 72, kind: 'color', fmt: fmtColour, sortKey: 'rainbow', natural: 1, category: 'colour', named: ['Colour', 'Colour reversed'], says: ['Rainbow order, neutral clips last.', 'Rainbow order reversed, neutral clips first.'],
+      tip: 'The dominant colours of up to three frames, strongest first. S-Log3 that the camera names is turned back into normal colour before it is measured. Hover for the family. It describes the picture, nothing more.' },
     { key: 'clipHighPct', label: 'Highlights', width: 62, kind: 'number', hidden: true, fmt: fixed(2), words: ['Most clipped', 'More clipped', 'Middle', 'Less clipped', 'Least clipped'], tip: 'Percent of pixels at the top extreme, in one decoded moment.' },
     { key: 'clipLowPct', label: 'Shadows', width: 58, kind: 'number', hidden: true, fmt: fixed(2), words: ['Most crushed', 'More crushed', 'Middle', 'Less crushed', 'Least crushed'], tip: 'Percent of pixels at the bottom extreme, in one decoded moment.' },
     { key: 'lens', label: 'Lens', width: 130, kind: 'text', hidden: true, tip: 'From embedded metadata or the Sony sidecar.' },
     { key: 'codec', label: 'Codec', width: 60, kind: 'text', hidden: true },
-    { key: 'pixels', label: 'Resolution', width: 84, kind: 'number', hidden: true, fmt: null, tip: 'Display size after rotation.' }
+    { key: 'pixels', label: 'Resolution', width: 84, kind: 'number', hidden: true, fmt: null, tip: 'Display size after rotation.' },
+    { key: 'people', label: 'People', width: 52, kind: 'number', hidden: true, fmt: fmtCount, words: ['Most people', 'More people', 'Middle', 'Fewer people', 'Fewest people'], tip: 'The most people seen in any one moment read. A count of bodies in the frame, not who they are.' },
+    { key: 'faces', label: 'Faces', width: 48, kind: 'number', hidden: true, fmt: fmtCount, words: ['Most faces', 'More faces', 'Middle', 'Fewer faces', 'Fewest faces'], tip: 'The most faces seen in any one moment read. A count of faces, never who they are.' },
+    { key: 'shotSize', label: 'Shot', width: 66, kind: 'text', hidden: true, fmt: fmtShot, sortKey: 'shotRank', natural: 1, category: 'shot', named: ['Shot size', 'Shot size reversed'], says: ['Close-ups first, wides last.', 'Wides first, close-ups last.'], tip: 'From how tall a head is in the frame: a quarter of its height or more is a close-up, about an eighth or more is medium, smaller is wide. Blank when no one was seen.' },
+    { key: 'soundText', label: 'Sound', width: 110, kind: 'text', hidden: true, tip: 'What the sampled audio sounds like, strongest first. Audio is sampled, not read in full.' },
+    { key: 'screenText', label: 'Text', width: 120, kind: 'text', hidden: true, tip: 'Words of four letters or more read off up to three frames. About half of readable text is found, so a missing word proves nothing.' },
+    { key: 'labelText', label: 'Labels', width: 170, kind: 'text', hidden: true, tip: 'What up to three frames seem to show, strongest first. A label is kept only where Apple rates it right at least three times in four. A suggestion, not a fact.' },
+    { key: 'iso', label: 'ISO', width: 56, kind: 'number', hidden: true, fmt: fmtCount, tip: 'From the file, not estimated. Blank when the file has none.' },
+    { key: 'shutterS', label: 'Shutter', width: 56, kind: 'number', hidden: true, fmt: fmtShutter, tip: 'Exposure time from the file. Blank when the file has none.' },
+    { key: 'aperture', label: 'Aperture', width: 60, kind: 'number', hidden: true, fmt: fmtAperture, tip: 'F-number from the file. Blank when the file has none.' },
+    { key: 'shake', label: 'Shake', width: 52, kind: 'number', hidden: true, fmt: fixed(3), words: ['Shakiest', 'Shakier', 'Middle', 'Steadier', 'Steadiest'], tip: 'Camera movement from the gyro in the file, 0 to 1 on a log scale: a tripod reads low, handheld higher, a whip pan near the top. A steady pan does not count. Blank when the file has no gyro data.' }
   ];
   var COLUMN = {};
   COLUMNS.forEach(function (c) { COLUMN[c.key] = c; });
@@ -98,7 +128,7 @@
   function baseName(p) { return String(p).slice(String(p).lastIndexOf('/') + 1); }
 
   function createStore() {
-    return { rows: [], byKey: new Map(), total: 0, tier0: 0, tier1: 0, errors: 0, cached: 0, bad: 0, start: null, done: null, noPicture: { clips: 0, noDecoder: 0, noFfmpeg: 0 } };
+    return { rows: [], byKey: new Map(), total: 0, tier0: 0, tier1: 0, errors: 0, cached: 0, bad: 0, start: null, done: null, noPicture: { clips: 0, noDecoder: 0, noFfmpeg: 0 }, tier2: 0, tier2Failed: 0, groups: null };
   }
 
   function addRow(store, path) {
@@ -121,6 +151,20 @@
 
   var ENVELOPE = { type: 1, tier: 1, path: 1, cached: 1, ms: 1 };
 
+  // What Tier 2 sends as lists, kept as words so they sort, show and search like any other value. Null stays null.
+  function namesOf(list, most) {
+    if (!list) { return null; }
+    return list.slice(0, most).map(function (x) { return typeof x === 'string' ? x : x.name; }).join(', ');
+  }
+
+  function settleTier2(row) {
+    row.rainbow = rainbowKey(row);
+    row.shotRank = row.shotSize in SHOT_RANK ? SHOT_RANK[row.shotSize] : null;
+    row.labelText = namesOf(row.labels, 12);
+    row.soundText = namesOf(row.sounds, 6);
+    row.screenText = namesOf(row.text, 12);
+  }
+
   // A clip with good file details and no decoded frame. It is not an error: its Tier 0 data stands, its picture scores
   // are blank, and the engine says why in `reason`.
   function countNoPicture(tally, reason) {
@@ -138,9 +182,27 @@
       case 'done':
         store.done = msg;
         return false;
+      case 'groups': {
+        // Similar shots, once, after every Tier 2 line. A clip outside the list has no group.
+        store.groups = msg.groups || [];
+        store.groups.forEach(function (g) {
+          (g.paths || []).forEach(function (p) {
+            var member = store.byKey.get(pathKey(p));
+            if (member) { member.similar = g.id; member.version = (member.version || 0) + 1; }
+          });
+        });
+        return true;
+      }
       case 'error': {
         if (!msg.path) { return false; }
         var bad = addRow(store, msg.path);
+        // Tier 2 failing never touches what Tiers 0 and 1 found: the row stays good, only its understanding is missing.
+        if (msg.tier === 2 || bad.tier === 1) {
+          if (!bad.notUnderstood) { store.tier2Failed++; }
+          bad.notUnderstood = true;
+          bad.version = (bad.version || 0) + 1;
+          return true;
+        }
         if (bad.error === null) { store.errors++; }
         bad.error = msg.message === undefined ? 'unknown error' : String(msg.message);
         bad.version = (bad.version || 0) + 1;
@@ -148,12 +210,27 @@
       }
       case 'clip': {
         if (!msg.path) { return false; }
-        var row = addRow(store, msg.path), counted = !!row.reason;
+        var row = addRow(store, msg.path), counted = !!row.reason, t2 = msg.tier === 2;
         for (var k in msg) {
-          if (!ENVELOPE[k]) { row[k] = msg[k]; }
+          // Tier 2's reason is about looking closer, and Tier 1's about the picture, so they never share a field.
+          if (!ENVELOPE[k] && !(t2 && k === 'reason')) { row[k] = msg[k]; }
         }
-        if (msg.reason && !counted) { countNoPicture(store.noPicture, msg.reason); }
+        if (msg.reason && !counted && !t2) { countNoPicture(store.noPicture, msg.reason); }
         row.version = (row.version || 0) + 1;
+        if (msg.tier === 2) {
+          // The engine reports a clip it could not look at as a line with no moments. A clip with no picture has already
+          // been explained, so it does not count twice.
+          if (msg.reason) { row.lookReason = String(msg.reason); }
+          if ((msg.moments === 0 || msg.reason) && !row.reason) {
+            if (!row.notUnderstood && !row.understood) { store.tier2Failed++; }
+            row.notUnderstood = true;
+          } else if (!row.understood && !row.notUnderstood) {
+            store.tier2++;
+          }
+          row.understood = true;
+          settleTier2(row);
+          return true;
+        }
         if (msg.tier === 1) {
           store.tier1++;
           row.tier = 1;
@@ -178,7 +255,7 @@
 
   var collator = new Intl.Collator('en', { numeric: true, sensitivity: 'base' });
 
-  function isText(col) { return col.kind === 'text'; }
+  function isText(col) { return col.kind === 'text' && !col.sortKey; }
 
   // spec: [{key, dir}], dir 1 ascending or -1 descending. Empty values go last in both directions, and equal rows
   // keep their scan order, so a sort is stable and repeatable.
@@ -195,7 +272,7 @@
         }
         keys.push({ text: true, vals: strs, dir: spec[s].dir });
       } else {
-        var nums = new Float64Array(n), field = c.kind === 'date' ? 'time' : c.key;
+        var nums = new Float64Array(n), field = c.sortKey || (c.kind === 'date' ? 'time' : c.key);
         for (i = 0; i < n; i++) {
           r = rows[i][field];
           nums[i] = r === null || r === undefined ? NaN : Number(r);
@@ -297,12 +374,60 @@
     { id: 'silent', label: 'Silent', sort: [S('name', 1)], says: 'No audio track, or sampled audio reads as silent.',
       filter: function (r) { return r.hasAudio === false || r.silent === true; },
       tip: 'Shows clips with no audio track, or whose sampled windows read as silent. Audio is sampled, not read in full, so sound elsewhere in a clip can be missed. Clips with unknown audio are left out.' },
-    { id: 'interviews', label: 'Interviews', sort: [S('durationS', -1)], says: 'With audio, in the calmest 40% of this scan. Longest first.',
-      prepare: calmLimit,
+    { id: 'interviews', label: 'Interviews', sort: [S('durationS', -1)], says: 'Speech and a face, steadier where shake is known. Longest first.',
+      needs: known('speech'), none: 'No clip has speech or face data yet, so this has nothing to go on.',
+      prepare: steadyLimit,
       filter: function (r, limit) {
-        return r.hasAudio === true && r.silent !== true && typeof r.motionProxy === 'number' && limit !== null && r.motionProxy <= limit;
+        return r.speech === true && r.faces > 0 && (typeof r.shake !== 'number' || limit === null || r.shake <= limit);
       },
-      tip: 'Shows clips with audio and low motion: the calmest 40% of this scan by the motion stand-in, longest first. It does not detect faces or speech, so it finds likely interviews, and static ambience passes too.' },
+      tip: 'Shows clips where speech was heard and a face was seen in the moments read, longest first. Where the file has gyro data, it keeps the steadier ones. Likely interviews, not a promise: a vlog passes too, and it does not know who is speaking.' },
+    { id: 'people', label: 'People', sort: [S('people', -1)], says: 'Clips with people, the most people first.',
+      needs: known('people'), none: 'No clip has people data, so this has nothing to go on.',
+      filter: function (r) { return r.people > 0; },
+      tip: 'Shows clips where people were seen, most first. People is the most seen in any one moment read. It counts bodies in up to three frames, and never says who they are.' },
+    { id: 'nopeople', label: 'No people', sort: [S('name', 1)], says: 'No people seen in the moments read.', binAs: 'category', category: 'shot',
+      needs: known('people'), none: 'No clip has people data, so this has nothing to go on.',
+      filter: function (r) { return r.people === 0; },
+      tip: 'Shows clips where no one was seen in the moments read, up to three per clip. Someone can appear between them. Clips with unknown people are left out.' },
+    { id: 'shot', label: 'Shot size', sort: [S('shotSize', 1)], says: 'Close-ups first, wides last.',
+      needs: known('shotSize'), none: 'No clip has shot size data, so this has nothing to go on.',
+      tip: 'Sorts by how tall a head is in the frame, close-ups first. Blank when no one was seen, so scenery has no shot size here.' },
+    { id: 'closeups', label: 'Close-ups', sort: [S('name', 1)], says: 'A face or body fills the frame.', category: 'shot',
+      needs: known('shotSize'), none: 'No clip has shot size data, so this has nothing to go on.',
+      filter: function (r) { return r.shotSize === 'closeup'; },
+      tip: 'Shows clips where a head is at least a quarter of the frame tall in the moments read.' },
+    { id: 'mediums', label: 'Mediums', sort: [S('name', 1)], says: 'A person from about the waist up.', category: 'shot',
+      needs: known('shotSize'), none: 'No clip has shot size data, so this has nothing to go on.',
+      filter: function (r) { return r.shotSize === 'medium'; },
+      tip: 'Shows clips where a head is about an eighth to a quarter of the frame tall, or someone is cut off by the bottom of the frame.' },
+    { id: 'wides', label: 'Wides', sort: [S('name', 1)], says: 'People small in the frame.', category: 'shot',
+      needs: known('shotSize'), none: 'No clip has shot size data, so this has nothing to go on.',
+      filter: function (r) { return r.shotSize === 'wide'; },
+      tip: 'Shows clips where heads sit small in the frame. Scenery with no one in it has no shot size, so it is not here.' },
+    { id: 'speech', label: 'Speech', sort: [S('durationS', -1)], says: 'Speech heard in the sampled audio. Longest first.',
+      needs: known('speech'), none: 'No clip has sound data, so this has nothing to go on.',
+      filter: function (r) { return r.speech === true; },
+      tip: 'Shows clips where speech was heard in sampled windows of audio. It does not transcribe or know who is speaking, and speech elsewhere in a clip can be missed.' },
+    { id: 'music', label: 'Music', sort: [S('durationS', -1)], says: 'Music heard in the sampled audio. Longest first.',
+      needs: known('music'), none: 'No clip has sound data, so this has nothing to go on.',
+      filter: function (r) { return r.music === true; },
+      tip: 'Shows clips where music was heard in sampled windows of audio, so music elsewhere in a clip can be missed.' },
+    { id: 'steadiest', label: 'Steadiest', sort: [S('shake', 1)], says: 'Least camera movement at the top. Clips with no gyro data last.',
+      needs: known('shake'), none: 'No clip here has gyro data, so there is no shake to sort by.',
+      tip: 'Sorts by camera movement from the gyro in the file, lowest first. A steady pan does not count as movement. Clips with no gyro data sit at the end, blank.' },
+    { id: 'shakiest', label: 'Shakiest', sort: [S('shake', -1)], says: 'Most camera movement at the top. Clips with no gyro data last.',
+      needs: known('shake'), none: 'No clip here has gyro data, so there is no shake to sort by.',
+      tip: 'Sorts by camera movement from the gyro in the file, highest first. Handheld on purpose reads high too. Clips with no gyro data sit at the end, blank.' },
+    { id: 'onscreen', label: 'Text on screen', sort: [S('name', 1)], says: 'Words were read off these frames.', binAs: 'one',
+      needs: known('text'), none: 'No clip has text data, so this has nothing to go on.',
+      filter: function (r) { return !!(r.text && r.text.length); },
+      tip: 'Shows clips where words of four letters or more were read in the moments looked at: signs, packaging, slates. About half of readable text is found.' },
+    { id: 'colour', label: 'Colour', sort: [S('colorName', 1)], says: 'Rainbow order, neutral clips last.', category: 'colour',
+      needs: known('colorName'), none: 'No clip has colour data, so this has nothing to go on.',
+      tip: 'Sorts by the hue of each clip\'s dominant colour, red round to pink, with neutral clips last from light to dark. It describes the picture and says nothing about whether the colour is right.' },
+    { id: 'similar', label: 'Similar shots', group: 'engine', sort: [S('dupGroup', 1), S('name', 1)], says: 'Clips that look alike, kept together.',
+      needs: function (r) { return r.similar !== undefined; }, none: 'No similar shots in this scan.', waiting: 'Similar shots arrive last, once every clip has been looked at.',
+      tip: 'Groups clips whose frames look alike: their closest moments match and their average colours agree. Two takes of a set-up land together, and so can two similar places. Nothing here says which take to keep.' },
     { id: 'duplicates', label: 'Near duplicates', group: true, sort: [S('dupGroup', 1), S('sharpness', -1)], says: 'Similar frames grouped, sharpest first in each.',
       tip: 'Groups clips whose 64-bit frame hash differs by ' + NEAR_DUP_BITS + ' bits or fewer from the first clip of the group. It compares one moment per clip, so two takes of a set-up can match, and clips that differ only later do not.' },
     { id: 'shoot', label: 'Shoot order', sort: [S('createdAt', 1), S('name', 1)], says: 'Earliest at the top.',
@@ -311,46 +436,195 @@
   var PRESET = {};
   PRESETS.forEach(function (p) { PRESET[p.id] = p; });
 
-  function calmLimit(rows) {
+  // How the sort row groups the presets, so a long list stays a short line. Colour and Shoot order stand alone.
+  var GROUPS = [
+    { id: 'people', label: 'People', presets: ['people', 'nopeople', 'shot', 'closeups', 'mediums', 'wides', 'interviews'] },
+    { id: 'picture', label: 'Picture', presets: ['softest', 'sharpest', 'darkest', 'overexposed', 'onscreen'] },
+    { id: 'motion', label: 'Motion', presets: ['motion', 'static', 'steadiest', 'shakiest'] },
+    { id: 'sound', label: 'Sound', presets: ['speech', 'music', 'silent'] },
+    { id: 'similar', label: 'Similar', presets: ['similar', 'duplicates'] }
+  ];
+
+  var FAMILIES = [
+    { id: 'red', word: 'Red', dot: '#d9483b' }, { id: 'orange', word: 'Orange', dot: '#e8873a' }, { id: 'yellow', word: 'Yellow', dot: '#e3c24a' },
+    { id: 'green', word: 'Green', dot: '#5aa65c' }, { id: 'teal', word: 'Teal', dot: '#35a79c' }, { id: 'blue', word: 'Blue', dot: '#3f83d6' },
+    { id: 'purple', word: 'Purple', dot: '#8a63c9' }, { id: 'pink', word: 'Pink', dot: '#df6fa4' }, { id: 'neutral', word: 'Neutral', dot: '#9a9aa0' }
+  ];
+  var FAMILY = {};
+  FAMILIES.forEach(function (f) { FAMILY[f.id] = f; });
+
+  function known(key) {
+    return function (r) { var v = r[key]; return v !== null && v !== undefined; };
+  }
+
+  // Hues are Oklab degrees, as the engine sends them: red starts at 20, and pink wraps across zero. Flat clips, such as log, run the spectrum again after the vivid
+  // ones, so they keep their hue without breaking the bands. An all-log shoot is simply one muted rainbow.
+  // Neutral clips follow every hue, from light to dark.
+  function rainbowKey(r) {
+    if (typeof r.colorHue === 'number' && r.colorName !== 'neutral') {
+      return (r.colorHue + 340) % 360 + (typeof r.colorChroma === 'number' && r.colorChroma < MUTED_CHROMA ? 400 : 0);
+    }
+    return typeof r.colorLight === 'number' ? 800 + (1 - r.colorLight) : null;
+  }
+
+  function steadyLimit(rows) {
     var values = [];
     for (var i = 0; i < rows.length; i++) {
-      if (typeof rows[i].motionProxy === 'number') { values.push(rows[i].motionProxy); }
+      if (typeof rows[i].shake === 'number') { values.push(rows[i].shake); }
     }
     if (!values.length) { return null; }
     values.sort(function (a, b) { return a - b; });
-    return values[Math.max(0, Math.ceil(values.length * CALM_SHARE) - 1)];
+    return values[Math.max(0, Math.ceil(values.length * STEADY_SHARE) - 1)];
   }
 
-  // view: {sort: [...], preset: id or null}. Returns {order, groupCount, ms} where order is row indexes to show.
-  function computeView(rows, view, now) {
+  // ---------------------------------------------------------------- search
+
+  function fold(s) {
+    return String(s).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9\u0080-￿]+/g, ' ');
+  }
+
+  function searchParts(r) {
+    var parts = [];
+    (r.labels || []).forEach(function (l) { parts.push(l.name); });
+    (r.text || []).forEach(function (t) { parts.push(t); });
+    (r.sounds || []).forEach(function (l) { parts.push(l.name); });
+    if (r.camera) { parts.push(r.camera); }
+    if (r.lens) { parts.push(r.lens); }
+    if (r.shotSize) { parts.push(SHOT_WORD[r.shotSize]); }
+    if (r.colorName) { parts.push(fmtColour(r.colorName)); }
+    return parts;
+  }
+
+  function hayOf(r) {
+    if (r.hayVersion !== r.version || r.hay === undefined) {
+      r.hay = ' ' + fold(searchParts(r).join(' ')) + ' ' + (r.shotSize === 'closeup' ? 'closeup ' : '');
+      r.nameFold = fold(r.name).replace(/ /g, '');
+      r.hayVersion = r.version;
+    }
+    return r.hay;
+  }
+
+  function searchTokens(query) {
+    return fold(query || '').split(' ').filter(Boolean);
+  }
+
+  // Every word must match: anywhere in the file name, or at the start of a word in what the clip holds.
+  function matches(r, tokens) {
+    var hay = hayOf(r);
+    for (var i = 0; i < tokens.length; i++) {
+      if (r.nameFold.indexOf(tokens[i]) === -1 && hay.indexOf(' ' + tokens[i]) === -1) { return false; }
+    }
+    return true;
+  }
+
+  // The first thing a clip holds that a search matched, when it isn't the name: the reason it is on screen.
+  function matchedWord(r, tokens) {
+    if (!tokens.length) { return ''; }
+    var parts = searchParts(r);
+    for (var t = 0; t < tokens.length; t++) {
+      if (r.nameFold !== undefined && r.nameFold.indexOf(tokens[t]) !== -1) { continue; }
+      for (var i = 0; i < parts.length; i++) {
+        if ((' ' + fold(parts[i])).indexOf(' ' + tokens[t]) !== -1) { return parts[i]; }
+      }
+    }
+    return '';
+  }
+
+  // ---------------------------------------------------------------- the view
+
+  // view: {sort, preset, family}. opts: {tokens} from a search. Returns row indexes to show, and where groups start.
+  function computeView(rows, view, now, opts) {
     var clock = now || function () { return Date.now(); };
-    var t0 = clock(), p = view.preset ? PRESET[view.preset] : null, order = [], i;
-    var groupCount = 0, hasGroups = !!(p && p.group);
+    var t0 = clock(), p = view.preset ? PRESET[view.preset] : null, order = [], i, j;
+    var groupCount = 0, hasGroups = !!(p && p.group), breaks = [];
+    var tokens = opts && opts.tokens && opts.tokens.length ? opts.tokens : null, family = view.family || null;
+    var keeps = function (r) {
+      return (!family || (r.colorName || null) === family) && (!tokens || matches(r, tokens));
+    };
     for (i = 0; i < rows.length; i++) { rows[i].dupGroup = null; }
     if (hasGroups) {
-      var groups = nearDuplicateGroups(rows);
-      groupCount = groups.length;
+      var groups = p.group === 'engine' ? engineGroups(rows) : nearDuplicateGroups(rows);
       for (i = 0; i < groups.length; i++) {
-        for (var j = 0; j < groups[i].length; j++) {
-          rows[groups[i][j]].dupGroup = i + 1;
-          order.push(groups[i][j]);
+        var members = groups[i].filter(function (at) { return keeps(rows[at]); });
+        if (!members.length) { continue; }
+        groupCount++;
+        for (j = 0; j < members.length; j++) {
+          rows[members[j]].dupGroup = i + 1;
+          order.push(members[j]);
         }
       }
-    } else if (p && p.filter) {
-      var ctx = p.prepare ? p.prepare(rows) : null;
-      for (i = 0; i < rows.length; i++) {
-        if (p.filter(rows[i], ctx)) { order.push(i); }
-      }
     } else {
-      for (i = 0; i < rows.length; i++) { order.push(i); }
+      var ctx = p && p.prepare ? p.prepare(rows) : null;
+      for (i = 0; i < rows.length; i++) {
+        if ((!p || !p.filter || p.filter(rows[i], ctx)) && keeps(rows[i])) { order.push(i); }
+      }
     }
     sortOrder(rows, order, view.sort);
-    return { order: order, groupCount: groupCount, hasGroups: hasGroups, ms: clock() - t0 };
+    if (hasGroups) {
+      for (i = 0; i < order.length; i++) {
+        var g = rows[order[i]].dupGroup;
+        if (!breaks.length || breaks[breaks.length - 1].group !== g) { breaks.push({ at: i, group: g, count: 0, number: breaks.length + 1 }); }
+        breaks[breaks.length - 1].count++;
+      }
+    }
+    return { order: order, groupCount: groupCount, hasGroups: hasGroups, breaks: breaks, ms: clock() - t0 };
+  }
+
+  // The engine's groups, as row indexes, in the order it sent them.
+  function engineGroups(rows) {
+    var byId = new Map(), out = [];
+    for (var i = 0; i < rows.length; i++) {
+      var g = rows[i].similar;
+      if (g === undefined) { continue; }
+      if (!byId.has(g)) { byId.set(g, []); out.push(byId.get(g)); }
+      byId.get(g).push(i);
+    }
+    return out;
+  }
+
+  // Has this preset anything to work with yet? ok, waiting (the engine may still send it) or none (it won't).
+  function dataStatus(rows, id, running) {
+    var p = id ? PRESET[id] : null;
+    if (!p || !p.needs) { return 'ok'; }
+    for (var i = 0; i < rows.length; i++) { if (p.needs(rows[i])) { return 'ok'; } }
+    return running ? 'waiting' : 'none';
+  }
+
+  // How many clips a preset would show now, for the group menus. Null for a sort that keeps every clip.
+  function presetCount(rows, id) {
+    var p = PRESET[id];
+    if (p.group === 'engine') { return engineGroups(rows).reduce(function (n, g) { return n + g.length; }, 0); }
+    if (!p.filter) { return null; }
+    var ctx = p.prepare ? p.prepare(rows) : null, n = 0;
+    for (var i = 0; i < rows.length; i++) { if (p.filter(rows[i], ctx)) { n++; } }
+    return n;
+  }
+
+  function familyCounts(rows) {
+    var out = {};
+    for (var i = 0; i < rows.length; i++) {
+      var c = rows[i].colorName;
+      if (c) { out[c] = (out[c] || 0) + 1; }
+    }
+    return out;
+  }
+
+  // The one useful fact on a tile: why it is here (a search), else what the view is about, else its length.
+  function tileFact(row, view, tokens) {
+    if (row.error) { return unreadableReason(row); }
+    var hit = matchedWord(row, tokens || []);
+    if (hit) { return hit; }
+    var col = view.sort.length ? COLUMN[view.sort[0].key] : null;
+    if (col && col.key !== 'name' && col.key !== 'dupGroup') {
+      var text = cellText(row, col);
+      return text || (row.reason ? 'No picture' : '');
+    }
+    return row.reason ? 'No picture' : cellText(row, COLUMN.durationS);
   }
 
   // One click sorts by that column, again flips it. Shift adds it as the next key, or flips it if already there.
   function nextSort(sort, key, shift) {
-    var col = COLUMN[key], natural = col.kind === 'number' ? -1 : 1;
+    var col = COLUMN[key], natural = col.natural || (col.kind === 'number' ? -1 : 1);
     var at = -1;
     for (var i = 0; i < sort.length; i++) { if (sort[i].key === key) { at = i; } }
     if (shift) {
@@ -368,6 +642,7 @@
     if (p) { return p.label; }
     if (!view.sort.length) { return ''; }
     var s = view.sort[0], c = COLUMN[s.key];
+    if (c.named) { return c.named[s.dir > 0 ? 0 : 1]; }
     if (c.words) { return c.words[s.dir > 0 ? 4 : 0] + ' first'; }
     if (c.key === 'pixels') { return s.dir > 0 ? 'Smallest first' : 'Largest first'; }
     return c.label + (s.dir > 0 ? ' A to Z' : ' Z to A');
@@ -377,6 +652,7 @@
     if (view.preset) { return PRESET[view.preset].says; }
     if (!view.sort.length) { return ''; }
     var s = view.sort[0], c = COLUMN[s.key];
+    if (c.says) { return c.says[s.dir > 0 ? 0 : 1]; }
     if (c.words) { return c.words[s.dir > 0 ? 4 : 0] + ' at the top.'; }
     if (c.key === 'pixels') { return (s.dir > 0 ? 'Smallest' : 'Largest') + ' at the top.'; }
     return 'By ' + c.label.toLowerCase() + ', ' + (s.dir > 0 ? 'A to Z.' : 'Z to A.');
@@ -393,7 +669,7 @@
   }
 
   function hasValue(row, col) {
-    var v = col.kind === 'date' ? row.time : row[col.key];
+    var v = col.kind === 'date' ? row.time : row[col.sortKey || col.key];
     return !(v === null || v === undefined || v === '' || v !== v);
   }
 
@@ -405,10 +681,37 @@
     return words;
   }
 
-  // rows in view order. Near-duplicate views get one bin per group; everything else gets quintiles of the
-  // active sort, with clips that have no value for that sort kept apart. Returns [{name, rows}] or null.
+  // What a categorical sort calls a clip, in the order its bins come. Null means no value.
+  var CATEGORIES = {
+    colour: { names: FAMILIES.map(function (f) { return f.word; }), of: function (r) { return FAMILY[r.colorName] ? FAMILY[r.colorName].word : null; } },
+    shot: { names: ['Close-ups', 'Mediums', 'Wides', 'No people'], of: function (r) {
+      if (r.shotSize in SHOT_RANK) { return ['Close-ups', 'Mediums', 'Wides'][SHOT_RANK[r.shotSize]]; }
+      return r.people === 0 ? 'No people' : null;
+    } }
+  };
+
+  // Numbered in the category's own order, so Red stays before Blue whatever order the rows are in.
+  function categoryBuckets(rows, kind) {
+    var cat = CATEGORIES[kind], found = new Map(), without = [], out = [];
+    rows.forEach(function (r) {
+      var name = cat.of(r);
+      if (name === null) { without.push(r); return; }
+      if (!found.has(name)) { found.set(name, []); }
+      found.get(name).push(r);
+    });
+    cat.names.forEach(function (name) {
+      if (found.has(name)) { out.push({ name: pad(out.length + 1, 2) + ' ' + name, rows: found.get(name) }); }
+    });
+    if (without.length) { out.push({ name: pad(out.length + 1, 2) + ' No value', rows: without }); }
+    return out;
+  }
+
+  // rows in view order. Group views get one bin per group, categorical sorts one bin per category, and everything else
+  // quintiles of the active sort, with clips that have no value for that sort kept apart. Returns [{name, rows}] or null.
   function bucketize(rows, view) {
-    var buckets = [], i;
+    var buckets = [], i, p = view.preset ? PRESET[view.preset] : null;
+    if (p && p.binAs === 'one') { return [{ name: '01 ' + p.label, rows: rows }]; }
+    if (p && p.category) { return categoryBuckets(rows, p.category); }
     if (view.preset && PRESET[view.preset].group) {
       var byGroup = new Map();
       for (i = 0; i < rows.length; i++) {
@@ -423,6 +726,7 @@
     }
     if (!view.sort.length) { return null; }
     var col = COLUMN[view.sort[0].key], names = bucketNames(col, view.sort[0].dir);
+    if (col.category) { return categoryBuckets(rows, col.category); }
     var withValue = [], without = [];
     for (i = 0; i < rows.length; i++) {
       (hasValue(rows[i], col) ? withValue : without).push(rows[i]);
@@ -451,7 +755,14 @@
     { name: 'SelectLuma', label: 'Select Luma' },
     { name: 'SelectClipHigh', label: 'Select Clip Hi' },
     { name: 'SelectMotion', label: 'Select Motion' },
-    { name: 'SelectAudio', label: 'Select Audio dB+100' }
+    { name: 'SelectAudio', label: 'Select Audio dB+100' },
+    { name: 'SelectPeople', label: 'Select People', tier2: true },
+    { name: 'SelectFaces', label: 'Select Faces', tier2: true },
+    { name: 'SelectShot', label: 'Select Shot', tier2: true },
+    { name: 'SelectColour', label: 'Select Colour', tier2: true },
+    { name: 'SelectSound', label: 'Select Sound', tier2: true },
+    { name: 'SelectLabels', label: 'Select Labels', tier2: true },
+    { name: 'SelectText', label: 'Select Text', tier2: true }
   ];
 
   function padUnit(v) {
@@ -474,7 +785,14 @@
       SelectLuma: padUnit(row.luma),
       SelectClipHigh: padFixed(row.clipHighPct, 3, 2),
       SelectMotion: padUnit(row.motionProxy),
-      SelectAudio: db === null || db === undefined ? '' : padFixed(Math.min(999.9, Math.max(0, db + 100)), 3, 1)
+      SelectAudio: db === null || db === undefined ? '' : padFixed(Math.min(999.9, Math.max(0, db + 100)), 3, 1),
+      SelectPeople: typeof row.people === 'number' ? pad(row.people, 3) : '',
+      SelectFaces: typeof row.faces === 'number' ? pad(row.faces, 3) : '',
+      SelectShot: fmtShot(row.shotSize),
+      SelectColour: fmtColour(row.colorName),
+      SelectSound: namesOf(row.sounds, 3) || '',
+      SelectLabels: namesOf(row.labels, 5) || '',
+      SelectText: (namesOf(row.text, 6) || '').slice(0, 120)
     };
   }
 
@@ -609,11 +927,13 @@
 
   // ---------------------------------------------------------------- clips with no picture scores
 
-  // The quiet words under a clip's name: the engine's first sentence, without its error number.
+  // The quiet words under a clip's name: the engine's first sentence, without its error number. A picture problem from
+  // Tier 1 comes first; failing to look closer in Tier 2 comes second.
   function noPictureWords(row) {
-    if (!row.reason) { return ''; }
-    var first = /^.+?\.(?=\s|$)/.exec(String(row.reason));
-    return (first ? first[0] : String(row.reason)).replace(/ \(error -?\d+\)/, '');
+    var reason = row.reason || row.lookReason;
+    if (!reason) { return ''; }
+    var first = /^.+?\.(?=\s|$)/.exec(String(reason));
+    return (first ? first[0] : String(reason)).replace(/ \(error -?\d+\)/, '');
   }
 
   // Why a scan left picture scores blank, said once for all of them, or '' when none are. Depends on the Mac, so it says so.
@@ -651,6 +971,8 @@
   // ---------------------------------------------------------------- read-back
 
   function countOf(list) { return list ? list.length : 0; }
+
+  function quoted(s) { return '\u201c' + s + '\u201d'; }
 
   // Did every sent id come back from the bin it was sent to, and nothing else?
   function binsRead(sent, res) {
@@ -738,6 +1060,41 @@
     return { finished: Math.min(finished, store.total), share: Math.min(1, (0.2 * Math.min(store.tier0 + store.errors, total) + 0.8 * Math.min(finished, total)) / total) };
   }
 
+  // Values that only Tier 2 sends. A view that sorts, filters or searches on them is not final until every clip has them.
+  var TIER2_KEYS = { people: 1, faces: 1, shotSize: 1, colorName: 1, soundText: 1, screenText: 1, labelText: 1, iso: 1, shutterS: 1, aperture: 1, shake: 1 };
+
+  function viewNeedsTier2(view, tokens) {
+    var p = view.preset ? PRESET[view.preset] : null;
+    if ((p && (p.needs || p.group === 'engine')) || view.family || (tokens && tokens.length)) { return true; }
+    return view.sort.some(function (s) { return TIER2_KEYS[s.key] === 1; });
+  }
+
+  // What the view is waiting on, in a few words for the foot.
+  function waitingOn(view, tokens) {
+    if (view.preset) { return PRESET[view.preset].label; }
+    if (view.family) { return FAMILY[view.family].word; }
+    var tier2 = view.sort.filter(function (s) { return TIER2_KEYS[s.key] === 1; })[0];
+    if (tier2) { return COLUMN[tier2.key].label; }
+    return tokens && tokens.length ? 'This search' : '';
+  }
+
+  // The fields Add Columns may write: Tier 2's only once it has landed for every clip, so it never writes a blank for a
+  // value that is still on its way.
+  function columnFields(tier2Landed) {
+    return FIELDS.filter(function (f) { return tier2Landed || !f.tier2; });
+  }
+
+  // Clips Tier 2 should reach: every clip except those the engine could not read at all.
+  function understandingShare(store) {
+    var due = Math.max(store.total - store.errors, 0), done = Math.min(store.tier2 + store.tier2Failed, due);
+    return { done: done, due: due, share: due ? done / due : 1, landed: done >= due };
+  }
+
+  function notUnderstoodSummary(store) {
+    var n = store.tier2Failed;
+    return n ? plural(n, 'clip') + ' could not be looked at more closely. ' + (n === 1 ? 'Its' : 'Their') + ' file details and picture scores stand.' : '';
+  }
+
   // The bottom line. Pure: every word of the foot comes from here, so tests read what a person would and no view decides.
   // f: {source, project, connected, listing, busy, outcome, scan: {state, failure, seconds, stopping}, store,
   //     rows, shown, selected, view, groupCount}
@@ -757,6 +1114,15 @@
     }
     if (sc && sc.state === 'Scanning') {
       var p = progress(st), rate = Math.round(p.finished / Math.max(sc.seconds, 0.001));
+      // Stage three: every clip is usable, and the engine is still looking closer. The panel works, so it says so quietly.
+      if (p.finished >= st.total && st.total && !sc.stopping) {
+        var u = understandingShare(st), hold = !u.landed && !!f.needsTier2;
+        var on = waitingOn(f.view, f.query ? [f.query] : null);
+        return { kind: 'understanding', mark: 'running', verdict: sortName(f.view) || plural(st.total, 'clip') + ' read', sentence: 'Still looking closer, on this Mac: ' + fmtInt(u.done) + ' of ' + fmtInt(u.due), meter: u.share,
+          actions: ['stop'].concat(writes), primary: 'bins', binsOff: !sorted,
+          held: hold ? writes : [],
+          wait: hold ? on + ' needs every clip looked at, so Label, Add Columns and Sort into Bins wait until it is done. They turn on by themselves.' : '' };
+      }
       return { kind: 'scanning', mark: 'running', verdict: sc.stopping ? 'Stopping' : 'Reading ' + fmtInt(p.finished) + ' of ' + fmtInt(st.total), sentence: fmtInt(rate) + ' clips per second', meter: p.share, actions: ['stop'] };
     }
     // The source changed since this scan, so Scan comes back to the foot. The results stay until it's pressed.
@@ -783,10 +1149,14 @@
     }
     var selected = f.selected;
     var words = viewWords(f.view);
+    var plain = f.view.preset ? PRESET[f.view.preset] : null;
+    if (f.status === 'none' && plain) { words = plain.none; }
     var seconds = sc.seconds < 10 ? sc.seconds.toFixed(1) : String(Math.round(sc.seconds));
-    var head = f.view.preset && PRESET[f.view.preset].group ? plural(f.groupCount, 'group') + ', ' + count + '.' : (f.shown === total ? clips + ' in ' + seconds + ' s.' : count + '.');
-    var line = selected ? fmtInt(selected) + ' of ' + clips + ' selected. Label, Add Columns and Sort into Bins use these.' : withBlank(words ? head + ' ' + words : 'Took ' + seconds + ' s. Pick a sort above.');
-    return { kind: 'finished', mark: 'done', verdict: sortName(f.view) || clips + ' read', sentence: line, actions: writes, primary: 'bins', binsOff: !sorted };
+    var head = f.view.preset && PRESET[f.view.preset].group ? plural(f.groupCount, 'group') + ', ' + count + '.' : (f.shown === total ? clips + ' in ' + seconds + ' s.' : count + (f.query ? ' match ' + quoted(f.query) + '.' : '.'));
+    var line = selected ? fmtInt(selected) + ' of ' + clips + ' selected. Label, Add Columns and Sort into Bins use these.' : withBlank(words ? head + ' ' + words : (f.shown === total ? 'Took ' + seconds + ' s. Pick a sort above.' : head));
+    var family = f.view.family ? FAMILY[f.view.family].word : '';
+    var name = sortName(f.view);
+    return { kind: 'finished', mark: 'done', verdict: family && name ? family + ', ' + name.toLowerCase() : family || name || clips + ' read', sentence: line, actions: writes, primary: 'bins', binsOff: !sorted };
   }
 
   return {
@@ -827,9 +1197,25 @@
     unreadableSummary: unreadableSummary,
     noPictureWords: noPictureWords,
     noPictureSummary: noPictureSummary,
+    notUnderstoodSummary: notUnderstoodSummary,
     engineFailure: engineFailure,
     writeOutcome: writeOutcome,
     undoOutcome: undoOutcome,
-    footState: footState
+    footState: footState,
+    GROUPS: GROUPS,
+    FAMILIES: FAMILIES,
+    FAMILY: FAMILY,
+    rainbowKey: rainbowKey,
+    searchTokens: searchTokens,
+    matches: matches,
+    matchedWord: matchedWord,
+    dataStatus: dataStatus,
+    presetCount: presetCount,
+    familyCounts: familyCounts,
+    viewNeedsTier2: viewNeedsTier2,
+    columnFields: columnFields,
+    understandingShare: understandingShare,
+    tileFact: tileFact,
+    quoted: quoted
   };
 });

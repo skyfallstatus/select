@@ -9,6 +9,9 @@ that goes away afterwards, capped at 64 MB. Without ffmpeg there are no clips to
 """
 import argparse, json, os, random, re, shutil, struct, subprocess, sys, tempfile
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import rtmd_clip
+
 MAX_BYTES = 64 * 1024 * 1024
 HERE = os.path.dirname(os.path.abspath(__file__))
 conf = open(os.path.join(HERE, '..', '..', 'product.conf')).read()
@@ -16,6 +19,8 @@ ENGINE = re.search(r'^ENGINE=(.+)$', conf, re.M).group(1)
 parser = argparse.ArgumentParser()
 parser.add_argument('--engine', default=os.path.join(HERE, '..', 'build', ENGINE))
 parser.add_argument('--count', type=int, default=300)
+parser.add_argument('--seed', type=int, default=11)
+parser.add_argument('--keep', help='leave the clips in this folder, to look at a failure')
 args = parser.parse_args()
 
 if not os.access(args.engine, os.X_OK):
@@ -58,7 +63,7 @@ def make_sources(folder):
     return made
 
 def damage(sources, folder, count):
-    random.seed(11)
+    random.seed(args.seed)
     listing, total = [], 0
     for i in range(count):
         p = sources[i % len(sources)]
@@ -91,13 +96,60 @@ def damage(sources, folder, count):
         listing.append(q)
     return listing
 
+def hostile_rtmd(sources, folder, count):
+    """Real-looking clips with a data track built to break a parser that trusts it."""
+    base = next(p for p in sources if p.endswith('.mp4'))
+    data = open(base, 'rb').read()
+    r = random.Random(args.seed + 12)
+    listing = []
+    for i in range(count):
+        samples = [bytearray(rtmd_clip.sample(seed=j)) for j in range(r.choice([1, 2, 12, 40]))]
+        kind = i % 9
+        for s in samples:
+            if kind == 0:                       # random damage anywhere
+                for _ in range(r.choice([4, 64, 512])):
+                    s[r.randrange(len(s))] = r.randrange(256)
+            elif kind == 1:                     # a header length past the end
+                s[0:2] = b'\xff\xff'
+            elif kind == 2:                     # gyro claims more readings than exist
+                at = s.find(b'\xe4\x3b')
+                s[at + 4:at + 8] = struct.pack('>I', 0xffffffff)
+            elif kind == 3:                     # every tag length a lie
+                for at in range(0x1c, len(s) - 4, 7):
+                    s[at + 2:at + 4] = b'\xff\xff'
+            elif kind == 4:                     # a sample cut short
+                del s[r.randrange(1, len(s)):]
+            elif kind == 5:                     # scale of zero, NaN or infinity
+                at = s.find(b'\xe4\x39')
+                s[at + 4:at + 8] = r.choice([bytes(4), b'\x7f\xc0\x00\x00', b'\x7f\x80\x00\x00'])
+            elif kind == 6:                     # shutter of 0/0, ISO of 0, wild f-number
+                at = s.find(b'\x81\x09')
+                s[at + 4:at + 12] = bytes(8)
+                at = s.find(b'\x80\x00')
+                s[at + 4:at + 6] = b'\xff\xff'
+            elif kind == 7:                     # a tag of 0x8300 repeating, the one that descends
+                s[0x1c:] = b'\x83\x00\x00\x00' * ((len(s) - 0x1c) // 4)
+        out = rtmd_clip.add_track(data, [bytes(s) for s in samples], per_chunk=r.choice([1, 12, 64]))
+        if kind == 8:                           # tables that point outside the file or claim absurd sizes
+            b = bytearray(out)
+            for name in (b'stsz', b'stco', b'stsc'):
+                at = b.rfind(name)
+                for _ in range(8):
+                    b[min(len(b) - 1, at + r.randrange(4, 40))] = r.randrange(256)
+            out = bytes(b)
+        q = f'{folder}/rtmd{i:03d}.mp4'
+        open(q, 'wb').write(out)
+        listing.append(q)
+    return listing
+
+
 def check(listing, label, env, cache):
     paths = '\n'.join(listing) + '\n'
-    run = subprocess.run([args.engine, 'scan', '--paths-file', '-', '--cache', cache, '--no-thumbs'], input=paths.encode(),
-                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env, timeout=240)
+    run = subprocess.run([args.engine, 'scan', '--paths-file', '-', '--cache', cache], input=paths.encode(),
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, timeout=240)
     problems = []
     if run.returncode != 0:
-        problems.append(f'exit {run.returncode}')
+        problems.append(f'exit {run.returncode}: ' + run.stderr.decode('utf8', 'replace')[-400:])
     seen, tier1, errors, done = set(), 0, 0, None
     for line in run.stdout.decode('utf8', 'replace').splitlines():
         try:
@@ -107,6 +159,8 @@ def check(listing, label, env, cache):
             continue
         if m['type'] == 'clip' or m['type'] == 'error':
             seen.add(m['path'])
+            if m.get('tier') == 2 and m.get('iso') not in (None, 1600) and m['iso'] < 0:
+                problems.append('a negative ISO')
             tier1 += m['type'] == 'clip' and m.get('tier') == 1
             errors += m['type'] == 'error'
         elif m['type'] == 'done':
@@ -122,15 +176,17 @@ def check(listing, label, env, cache):
         print('FAIL', p)
     return not problems
 
-tmp = tempfile.mkdtemp(prefix='engine-fuzz.')
+tmp = args.keep or tempfile.mkdtemp(prefix='engine-fuzz.')
 try:
     sources_dir = os.path.join(tmp, 'src')
     out = os.path.join(tmp, 'out')
     os.makedirs(sources_dir)
     os.makedirs(out)
-    listing = damage(make_sources(sources_dir), out, args.count)
+    sources = make_sources(sources_dir)
+    listing = damage(sources, out, args.count) + hostile_rtmd(sources, out, 90)
     good = check(listing, 'with ffmpeg', dict(os.environ), os.path.join(tmp, 'c1'))
     good = check(listing, 'without ffmpeg', dict(os.environ, ENGINE_TEST_NO_FFMPEG='1'), os.path.join(tmp, 'c2')) and good
 finally:
-    shutil.rmtree(tmp, ignore_errors=True)
+    if not args.keep:
+        shutil.rmtree(tmp, ignore_errors=True)
 sys.exit(0 if good else 1)

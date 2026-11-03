@@ -12,7 +12,7 @@ C.addItems(store, paths.map(p => ({ path: p })));
 const lines = [];
 const t0 = performance.now();
 let first = null;
-const keys = { 0: new Set(), 1: new Set() };
+const keys = { 0: new Set(), 1: new Set(), 2: new Set() };
 N.runEngine(binary, paths, {
   onMessage: m => {
     if (first === null && m.type === 'clip') { first = performance.now() - t0; }
@@ -30,6 +30,9 @@ N.runEngine(binary, paths, {
     const env = new Set(['type', 'tier', 'path', 'cached', 'ms']);
     console.log('tier 0 missing:', contract0.filter(k => !keys[0].has(k)), 'extra:', [...keys[0]].filter(k => !contract0.includes(k) && !env.has(k)));
     console.log('tier 1 missing:', contract1.filter(k => !keys[1].has(k)), 'extra:', [...keys[1]].filter(k => !contract1.includes(k) && !env.has(k)));
+    const contract2 = 'moments people faces shotSize labels text sounds speech music iso shutterS aperture whiteBalanceK shake colorHue colorChroma colorLight colorName palette'.split(' ');
+    console.log('tier 2 missing:', contract2.filter(k => !keys[2].has(k)), 'extra:', [...keys[2]].filter(k => !contract2.includes(k) && !env.has(k)));
+    console.log(`tier2 ${store.tier2}, failed ${store.tier2Failed}, groups ${store.groups ? store.groups.length : 'none'}`);
     const nums = k => store.rows.map(r => r[k]).filter(v => typeof v === 'number').sort((a, b) => a - b);
     for (const k of ['sharpness', 'luma', 'clipHighPct', 'motionProxy', 'audioDb']) {
       const v = nums(k);

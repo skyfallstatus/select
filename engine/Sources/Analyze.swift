@@ -82,7 +82,7 @@ private func colour(_ f: FrameView, into m: inout Metrics) {
     m.warmth = max(-1, min(1, (red - blue) / max(red + blue, 0.02)))
 }
 
-/// Box-filtered display-orientation proxy, 240 px on the long side, 10-bit YCbCr.
+/// Box-filtered display-orientation proxy, 480 px on the long side, 10-bit YCbCr.
 struct Proxy {
     var width = 0
     var height = 0
@@ -94,17 +94,18 @@ struct Proxy {
 private func cellEdges(_ cells: Int, _ total: Int) -> [Int] { (0...cells).map { $0 * total / cells } }
 
 private func makeProxy(_ f: FrameView, rotation: Int) -> Proxy {
-    let long = 240
+    let long = 480
     let scale = Double(long) / Double(max(f.width, f.height))
     let pw = max(1, Int((Double(f.width) * scale).rounded())), ph = max(1, Int((Double(f.height) * scale).rounded()))
     var ys = [Float](repeating: 0, count: pw * ph)
     var cbs = ys, crs = ys
     let xe = cellEdges(pw, f.width), ye = cellEdges(ph, f.height)
     let cxe = cellEdges(pw, f.width / 2), cye = cellEdges(ph, f.height / 2)
+    let colStep = f.width / pw >= 4 ? 2 : 1
     for py in 0..<ph {
         var y0 = ye[py]
         let y1 = max(y0 + 1, ye[py + 1])
-        // Every other row is enough for a thumbnail and halves the cost.
+        // Every other row and column is enough for a thumbnail, and it's what keeps Tier 1 at its old speed.
         let rowStep = y1 - y0 >= 4 ? 2 : 1
         var rows = 0
         var acc = [UInt32](repeating: 0, count: pw)
@@ -112,14 +113,20 @@ private func makeProxy(_ f: FrameView, rotation: Int) -> Proxy {
             let row = f.y + y0 * f.yStride
             for px in 0..<pw {
                 var s: UInt32 = 0
-                for x in xe[px]..<max(xe[px] + 1, xe[px + 1]) { s &+= UInt32(row[x] >> 6) }
+                let x0 = xe[px], x1 = max(x0 + 1, xe[px + 1])
+                var x = x0
+                while x < x1 {
+                    s &+= UInt32(row[x] >> 6)
+                    x += colStep
+                }
                 acc[px] &+= s
             }
             rows += 1
             y0 += rowStep
         }
         for px in 0..<pw {
-            ys[py * pw + px] = Float(acc[px]) / Float(rows * max(1, xe[px + 1] - xe[px]))
+            let taken = (max(1, xe[px + 1] - xe[px]) + colStep - 1) / colStep
+            ys[py * pw + px] = Float(acc[px]) / Float(rows * taken)
         }
         let cy = min(cye[py], f.height / 2 - 1)
         let row = f.uv + cy * f.uvStride
@@ -183,14 +190,16 @@ private func differenceHash(_ p: Proxy) -> String {
     return String(format: "%016llx", bits)
 }
 
-private func writeThumbnail(_ p: Proxy, to path: String) -> Bool {
+private func writeThumbnail(_ p: Proxy, isLog: Bool, to path: String) -> Bool {
     var rgb = [UInt8](repeating: 255, count: p.width * p.height * 4)
     for i in 0..<(p.width * p.height) {
         let y = (p.y[i] - 64) / 876, b = (p.cb[i] - 512) / 896, r = (p.cr[i] - 512) / 896
-        let cr = y + 1.5748 * r, cg = y - 0.1873 * b - 0.4681 * r, cb = y + 1.8556 * b
-        rgb[i * 4] = UInt8(max(0, min(255, cr * 255)))
-        rgb[i * 4 + 1] = UInt8(max(0, min(255, cg * 255)))
-        rgb[i * 4 + 2] = UInt8(max(0, min(255, cb * 255)))
+        var c = SIMD3<Float>(y + 1.5748 * r, y - 0.1873 * b - 0.4681 * r, y + 1.8556 * b)
+        // Log is flat on purpose. A thumbnail should look like the shot, not like the recording.
+        if isLog { c = gradeLog(c) }
+        rgb[i * 4] = UInt8(max(0, min(255, c.x * 255)))
+        rgb[i * 4 + 1] = UInt8(max(0, min(255, c.y * 255)))
+        rgb[i * 4 + 2] = UInt8(max(0, min(255, c.z * 255)))
     }
     return rgb.withUnsafeMutableBytes { raw -> Bool in
         guard let space = CGColorSpace(name: CGColorSpace.sRGB),
@@ -205,7 +214,7 @@ private func writeThumbnail(_ p: Proxy, to path: String) -> Bool {
     }
 }
 
-func analyze(_ f: FrameView, rotation: Int, sourceBits: Int?, thumbPath: String?) -> Metrics? {
+func analyze(_ f: FrameView, rotation: Int, sourceBits: Int?, isLog: Bool, thumbPath: String?) -> Metrics? {
     guard f.width >= 8, f.height >= 8 else { return nil }
     var m = Metrics()
     tone(f, into: &m)
@@ -215,7 +224,7 @@ func analyze(_ f: FrameView, rotation: Int, sourceBits: Int?, thumbPath: String?
     m.dhash = differenceHash(proxy)
     if let thumbPath {
         let t0 = DispatchTime.now().uptimeNanoseconds
-        m.thumbWritten = writeThumbnail(proxy, to: thumbPath)
+        m.thumbWritten = writeThumbnail(proxy, isLog: isLog, to: thumbPath)
         m.thumbMs = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1e6
     }
     return m

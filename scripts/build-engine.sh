@@ -20,6 +20,7 @@ for ARCH in arm64 x86_64; do
       engine/Sources/*.swift $GEN/Version.swift \
       -framework VideoToolbox -framework CoreMedia -framework CoreVideo \
       -framework AudioToolbox -framework ImageIO -framework CoreGraphics \
+      -framework Vision -framework SoundAnalysis -framework AVFAudio -framework Accelerate \
       -o engine/build/$ARCH/$ENGINE
 done
 

@@ -35,11 +35,13 @@ Please don't move something up without the evidence for it.
 scripts/test.sh
 ```
 
-That builds the engine and runs the contract test, the fuzz test and the panel's unit tests. It needs no footage, no Premiere and no hardware. ffmpeg makes the test clips, so without it the clip tests skip and say so. The contract test stops itself after 5 minutes, and the fuzz test stops at 64 MB of clips.
+That builds the engine and runs the contract test, the fuzz test and the panel's unit tests. It needs no footage, no Premiere and no hardware. ffmpeg makes the test clips, so without it the clip tests skip and say so. The contract test stops itself after 7 minutes, and the fuzz test stops at 64 MB of clips.
 
 - **Engine changes** need a test in `engine/tests/contract.sh`. If you change a line of output, change `docs/ENGINE.md` too.
-- **Anything that handles a broken file** goes through `engine/tests/fuzz.py`. It must never crash.
+- **Anything that handles a broken file** goes through `engine/tests/fuzz.py`, with several `--seed` values. It must never crash. The build has no runtime checks, and Apple's frameworks can throw exceptions Swift can't catch, so check values before you hand them over. `engine/tests/rtmd_clip.py` builds a Sony-style data track, friendly or hostile, with no Sony file.
 - **Decoder changes:** the engine has to stay usable on a Mac with no decoder for a format. `ENGINE_TEST_DECODER` and `ENGINE_TEST_NO_FFMPEG` force that path, and the contract test shows how.
+- **Anything that holds a result per clip** must stay flat at 50,000 clips. `engine/tests/scale.sh` runs that many from generated clips in a few minutes, with a stand-in for Vision, and reports peak memory.
+- **Anything that calls Apple's frameworks** must be able to hang without stopping the scan. The contract test forces a hang at each stage with `ENGINE_TEST_HANG`.
 - **Panel changes:** run `node --test test/unit.test.js` in `panel/`.
 
 To try the panel in Premiere, `scripts/dev-install.sh` copies an unsigned build to your own extensions folder. It needs Adobe's debug mode, which lets every unsigned extension load, so turn it off afterwards.

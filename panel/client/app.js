@@ -6,16 +6,27 @@
   var ISSUES_URL = 'https://github.com/skyfallstatus/select/issues/new';
   var THEME_EVENT = 'com.adobe.csxs.events.ThemeColorChanged';
   var SOURCE_NAMES = { selection: 'Selection', project: 'Project', folder: 'Folder' };
+  // The grid: tiles at least this wide, as many as fit, 16:9 pictures, one line under each.
+  var TILE_MIN = 130, TILE_GAP = 10, TILE_ROW_GAP = 12, TILE_CAPTION = 21, TILE_TOP = 12, HEAD_H = 24;
 
   var $ = function (id) { return document.getElementById(id); };
   var plural = C.plural, fmtInt = C.fmtInt;
   var S = {
     store: C.createStore(),
-    view: { sort: [], preset: null },
+    view: { sort: [], preset: null, family: null },
     history: [],
     order: [],
     hasGroups: false,
     groupCount: 0,
+    breaks: [],          // where each group starts in `order`
+    mode: 'list',        // list or grid: the same rows, sort, filter, selection and writes
+    query: '',
+    tokens: [],
+    searchMs: null,
+    L: { cols: 1, pitch: ROW_H, top: 0, ys: null, xs: null, heads: [], height: 0, tileW: 0, picH: 0 },
+    tiles: [],
+    heads: [],
+    paintKey: 0,
     selected: new Set(),
     anchor: null,
     source: 'selection',
@@ -106,6 +117,18 @@
     el.hidden = !text;
   }
 
+  function scanRunning() {
+    return !!(S.scan && S.scan.handle);
+  }
+
+  // A selection only counts for what is on screen: a filter or a search can hide selected clips.
+  function selectedInView() {
+    if (!S.selected.size) { return 0; }
+    var n = 0;
+    for (var i = 0; i < S.order.length; i++) { if (S.selected.has(S.order[i])) { n++; } }
+    return n;
+  }
+
   function scanSeconds() {
     var sc = S.scan;
     return sc ? ((sc.endedAt || performance.now()) - sc.startedAt) / 1000 : 0;
@@ -125,20 +148,23 @@
       store: S.store,
       rows: S.store.rows.length,
       shown: S.order.length,
-      selected: S.selected.size,
+      selected: selectedInView(),
       view: S.view,
-      groupCount: S.groupCount
+      groupCount: S.groupCount,
+      query: S.query.trim(),
+      needsTier2: C.viewNeedsTier2(S.view, S.tokens),
+      status: C.dataStatus(S.store.rows, S.view.preset, scanRunning())
     };
   }
 
   var ACTIONS = { scan: 'scan', stop: 'stop', label: 'do-label', columns: 'do-columns', bins: 'do-bins', undo: 'undo-write', details: 'foot-details' };
 
-  // A new sentence fades in. A running count changes in place, and reduced motion means no fade at all.
+  // A new sentence fades in. A running count, in either stage of a scan, changes in place, and reduced motion means no fade at all.
   function setFootWords(id, text, kind) {
     var el = $(id);
     if (el.textContent === text) { return; }
     el.textContent = text;
-    if (kind !== 'scanning' && !matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    if (kind !== 'scanning' && kind !== 'understanding' && !matchMedia('(prefers-reduced-motion: reduce)').matches) {
       el.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 200, delay: 50, easing: 'ease-out', fill: 'backwards' });
     }
   }
@@ -161,11 +187,15 @@
       b.hidden = !on;
       b.className = 'action' + (f.primary === a ? ' primary' : '') + (f.green ? ' on-safe' : '');
     });
-    $('do-bins').disabled = !!f.binsOff || !S.order.length;
-    $('do-bins').title = f.binsOff ? 'Pick a sort first. Bins are built from it.' : 'Move project items into new numbered bins by the active sort. Files on disk stay where they are';
-    $('do-label').disabled = $('do-columns').disabled = !S.order.length;
+    var held = f.held || [];
+    $('do-bins').disabled = !!f.binsOff || !S.order.length || held.indexOf('bins') >= 0;
+    $('do-bins').title = held.length ? f.wait : f.binsOff ? 'Pick a sort first. Bins are built from it.' : 'Move project items into new numbered bins by the active sort. Files on disk stay where they are';
+    $('do-label').disabled = !S.order.length || held.indexOf('label') >= 0;
+    $('do-columns').disabled = !S.order.length || held.indexOf('columns') >= 0;
+    $('do-label').title = held.length ? f.wait : 'Set a colour label on the selected clips, or on the current view';
+    $('do-columns').title = held.length ? f.wait : 'Write the scores to project metadata, so the Project panel can sort by them';
     $('undo-write').title = S.lastWrite ? 'Puts back: ' + S.lastWrite.title : '';
-    var tail = S.scan && f.kind !== 'scanning' && !f.green ? statusLine() : '';
+    var tail = S.scan && f.kind !== 'scanning' && !f.green ? [f.wait || '', statusLine()].filter(Boolean).join(' ') : '';
     $('status-unread').textContent = tail;
     $('status-unread').hidden = !tail;
     renderHeader();
@@ -173,19 +203,37 @@
 
   // Clips that could not be read, and why, in one plain sentence.
   function statusLine() {
-    var line = C.unreadableSummary(S.store.rows), bad = S.store.bad;
+    var line = [C.unreadableSummary(S.store.rows), C.notUnderstoodSummary(S.store)].filter(Boolean).join(' '), bad = S.store.bad;
     if (bad) { line += (line ? ' ' : '') + plural(bad, 'engine line') + ' could not be understood.'; }
     return line;
   }
 
   function renderView() {
-    var v = S.view, buttons = document.querySelectorAll('#presets button');
-    $('clear-view').classList.toggle('off', !v.sort.length && !v.preset);     // keeps its place, so the row never reflows
-    for (var i = 0; i < buttons.length; i++) {
-      var on = buttons[i].dataset.id === v.preset;
-      buttons[i].classList.toggle('on', on);
-      buttons[i].setAttribute('aria-pressed', on ? 'true' : 'false');
-    }
+    var v = S.view, p = v.preset;
+    $('clear-view').classList.toggle('off', !v.sort.length && !v.preset && !v.family);     // keeps its place, so the row never reflows
+    Array.prototype.forEach.call(document.querySelectorAll('#presets [data-id], #presets [data-group]'), function (b) {
+      var group = b.dataset.group ? C.GROUPS.filter(function (g) { return g.id === b.dataset.group; })[0] : null;
+      var on = group ? group.presets.indexOf(p) >= 0 : b.dataset.id === p;
+      b.classList.toggle('on', on);
+      b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
+    var counts = C.familyCounts(S.store.rows);
+    Array.prototype.forEach.call(document.querySelectorAll('#families button'), function (b) {
+      var f = C.FAMILY[b.dataset.family], n = counts[f.id] || 0;
+      b.classList.toggle('on', v.family === f.id);
+      b.classList.toggle('empty', !n);
+      b.title = n ? f.word + ': ' + plural(n, 'clip') : f.word + ': none yet';
+    });
+    $('mode-list').classList.toggle('on', S.mode === 'list');
+    $('mode-grid').classList.toggle('on', S.mode === 'grid');
+    renderSearch();
+  }
+
+  function renderSearch() {
+    var on = !!S.query.trim();
+    $('search-count').hidden = !on;
+    $('search-clear').hidden = !S.query;
+    if (on) { $('search-count').textContent = fmtInt(S.order.length) + ' of ' + fmtInt(S.store.rows.length); }
   }
 
   // A row or view change moves on from the last write's result. Undo stays in the menu.
@@ -205,7 +253,7 @@
     var sorting = {};
     S.view.sort.forEach(function (s) { sorting[s.key] = true; });
     return C.COLUMNS.filter(function (c) {
-      return c.onlyWithGroups ? S.hasGroups : columnOn(c) || sorting[c.key];
+      return !c.onlyWithGroups && (columnOn(c) || sorting[c.key]);     // groups head their own rows, so they need no column
     });
   }
 
@@ -237,7 +285,7 @@
     var cells = $('head').children, sort = S.view.sort;
     for (var i = 0; i < cells.length; i++) {
       var cell = cells[i], c = C.COLUMN[cell.dataset.key], at = -1;
-      for (var j = 0; j < sort.length; j++) { if (sort[j].key === c.key) { at = j; } }
+      for (var j = 0; j < sort.length; j++) { if (sort[j].key === c.key && !S.hasGroups) { at = j; } }
       cell.textContent = c.label;
       cell.classList.toggle('sorted', at >= 0);
       if (at >= 0) {
@@ -271,7 +319,7 @@
       var cells = [], thumb = null, nameText = null, why = null;
       for (var i = 0; i < S.columns.length; i++) {
         var col = S.columns[i], cell = document.createElement('div');
-        cell.className = 'c c-' + col.key + (col.kind === 'number' ? ' num' : '') + (col.kind === 'date' || col.key === 'camera' || col.key === 'lens' || col.key === 'codec' ? ' quiet' : '');
+        cell.className = 'c c-' + col.key + (col.kind === 'number' ? ' num' : '') + (col.kind === 'color' ? ' pal' : '') + (col.kind === 'date' || (col.kind === 'text' && col.key !== 'name') ? ' quiet' : '');
         placeCell(cell, col, i === S.columns.length - 1);
         if (col.kind === 'thumb') {
           thumb = document.createElement('img');
@@ -286,6 +334,8 @@
           why.className = 'why';
           cell.appendChild(nameText);
           cell.appendChild(why);
+        } else if (col.kind === 'color') {
+          for (var k = 0; k < 5; k++) { cell.appendChild(document.createElement('i')); }
         }
         el.appendChild(cell);
         cells.push(cell);
@@ -295,18 +345,30 @@
     }
   }
 
+  function paintPalette(chips, row) {
+    var colours = row.palette || [];
+    for (var i = 0; i < chips.length; i++) { chips[i].style.background = colours[i] || 'transparent'; }
+  }
+
   function paintRow(slot, row) {
     for (var i = 0; i < S.columns.length; i++) {
       var col = S.columns[i];
       if (col.kind === 'thumb') { continue; }
       if (col.key === 'name') {
-        var reason = row.error ? C.unreadableReason(row) : C.noPictureWords(row);
+        var hit = C.matchedWord(row, S.tokens);
+        var reason = row.error ? C.unreadableReason(row) : hit || C.noPictureWords(row);
         if (slot.nameText.textContent !== row.name) { slot.nameText.textContent = row.name; }
         if (slot.why.textContent !== reason) { slot.why.textContent = reason; }
-        slot.cells[i].title = row.reason ? row.path + '\n' + row.reason : row.path;
+        slot.why.classList.toggle('hit', !!hit && !row.error);
+        slot.cells[i].title = row.reason || row.lookReason ? row.path + '\n' + (row.reason || row.lookReason) : row.path;
         continue;
       }
       var cell = slot.cells[i], text = C.cellText(row, col);
+      if (col.kind === 'color') {
+        paintPalette(cell.children, row);
+        cell.title = text;
+        continue;
+      }
       if (cell.textContent !== text) { cell.textContent = text; }
     }
     var want = row.thumb || null;
@@ -317,30 +379,229 @@
     }
   }
 
+  // Where everything sits, for both views. Plain views are arithmetic; a view with groups measures once per change.
+  function buildLayout() {
+    var L = S.L, grid = S.mode === 'grid', n = S.order.length;
+    if (grid) {
+      var width = Math.max($('grid').clientWidth, 200) - 32;
+      L.cols = Math.max(2, Math.floor((width + TILE_GAP) / (TILE_MIN + TILE_GAP)));
+      L.tileW = Math.floor((width - (L.cols - 1) * TILE_GAP) / L.cols);
+      L.picH = Math.round(L.tileW * 9 / 16);
+      L.pitch = L.picH + TILE_CAPTION + TILE_ROW_GAP;
+      L.top = TILE_TOP;
+    } else {
+      L.cols = 1;
+      L.pitch = ROW_H;
+      L.top = 0;
+    }
+    L.ys = L.xs = null;
+    L.heads = [];
+    if (S.breaks.length) {
+      L.ys = new Int32Array(n);
+      L.xs = new Int32Array(n);
+      // Groups pack along shelves in the grid, as prints on a sheet do, so a run of small groups leaves no holes.
+      var y = 0, col = 0, shelf = 0, unit = L.tileW + TILE_GAP;
+      S.breaks.forEach(function (b) {
+        if (!grid || col + b.count > L.cols) {
+          y += shelf;
+          col = 0;
+          shelf = 0;
+        }
+        var rows = Math.ceil(b.count / L.cols), span = Math.min(b.count, L.cols);
+        L.heads.push({ y: y, x: col * unit, width: span * unit - TILE_GAP, text: 'Group ' + b.number + ' · ' + plural(b.count, 'clip') });
+        for (var k = 0; k < b.count; k++) {
+          L.ys[b.at + k] = y + HEAD_H + Math.floor(k / L.cols) * L.pitch;
+          L.xs[b.at + k] = (col + k % L.cols) * unit;
+        }
+        shelf = Math.max(shelf, HEAD_H + rows * L.pitch);
+        col = rows > 1 ? L.cols : col + span;
+      });
+      L.height = y + shelf;
+    } else {
+      L.height = L.top + Math.ceil(n / L.cols) * L.pitch;
+    }
+    var box = grid ? $('tiles') : $('body');
+    box.style.height = L.height + 'px';
+    if (grid) { buildTiles(); }
+    buildHeads(box);
+  }
+
+  function yOf(at) {
+    var L = S.L;
+    return L.ys ? L.ys[at] : L.top + Math.floor(at / L.cols) * L.pitch;
+  }
+
+  function xOf(at) {
+    var L = S.L;
+    return L.xs ? L.xs[at] : (at % L.cols) * (L.tileW + TILE_GAP);
+  }
+
+  // The first clip whose row reaches past `top`.
+  function firstAt(top) {
+    var L = S.L, n = S.order.length;
+    if (top <= 0 || !n) { return 0; }
+    if (!L.ys) { return Math.max(0, Math.floor((top - L.top) / L.pitch)) * L.cols; }
+    var lo = 0, hi = n - 1;
+    while (lo < hi) {
+      var mid = (lo + hi) >> 1;
+      if (L.ys[mid] + L.pitch <= top) { lo = mid + 1; } else { hi = mid; }
+    }
+    return lo;
+  }
+
+  function buildHeads(box) {
+    var need = S.L.heads.length ? Math.ceil($('grid').clientHeight / HEAD_H) + 2 : 0;
+    while (S.heads.length > need) { S.heads.pop().remove(); }
+    while (S.heads.length < need) {
+      var h = document.createElement('div');
+      h.className = 'gh';
+      S.heads.push(h);
+    }
+    S.heads.forEach(function (h) { if (h.parentNode !== box) { box.appendChild(h); } });
+  }
+
+  function renderHeads(top, bottom) {
+    var heads = S.L.heads, used = 0;
+    for (var i = 0; i < heads.length && used < S.heads.length; i++) {
+      if (heads[i].y + HEAD_H < top || heads[i].y > bottom) { continue; }
+      var el = S.heads[used++];
+      el.style.top = heads[i].y + 'px';
+      if (S.mode === 'grid') {
+        el.style.left = 16 + heads[i].x + 'px';
+        el.style.width = heads[i].width + 'px';
+      } else {
+        el.style.left = el.style.width = '';
+      }
+      if (el.textContent !== heads[i].text) { el.textContent = heads[i].text; }
+      el.hidden = false;
+    }
+    for (; used < S.heads.length; used++) { S.heads[used].hidden = true; }
+  }
+
   function renderRows() {
     var grid = $('grid'), rows = S.store.rows, order = S.order;
-    var first = Math.max(0, Math.floor(grid.scrollTop / ROW_H) - OVERSCAN);
+    var first = Math.max(0, firstAt(grid.scrollTop) - OVERSCAN);
     for (var p = 0; p < S.pool.length; p++) {
       var slot = S.pool[p], at = first + p;
       if (at >= order.length) {
         if (slot.y !== -2) { slot.el.style.display = 'none'; slot.y = -2; slot.rowId = -1; }
         continue;
       }
-      var row = rows[order[at]], y = at * ROW_H;
+      var row = rows[order[at]], y = yOf(at);
       if (slot.y !== y) {
         if (slot.y === -2) { slot.el.style.display = ''; }
         slot.el.style.transform = 'translate3d(0,' + y + 'px,0)';
         slot.y = y;
       }
       slot.el.dataset.at = at;
-      if (slot.rowId !== row.rowId || slot.version !== (row.version || 0)) {
+      var version = (row.version || 0) + S.paintKey * 1e6;
+      if (slot.rowId !== row.rowId || slot.version !== version) {
         paintRow(slot, row);
         slot.rowId = row.rowId;
-        slot.version = row.version || 0;
+        slot.version = version;
       }
-      var cls = 'r' + (row.tier === 1 || row.error ? '' : ' pending') + (row.error ? ' err' : '') + (row.error || row.reason ? ' two' : '') + (S.selected.has(row.rowId) ? ' sel' : '');
+      var cls = 'r' + (row.tier === 1 || row.error ? '' : ' pending') + (row.error ? ' err' : '') + (row.error || row.reason || row.lookReason || (slot.why.textContent && slot.why.classList.contains('hit')) ? ' two' : '') + (S.selected.has(row.rowId) ? ' sel' : '');
       if (slot.cls !== cls) { slot.el.className = cls; slot.cls = cls; }
     }
+    renderHeads(grid.scrollTop, grid.scrollTop + grid.clientHeight);
+  }
+
+  // ---------------------------------------------------------------- the grid
+
+  // A ring of tiles: a clip always lands in the same tile while it stays in range, so scrolling paints only what is new.
+  function buildTiles() {
+    var L = S.L, box = $('tiles');
+    var need = L.cols * (Math.ceil($('grid').clientHeight / L.pitch) + 3), size = L.tileW + 'x' + L.picH;
+    if (S.tiles.length === need && S.tileSize === size) { return; }
+    S.tileSize = size;
+    while (S.tiles.length) { S.tiles.pop().el.remove(); }
+    for (var i = 0; i < need; i++) {
+      var el = document.createElement('div');
+      el.className = 't';
+      el.style.width = L.tileW + 'px';
+      el.style.height = L.picH + TILE_CAPTION + 'px';
+      var pic = document.createElement('div');
+      pic.className = 'pic';
+      pic.style.height = L.picH + 'px';
+      var img = document.createElement('img');
+      img.draggable = false;
+      img.alt = '';
+      img.hidden = true;
+      img.decoding = 'async';
+      pic.appendChild(img);
+      var cap = document.createElement('div');
+      cap.className = 'cap';
+      var name = document.createElement('span');
+      name.className = 'n';
+      var fact = document.createElement('span');
+      fact.className = 'f';
+      var chips = document.createElement('span');
+      chips.className = 'p';
+      chips.hidden = true;
+      for (var k = 0; k < 5; k++) { chips.appendChild(document.createElement('i')); }
+      cap.appendChild(name);
+      cap.appendChild(fact);
+      cap.appendChild(chips);
+      el.appendChild(pic);
+      el.appendChild(cap);
+      box.appendChild(el);
+      S.tiles.push({ el: el, pic: pic, img: img, name: name, fact: fact, chips: chips, key: '', thumbPath: null, x: -1, y: -1, cls: '' });
+    }
+  }
+
+  function paintTile(slot, row) {
+    var colour = S.view.sort.length && S.view.sort[0].key === 'colorName' && !!row.palette && !S.tokens.length;
+    if (slot.name.textContent !== row.name) { slot.name.textContent = row.name; }
+    var fact = colour ? '' : C.tileFact(row, S.view, S.tokens);
+    if (slot.fact.textContent !== fact) { slot.fact.textContent = fact; }
+    slot.fact.hidden = colour;
+    slot.fact.classList.toggle('hit', !!S.tokens.length);
+    slot.chips.hidden = !colour;
+    if (colour) { paintPalette(slot.chips.children, row); }
+    var why = row.error ? C.unreadableReason(row) : row.reason || row.lookReason;
+    slot.el.title = why ? row.path + '\n' + why : row.path;
+    // The clip's own colour holds the place until its picture is decoded, so a fast scroll reads as the footage.
+    slot.pic.style.background = row.palette && row.palette[0] ? row.palette[0] : '';
+    var want = row.thumb || null;
+    if (want !== slot.thumbPath) {
+      slot.thumbPath = want;
+      slot.img.hidden = !want;
+      if (want) { slot.img.src = C.fileUrl(want); } else { slot.img.removeAttribute('src'); }
+    }
+  }
+
+  function renderTiles() {
+    var grid = $('grid'), L = S.L, rows = S.store.rows, order = S.order, size = S.tiles.length, n = order.length;
+    if (!size) { return; }
+    var first = firstAt(grid.scrollTop - L.pitch);
+    first -= first % L.cols;
+    for (var s = 0; s < size; s++) {
+      var at = first + ((s - first % size) + size) % size, slot = S.tiles[s];
+      if (at >= n) {
+        if (slot.y !== -2) { slot.el.style.display = 'none'; slot.y = -2; slot.key = ''; }
+        continue;
+      }
+      var row = rows[order[at]], x = 16 + xOf(at), y = yOf(at);
+      if (slot.y !== y || slot.x !== x) {
+        if (slot.y === -2) { slot.el.style.display = ''; }
+        slot.el.style.transform = 'translate3d(' + x + 'px,' + y + 'px,0)';
+        slot.x = x;
+        slot.y = y;
+      }
+      slot.el.dataset.at = at;
+      var key = row.rowId + ':' + (row.version || 0) + ':' + S.paintKey;
+      if (slot.key !== key) {
+        paintTile(slot, row);
+        slot.key = key;
+      }
+      var cls = 't' + (row.tier === 1 || row.error ? '' : ' pending') + (S.selected.has(row.rowId) ? ' sel' : '');
+      if (slot.cls !== cls) { slot.el.className = cls; slot.cls = cls; }
+    }
+    renderHeads(grid.scrollTop - L.pitch, grid.scrollTop + grid.clientHeight + L.pitch);
+  }
+
+  function renderItems() {
+    if (S.mode === 'grid') { renderTiles(); } else { renderRows(); }
   }
 
   var rafPending = false;
@@ -349,15 +610,42 @@
     rafPending = true;
     requestAnimationFrame(function () {
       rafPending = false;
-      renderRows();
+      renderItems();
     });
   }
 
+  function setMode(mode) {
+    if (mode === S.mode) { return; }
+    var at = firstAt($('grid').scrollTop);
+    S.mode = mode;
+    try { localStorage.setItem('select.mode', mode); } catch (e) {}
+    var grid = mode === 'grid';
+    $('body').hidden = $('head').hidden = grid;
+    $('tiles').hidden = !grid;
+    $('grid').classList.toggle('tiled', grid);
+    S.paintKey++;
+    applyView();
+    $('grid').scrollTop = at ? yOf(Math.min(at, S.order.length - 1)) : 0;
+    renderItems();
+  }
+
+  // Blank table, plain words. Waiting and nothing-there read differently, because they mean different things.
   function emptyText() {
-    if (S.store.rows.length && !S.order.length) {
-      return S.hasGroups ? 'No clips within ' + C.NEAR_DUP_BITS + ' bits of each other in this scan.' : 'No clip matches this view.';
-    }
-    return '';
+    if (!S.store.rows.length || S.order.length) { return ''; }
+    var p = S.view.preset ? C.PRESET[S.view.preset] : null, status = C.dataStatus(S.store.rows, S.view.preset, scanRunning());
+    if (S.tokens.length) { return 'Nothing matches ' + C.quoted(S.query.trim()) + '.' + (scanRunning() ? ' Still looking closer, so more may land.' : ''); }
+    if (status === 'waiting') { return (p && p.waiting) || 'Still looking closer at these clips. They land here as they are understood.'; }
+    if (status === 'none') { return p.none; }
+    if (S.view.family) { return 'No ' + C.FAMILY[S.view.family].word.toLowerCase() + ' clips here.'; }
+    if (S.hasGroups) { return p.group === 'engine' ? p.none : 'No clips within ' + C.NEAR_DUP_BITS + ' bits of each other in this scan.'; }
+    return 'No clip matches this view.';
+  }
+
+  function renderEmpty() {
+    var text = emptyText();
+    $('empty').hidden = !text;
+    $('empty-words').textContent = text;
+    $('empty-clear').hidden = !S.tokens.length;
   }
 
   function sameColumns(a, b) {
@@ -376,27 +664,30 @@
 
   // Recompute order from the current view. Returns milliseconds spent in sort and DOM.
   function applyView() {
-    var t0 = performance.now();
-    var res = C.computeView(S.store.rows, S.view, function () { return performance.now(); });
+    var t0 = performance.now(), tokens = C.searchTokens(S.query);
+    if (tokens.join(' ') !== S.tokens.join(' ')) { S.paintKey++; }
+    S.tokens = tokens;
+    var res = C.computeView(S.store.rows, S.view, function () { return performance.now(); }, { tokens: tokens });
     S.order = res.order;
     S.groupCount = res.groupCount;
     S.hasGroups = res.hasGroups;
+    S.breaks = res.breaks;
     syncColumns();
-    $('body').style.height = S.order.length * ROW_H + 'px';
     $('body').style.minWidth = totalWidth() + 'px';
+    buildLayout();
     renderHead();
     renderSortColumn();
-    renderRows();
+    renderItems();
     renderView();
     renderFoot();
-    $('empty').textContent = emptyText();
+    renderEmpty();
     S.lastComputed = performance.now();
     return S.lastComputed - t0;
   }
 
   // A user action on the view: measured and shown in the status line.
   function changeView(next) {
-    S.history.push({ sort: S.view.sort, preset: S.view.preset });
+    S.history.push(S.view);
     if (S.history.length > 50) { S.history.shift(); }
     S.view = next;
     measuredApply();
@@ -405,6 +696,7 @@
   function measuredApply() {
     moveOn();
     note('');
+    S.paintKey++;
     S.sortMs = applyView();
     S.sortRows = S.store.rows.length;
   }
@@ -417,30 +709,141 @@
   }
 
   function clearView() {
-    changeView({ sort: [], preset: null });
+    changeView({ sort: [], preset: null, family: null });
   }
 
-  // Pressing the active preset again puts back the view from before it.
+  // Pressing the active preset again puts back the view from before it. A colour family stays through it.
   function pressPreset(id) {
+    closeSortMenu();
     if (S.view.preset === id) {
-      changeView(S.beforePreset || { sort: [], preset: null });
+      var back = S.beforePreset || { sort: [], preset: null };
+      changeView({ sort: back.sort, preset: back.preset, family: S.view.family });
       S.beforePreset = null;
       return;
     }
     if (!S.view.preset) { S.beforePreset = S.view; }
-    changeView({ sort: C.PRESET[id].sort.slice(), preset: id });
+    changeView({ sort: C.PRESET[id].sort.slice(), preset: id, family: S.view.family });
+  }
+
+  // A family narrows whatever is on screen. With no sort yet it brings the rainbow, so Sort into Bins has one to use.
+  function pressFamily(id) {
+    var same = S.view.family === id, next = { sort: S.view.sort, preset: S.view.preset, family: same ? null : id };
+    if (!same && !next.sort.length && !next.preset) {
+      next.sort = C.PRESET.colour.sort.slice();
+      next.preset = 'colour';
+    }
+    changeView(next);
   }
 
   function headerClick(key, shift) {
     var p = S.view.preset ? C.PRESET[S.view.preset] : null;
     var keepPreset = p && (p.filter || p.group) ? S.view.preset : null;
-    changeView({ sort: C.nextSort(S.view.sort, key, shift), preset: keepPreset });
+    changeView({ sort: C.nextSort(S.view.sort, key, shift), preset: keepPreset, family: S.view.family });
+  }
+
+  // ---------------------------------------------------------------- search
+
+  function onSearch() {
+    S.query = $('search').value;
+    $('grid').scrollTop = 0;
+    moveOn();
+    note('');
+    var t0 = performance.now();
+    applyView();
+    S.searchMs = performance.now() - t0;
+  }
+
+  function clearSearch() {
+    $('search').value = '';
+    onSearch();
+    $('search').focus();
+  }
+
+  // ---------------------------------------------------------------- the sort row
+
+  function closeSortMenu() {
+    $('sort-menu').hidden = true;
+    S.sortMenu = null;
+  }
+
+  // Counts while there is something to count, waiting while the engine is still on it, and a plain no once it has finished.
+  function menuHint(id) {
+    var rows = S.store.rows;
+    if (!rows.length) { return ''; }
+    var status = C.dataStatus(rows, id, scanRunning());
+    if (status === 'waiting') { return 'waiting'; }
+    if (status === 'none') { return 'no data'; }
+    var n = C.presetCount(rows, id);
+    return n === null ? '' : fmtInt(n);
+  }
+
+  function openSortMenu(groupId, button) {
+    if (S.sortMenu === groupId) { closeSortMenu(); return; }
+    var group = C.GROUPS.filter(function (g) { return g.id === groupId; })[0], menu = $('sort-menu');
+    menu.textContent = '';
+    group.presets.forEach(function (id) {
+      var p = C.PRESET[id], b = document.createElement('button'), hint = document.createElement('span');
+      b.setAttribute('role', 'menuitem');
+      b.dataset.id = id;
+      b.title = p.tip;
+      b.textContent = p.label;
+      b.classList.toggle('on', S.view.preset === id);
+      hint.textContent = menuHint(id);
+      b.appendChild(hint);
+      b.onclick = function () { pressPreset(id); };
+      menu.appendChild(b);
+    });
+    menu.hidden = false;
+    var rect = button.getBoundingClientRect(), box = $('app').getBoundingClientRect();
+    menu.style.top = rect.bottom - box.top + 6 + 'px';
+    menu.style.left = Math.min(rect.left - box.left - 9, box.width - menu.offsetWidth - 8) + 'px';
+    S.sortMenu = groupId;
+    menu.firstChild.focus();
+  }
+
+  function buildSortRow() {
+    var row = $('presets');
+    var word = function (label, tip) {
+      var b = document.createElement('button');
+      b.className = 'word';
+      b.textContent = label;
+      b.dataset.label = label;
+      b.title = tip;
+      return b;
+    };
+    var colour = word(C.PRESET.colour.label, C.PRESET.colour.tip);
+    colour.dataset.id = 'colour';
+    colour.onclick = function () { pressPreset('colour'); };
+    row.appendChild(colour);
+    var dots = document.createElement('div');
+    dots.id = 'families';
+    C.FAMILIES.forEach(function (f) {
+      var b = document.createElement('button'), i = document.createElement('i');
+      b.dataset.family = f.id;
+      b.setAttribute('aria-label', f.word);
+      i.style.background = f.dot;
+      b.appendChild(i);
+      b.onclick = function () { pressFamily(f.id); };
+      dots.appendChild(b);
+    });
+    row.appendChild(dots);
+    C.GROUPS.forEach(function (g) {
+      var b = word(g.label, g.presets.map(function (id) { return C.PRESET[id].label; }).join(', '));
+      b.dataset.group = g.id;
+      b.setAttribute('aria-haspopup', 'true');
+      b.onclick = function (e) { e.stopPropagation(); openSortMenu(g.id, b); };
+      row.appendChild(b);
+    });
+    var shoot = word(C.PRESET.shoot.label, C.PRESET.shoot.tip);
+    shoot.dataset.id = 'shoot';
+    shoot.onclick = function () { pressPreset('shoot'); };
+    row.appendChild(shoot);
   }
 
   // ---------------------------------------------------------------- selection
 
   function rowAt(el) {
-    var r = el.closest('.r');
+    var r = el.closest('.r, .t');
     return r ? Number(r.dataset.at) : -1;
   }
 
@@ -461,16 +864,16 @@
     }
     moveOn();
     note('');
-    renderRows();
+    renderItems();
     renderFoot();
   }
 
-  // Selected rows when there are any, else the current view. Always in view order.
+  // Selected rows on screen when there are any, else the current view. Always in view order.
   function targetRows() {
-    var rows = S.store.rows, out = [];
+    var rows = S.store.rows, out = [], any = selectedInView() > 0;
     for (var i = 0; i < S.order.length; i++) {
       var id = S.order[i];
-      if (!S.selected.size || S.selected.has(id)) { out.push({ row: rows[id], rank: i + 1 }); }
+      if (!any || S.selected.has(id)) { out.push({ row: rows[id], rank: i + 1 }); }
     }
     return out;
   }
@@ -554,11 +957,12 @@
 
   function flushNow() {
     var v = S.view, due = performance.now() - S.lastComputed >= RESORT_EVERY_MS;
-    var grew = S.order.length !== S.store.rows.length && !v.preset;
-    if (grew || ((v.sort.length || v.preset) && due)) {
+    var grew = S.order.length !== S.store.rows.length && !v.preset && !v.family && !S.tokens.length;
+    if (grew || ((v.sort.length || v.preset || v.family || S.tokens.length) && due)) {
       applyView();
     } else {
-      renderRows();
+      renderItems();
+      renderView();
       renderFoot();
     }
   }
@@ -697,9 +1101,20 @@
     return '<p class="warn">About ' + fmtInt(steps) + ' undo steps. Premiere keeps only the last ' + UNDO_LEVELS + ', so Cmd+Z can\'t take this back, and older edits leave History. Undo here puts the earlier values back, until the panel is reloaded.</p>';
   }
 
+  // A write that needs Tier 2 waits for it. Asked twice: when pressed, and again after the sheet, in case the view moved.
+  function heldBack(kind) {
+    var f = C.footState(footFacts());
+    return f.held && f.held.indexOf(kind) >= 0 ? f.wait : '';
+  }
+
+  function tier2Landed() {
+    return !scanRunning() || C.understandingShare(S.store).landed;
+  }
+
   // Shared route of the three writes: preflight, targets, confirmation, lock again, one host call, read-back, foot.
   function runWrite(spec) {
-    var ready = null;
+    var ready = null, waiting = heldBack(spec.kind);
+    if (waiting) { note(waiting, 'warn'); return Promise.resolve(); }
     note('');
     return preflight().then(function (r) {
       if (!r.ok) { note(r.message, 'warn'); return null; }
@@ -718,12 +1133,12 @@
       var plan = spec.plan(inProject, ready.project);
       if (!plan) { return; }
       var items = inProject.reduce(function (n, t) { return n + t.row.ids.length; }, 0);
-      var scope = S.selected.size ? 'the selected rows' : 'the current view';
+      var scope = selectedInView() ? 'the selected clips' : 'the current view';
       var body = '<p><b>' + plural(inProject.length, 'clip') + '</b>' + (items !== inProject.length ? ' (' + plural(items, 'project item') + ')' : '') + ' in ' + esc(projectTitle(ready.project)) + ', from ' + scope + '.</p>' +
         (missing ? '<p class="warn">' + plural(missing, 'clip') + ' not in this project will be skipped.</p>' : '') + plan.html;
       return dialog(plan.title, body, plan.ok).then(function (yes) {
         if (!yes) { note('Cancelled. Nothing was written.'); return; }
-        var refused = lockRefusal();
+        var refused = lockRefusal() || heldBack(spec.kind);
         if (refused) { note(refused, 'warn'); return; }
         if (plan.confirm) { plan.confirm(); }
         plan.args.project = ready.project.path;
@@ -745,6 +1160,7 @@
   function doLabel() {
     function labelName() { return C.LABELS[S.labelColor][0]; }
     return runWrite({
+      kind: 'label',
       plan: function (targets) {
         var ids = [];
         targets.forEach(function (t) { ids = ids.concat(t.row.ids); });
@@ -768,16 +1184,22 @@
 
   function doColumns() {
     return runWrite({
+      kind: 'columns',
       plan: function (targets) {
+        // Tier 2's fields are written only once every clip has them, so no column gets a blank for a value on its way.
+        var fields = C.columnFields(tier2Landed()), later = C.FIELDS.length - fields.length;
         var width = String(S.order.length).length, rows = targets.map(function (t) {
-          return { ids: t.row.ids, values: C.columnValues(t.row, t.rank, Math.max(4, width)) };
+          var all = C.columnValues(t.row, t.rank, Math.max(4, width)), values = {};
+          fields.forEach(function (f) { values[f.name] = all[f.name]; });
+          return { ids: t.row.ids, values: values };
         });
         return {
           fn: 'columns',
-          args: { fields: C.FIELDS, rows: rows },
+          args: { fields: fields, rows: rows },
           title: 'Add columns to ' + plural(targets.length, 'clip') + '?',
-          html: '<p>Adds six columns to the project metadata: ' + C.FIELDS.map(function (f) { return esc(f.label.replace(/^Select /, '')); }).join(', ') + '. Their names start with Select. Writes the values and shows the columns in the Project panel. Empty scores stay empty. Rank is the place in the current view.</p>' +
-            undoText(rows.reduce(function (n, r) { return n + r.ids.length; }, 0) * C.FIELDS.length) +
+          html: '<p>Adds ' + fields.length + ' columns to the project metadata: ' + fields.map(function (f) { return esc(f.label.replace(/^Select /, '')); }).join(', ') + '. Their names start with Select. Writes the values and shows the columns in the Project panel. Empty scores stay empty. Rank is the place in the current view.</p>' +
+            (later ? '<p class="warn">The other ' + later + ', such as People and Colour, come from looking closer, which is still running. Add Columns again when it is done to write them.</p>' : '') +
+            undoText(rows.reduce(function (n, r) { return n + r.ids.length; }, 0) * fields.length) +
             '<p class="quiet">Undo does not cover the fields or the layout: they stay in this project, and the columns stay shown, because Premiere saves them in the workspace. Hide them with Metadata Display in the Project panel menu.</p>',
           ok: 'Add Columns',
           busy: 'Adding columns'
@@ -790,6 +1212,7 @@
     var name = C.sortName(S.view);
     if (!name) { note('Pick a sort first. Bins are built from it.', 'warn'); return Promise.resolve(); }
     return runWrite({
+      kind: 'bins',
       plan: function (targets) {
         var buckets = C.bucketize(targets.map(function (t) { return t.row; }), S.view);
         if (!buckets) { note('Pick a sort first. Bins are built from it.', 'warn'); return null; }
@@ -955,9 +1378,10 @@
     S.store = C.createStore();
     S.scan = null;
     S.outcome = null;
-    S.view = { sort: [], preset: null };
+    S.view = { sort: [], preset: null, family: null };
     S.history = [];
     S.beforePreset = null;
+    S.query = $('search').value = '';
     S.selected.clear();
     S.anchor = null;
     S.sortMs = null;
@@ -986,7 +1410,7 @@
     syncColumns();
     $('body').style.minWidth = totalWidth() + 'px';
     renderSortColumn();
-    renderRows();
+    renderItems();
   }
 
   function reportBug() {
@@ -1001,28 +1425,20 @@
   function showAbout() {
     var version = N.available ? N.manifestVersion(extensionRoot()) : null;
     var timing = S.sortMs === null ? '' : '<p class="quiet">Last re-sort: ' + S.sortMs.toFixed(1) + ' ms, ' + fmtInt(S.sortRows) + ' rows.</p>';
-    return dialog('About Select', '<p>' + (version ? 'Version ' + esc(version) : 'Version unknown') + '</p><p class="quiet">' + esc(C.FORMATS_NOTE) + '</p><p class="quiet">Scans run on this Mac. The panel sends nothing.</p>' + timing, 'Done', null);
+    return dialog('About Select', '<p>' + (version ? 'Version ' + esc(version) : 'Version unknown') + '</p><p class="quiet">' + esc(C.FORMATS_NOTE) + '</p><p class="quiet">Everything runs on this Mac: reading, looking closer, sorting and search. No network, no accounts, and the panel sends nothing.</p><p class="quiet">Every result is a suggestion. People and faces are counts, never who someone is.</p>' + timing, 'Done', null);
   }
 
   var MENU = { rescan: startScan, columns: showColumns, 'undo-view': undoView, undo: doUndoWrite, clear: clearResults, bug: reportBug, about: showAbout };
 
   function init() {
     applyHostTheme();
-    C.PRESETS.forEach(function (p) {
-      var b = document.createElement('button');
-      b.className = 'word';
-      b.textContent = p.label;
-      b.title = p.tip;
-      b.dataset.id = p.id;
-      b.dataset.label = p.label;
-      b.onclick = function () { pressPreset(p.id); };
-      $('presets').appendChild(b);
-    });
+    buildSortRow();
 
-    var saved = null, folder = null;
+    var saved = null, folder = null, mode = null;
     try {
       saved = localStorage.getItem('select.source');
       folder = localStorage.getItem('select.folder');
+      mode = localStorage.getItem('select.mode');
       S.shownColumns = JSON.parse(localStorage.getItem('select.columns') || '{}') || {};
     } catch (e) {}
     S.source = SOURCE_NAMES[saved] ? saved : 'selection';
@@ -1037,6 +1453,14 @@
     $('scan').onclick = startScan;
     $('stop').onclick = stopScan;
     $('clear-view').onclick = clearView;
+    $('mode-list').onclick = function () { setMode('list'); };
+    $('mode-grid').onclick = function () { setMode('grid'); };
+    $('search').addEventListener('input', onSearch);
+    $('search').addEventListener('keydown', function (e) {
+      if (e.key === 'Escape' && S.query) { e.stopPropagation(); clearSearch(); }
+    });
+    $('search-clear').onclick = function (e) { e.preventDefault(); clearSearch(); };
+    $('empty-clear').onclick = clearSearch;
     $('do-label').onclick = doLabel;
     $('do-columns').onclick = doColumns;
     $('do-bins').onclick = doBins;
@@ -1056,6 +1480,7 @@
     };
     document.addEventListener('mousedown', function (e) {
       if (!$('menu').hidden && !e.target.closest('#menu') && !e.target.closest('#more')) { closeMenu(); }
+      if (!$('sort-menu').hidden && !e.target.closest('#sort-menu') && !e.target.closest('[data-group]')) { closeSortMenu(); }
     });
     $('dialog-body').addEventListener('click', function (e) {
       var swatch = e.target.closest('[data-color]'), column = e.target.closest('[data-column]');
@@ -1072,21 +1497,31 @@
       var h = e.target.closest('.h');
       if (h && C.COLUMN[h.dataset.key].sortable !== false) { headerClick(h.dataset.key, e.shiftKey); }
     };
-    $('body').addEventListener('mousedown', function (e) {
+    $('grid').addEventListener('mousedown', function (e) {
       var at = rowAt(e.target);
       if (at >= 0) { clickRow(at, e); }
     });
-    $('body').addEventListener('dblclick', function (e) {
+    $('grid').addEventListener('dblclick', function (e) {
       var at = rowAt(e.target);
       if (at >= 0) { openRow(S.store.rows[S.order[at]]); }
     });
     $('grid').addEventListener('scroll', scheduleRows, { passive: true });
     new ResizeObserver(function () {
       if (poolSize() !== S.pool.length) { buildPool(); renderSortColumn(); }
-      renderRows();
+      buildLayout();
+      S.paintKey++;
+      renderItems();
     }).observe($('grid'));
 
     document.addEventListener('keydown', function (e) {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'f') { e.preventDefault(); $('search').focus(); $('search').select(); return; }
+      if (e.key === 'Escape' && !$('sort-menu').hidden) { closeSortMenu(); return; }
+      if (!$('sort-menu').hidden && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+        e.preventDefault();
+        var inMenu = Array.prototype.slice.call($('sort-menu').children), now = inMenu.indexOf(document.activeElement);
+        inMenu[(now + (e.key === 'ArrowDown' ? 1 : -1) + inMenu.length) % inMenu.length].focus();
+        return;
+      }
       if (e.key === 'Escape' && !$('menu').hidden) { closeMenu(); $('more').focus(); return; }
       if (S.modalOpen && e.key === 'Escape') { ($('dialog-cancel').hidden ? $('dialog-ok') : $('dialog-cancel')).click(); return; }
       if (!$('menu').hidden && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
@@ -1106,6 +1541,7 @@
     buildPool();
     setSource(S.source);
     applyView();
+    if (mode === 'grid') { setMode('grid'); }
     ensureHost().then(refreshProject);
   }
 
@@ -1115,6 +1551,7 @@
     startScan: startScan,
     stopScan: stopScan,
     applyView: applyView,
+    setMode: setMode,
     extensionRoot: extensionRoot,
     foot: function () { return C.footState(footFacts()); }
   };

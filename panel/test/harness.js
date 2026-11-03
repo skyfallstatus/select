@@ -15,7 +15,7 @@ const PAGE = 'file://' + encodeURI(path.join(__dirname, '../client/index.html'))
 const FAKE = path.join(__dirname, 'fake-engine.js');
 const OUT = path.join(__dirname, 'out');
 const MANIFEST = path.join(__dirname, '../CSXS/manifest.xml');
-const DEADLINE_MS = 240000;
+const DEADLINE_MS = 330000;
 const ROW_H = 40;
 const PROJECT = { path: '/Volumes/Field SSD/Projects/lantern-spring.prproj', name: 'lantern-spring.prproj' };
 fs.mkdirSync(OUT, { recursive: true });
@@ -277,6 +277,17 @@ function clips(n) {
   return list;
 }
 
+// A preset is a word in the sort row, or a word in one of its group menus. Real clicks either way.
+async function pressPreset(b, id) {
+  const group = await b.evalIn(`(SelectCore.GROUPS.filter(function(g){return g.presets.indexOf(${JSON.stringify(id)})>=0;})[0]||{}).id||''`);
+  if (group) {
+    await b.click(`#presets [data-group="${group}"]`);
+    await b.click(`#sort-menu [data-id="${id}"]`);
+  } else {
+    await b.click(`#presets [data-id="${id}"]`);
+  }
+}
+
 async function setItems(b, n) { await b.evalIn(`__mock.items=${JSON.stringify(clips(n))}`); }
 
 // Scan is in the foot until the first scan ends, then in the menu as Rescan.
@@ -324,11 +335,11 @@ async function replay(file) {
   await b.shot('20-real-done');
   const report = {};
   for (const p of ['softest', 'sharpest', 'darkest', 'overexposed', 'motion', 'static', 'silent', 'interviews', 'duplicates', 'shoot']) {
-    await b.click(`#presets button[data-id="${p}"]`);
+    await pressPreset(b, p);
     await sleep(250);
     report[p] = await b.evalIn(`({says:document.getElementById('foot-sentence').textContent,top:${ids}.slice(0,3).map(function(r){return r.name;})})`);
     await b.shot('21-real-' + p);
-    await b.click(`#presets button[data-id="${p}"]`);
+    await pressPreset(b, p);
   }
   console.log(JSON.stringify(report, null, 1));
   const empties = await b.evalIn(`(function(){var o={},rows=SelectApp.state.store.rows;SelectCore.COLUMNS.forEach(function(c){if(c.sortable===false){return;}o[c.key]=rows.filter(function(r){return SelectCore.cellText(r,c)==='';}).length;});return o;})()`);
@@ -353,7 +364,8 @@ async function main() {
   try {
     await b.open();
     check('page loads with no script errors', b.problems.length === 0, b.problems);
-    check('ten presets, each with a tooltip', await b.evalIn(`Array.from(document.querySelectorAll('#presets button')).filter(function(x){return x.title.length>40;}).length`) === 10);
+    const row = await b.evalIn(`({tips:SelectCore.PRESETS.filter(function(p){return p.tip.length>40;}).length,all:SelectCore.PRESETS.length,words:document.querySelectorAll('#presets .word').length,dots:document.querySelectorAll('#families button').length,tips2:Array.from(document.querySelectorAll('#presets .word')).filter(function(x){return x.title.length>4;}).length})`);
+    check('the sort row is seven words and nine dots, and every preset has a tooltip', row.all === 23 && row.tips === 23 && row.words === 7 && row.dots === 9 && row.tips2 === 7, row);
     await b.waitFor(`document.getElementById('project-name').textContent==='lantern-spring'`, 'project name');
     check('project name shows from status, without the extension', true);
 
@@ -383,7 +395,7 @@ async function main() {
     await b.shot('01-scanning');
     await b.waitFor(`SelectApp.state.scan && SelectApp.state.scan.state==='Done'`, 'done', 30000);
     const done = await b.evalIn(`({foot:${foot},t0:SelectApp.state.store.tier0,t1:SelectApp.state.store.tier1,errors:SelectApp.state.store.errors})`);
-    check('scan ends Done, both tiers landed', /^400 clips read$/.test(done.foot.verdict) && /^Took \d+\.\d s\. Pick a sort above\. \d+ clips are listed with blank picture scores: this Mac has no decoder for them, and ffmpeg isn't installed\.$/.test(done.foot.sentence) && done.t0 === 400 - unreadable && done.t1 === 400 - unreadable && done.errors === unreadable, done);
+    check('scan ends Done, both tiers landed', /^400 clips read$/.test(done.foot.verdict) && /^Took \d+\.\d s\. Pick a sort above\. \d+ clips are listed with blank picture scores: this Mac has no decoder for them, and ffmpeg isn't installed\./.test(done.foot.sentence) && done.t0 === 400 - unreadable && done.t1 === 400 - unreadable && done.errors === unreadable, done);
     check('engine binary path is inside the extension, with scan arguments', /\/bin\/select-engine$/.test(b.engineLog.lastBin) && b.engineLog.lastArgs.join(' ') === 'scan --paths-file -', b.engineLog.lastBin);
     await b.waitFor(`document.querySelectorAll('#body img[src]').length>0`, 'thumbs');
     await sleep(200);
@@ -393,7 +405,7 @@ async function main() {
 
     // -------- clips that could not be read
     const status = await b.evalIn(text('status-unread'));
-    check('a status line counts the unread clips and says why in one sentence', status === '8 clips could not be read: .braw and .r3d aren\'t supported yet, .mov and .mxf need ffmpeg, some files are missing or offline and some files may be damaged.', status);
+    check('a status line counts the unread clips and says why in one sentence', status.startsWith('8 clips could not be read: .braw and .r3d aren\'t supported yet, .mov and .mxf need ffmpeg, some files are missing or offline and some files may be damaged.'), status);
     const badRows = await b.evalIn(`(function(){var r=SelectApp.state.store.rows.filter(function(x){return x.error;});return r.map(function(x){return {name:x.name,reason:SelectCore.unreadableReason(x)};});})()`);
     check('an unreadable clip keeps its name and gets a quiet reason', badRows.length === unreadable && badRows.some(r => r.reason === '.r3d isn\'t supported yet') && badRows.some(r => r.reason === '.mxf needs ffmpeg') && badRows.every(r => r.name), badRows);
     await b.evalIn(`(function(){var o=SelectApp.state.order,rows=SelectApp.state.store.rows;for(var i=0;i<o.length;i++){if(rows[o[i]].error){document.getElementById('grid').scrollTop=i*${ROW_H};return;}}})()`);
@@ -430,34 +442,34 @@ async function main() {
     const sorted = (v, dir) => { const a = v.filter(x => x !== null && x !== undefined); return a.every((x, i) => !i || (dir > 0 ? a[i - 1] <= x : a[i - 1] >= x)); };
     const presets = [['softest', 'sharpness', 1], ['sharpest', 'sharpness', -1], ['darkest', 'luma', 1], ['overexposed', 'clipHighPct', -1], ['motion', 'motionProxy', -1], ['static', 'motionProxy', 1]];
     for (const [id, key, dir] of presets) {
-      await b.click(`#presets button[data-id="${id}"]`);
+      await pressPreset(b, id);
       const v = await orderOf(key);
-      const on = await b.evalIn(`document.querySelector('#presets button.on').dataset.id`);
+      const on = await b.evalIn(`SelectApp.state.view.preset`);
       const f = await footNow();
-      check(`preset ${id} sorts and says so`, sorted(v, dir) && on === id && f.verdict === (await b.evalIn(`SelectCore.PRESET[${JSON.stringify(id)}].label`)) && / at the top\./.test(f.sentence), f.sentence);
-      await b.click(`#presets button[data-id="${id}"]`);
+      check(`preset ${id} sorts and says so`, sorted(v, dir) && on === id && f.verdict === (await b.evalIn(`SelectCore.PRESET[${JSON.stringify(id)}].label`)) && / at the top\./.test(f.sentence) && (await b.evalIn(`!!document.querySelector('#presets .on')`)), f.sentence);
+      await pressPreset(b, id);
       const off = await b.evalIn(`document.querySelector('#presets button.on')===null&&SelectApp.state.view.preset===null`);
       check(`preset ${id} turns off with a second press`, off);
     }
-    const presetStyle = await b.evalIn(`(function(){var x=document.querySelector('#presets button[data-id="softest"]');x.click();var a=getComputedStyle(x),o=getComputedStyle(document.querySelector('#presets button[data-id="static"]'));var r={on:[a.color,a.fontWeight,a.backgroundColor,a.borderStyle],off:[o.color,o.fontWeight,o.backgroundColor]};x.click();return r;})()`);
-    check('the active preset is a word in ink and semibold, the others in ink2, no pills', presetStyle.on[0] === 'rgb(237, 237, 238)' && presetStyle.on[1] === '600' && presetStyle.on[2] === 'rgba(0, 0, 0, 0)' && presetStyle.off[0] === 'rgb(173, 173, 177)' && presetStyle.off[1] === '400', presetStyle);
-    await b.click('#presets button[data-id="overexposed"]');
+    const presetStyle = await b.evalIn(`(function(){var x=document.querySelector('#presets [data-id="colour"]');x.click();var a=getComputedStyle(x),o=getComputedStyle(document.querySelector('#presets [data-id="shoot"]'));var r={on:[a.color,a.fontWeight,a.backgroundColor,a.borderStyle],off:[o.color,o.fontWeight,o.backgroundColor]};x.click();return r;})()`);
+    check('the active word is in ink and semibold, the others in ink2, no pills', presetStyle.on[0] === 'rgb(237, 237, 238)' && presetStyle.on[1] === '600' && presetStyle.on[2] === 'rgba(0, 0, 0, 0)' && presetStyle.off[0] === 'rgb(173, 173, 177)' && presetStyle.off[1] === '400', presetStyle);
+    await pressPreset(b, 'overexposed');
     check('a switched-off column shows while the view sorts by it', await b.evalIn(`!!document.querySelector('#head .h[data-key="clipHighPct"]')`));
-    await b.click('#presets button[data-id="overexposed"]');
+    await pressPreset(b, 'overexposed');
     for (const id of ['silent', 'interviews', 'duplicates', 'shoot']) {
-      await b.click(`#presets button[data-id="${id}"]`);
+      await pressPreset(b, id);
       const info = await b.evalIn(`({shown:SelectApp.state.order.length,sentence:document.getElementById('foot-sentence').textContent,group:SelectApp.state.hasGroups})`);
       check(`preset ${id} shows what it does`, info.sentence.length > 5 && (id === 'shoot' ? info.shown === 400 : info.shown > 0 && info.shown < 400), info);
       if (id === 'duplicates') {
         await b.shot('03-near-duplicates');
-        check('a Group column appears for near duplicates', await b.evalIn(`!!document.querySelector('#head .h[data-key="dupGroup"]')`));
+        check('near duplicates show as groups, each under its own heading', await b.evalIn(`/^Group 1 /.test(document.querySelector('#body .gh').textContent)&&!document.querySelector('#head .h[data-key="dupGroup"]')`));
       }
       if (id === 'interviews') { await b.shot('04-interviews'); }
       await b.click('#more');
       await b.click('[data-menu="undo-view"]');
       check(`preset ${id} undoes with Undo view`, await b.evalIn(`SelectApp.state.view.preset===null&&SelectApp.state.order.length===400`));
     }
-    check('Group column leaves after undo', await b.evalIn(`!document.querySelector('#head .h[data-key="dupGroup"]')`));
+    check('group headings leave after undo', await b.evalIn(`!SelectApp.state.L.heads.length&&Array.from(document.querySelectorAll('#body .gh')).length===0`));
 
     // -------- sort at 1,000 rows: real clicks on every header
     await setItems(b, 1000);
@@ -519,7 +531,7 @@ async function main() {
     b.engineEnv.FAKE_DELAY_MS = '0';
     await scanAndWait(b);
     await b.evalIn(`document.getElementById('clear-view').click()`);
-    await b.click('#presets button[data-id="sharpest"]');
+    await pressPreset(b, 'sharpest');
     const finished = await footNow();
     check('foot when finished: a grey tick, the sort as the verdict, three actions, Sort into Bins cobalt, Scan gone', finished.mark === 'done' && finished.verdict === 'Sharpest first' && /^400 clips in \d+\.\d s\. Sharpest at the top\. \d+ clips are listed with blank picture scores/.test(finished.sentence) && (finished.sentence.match(/blank/g) || []).length === 1 && finished.actions.join() === 'do-label,do-columns,do-bins*', finished);
     await b.click('#more');
@@ -575,13 +587,13 @@ async function main() {
     await b.click('#do-columns');
     await waitModal();
     const colText = await dialogText();
-    check('Add Columns confirmation: count, fields, undo limits', /400 clips/.test(colText) && /six columns/.test(colText) && /Rank, Sharpness/.test(colText) && /start with Select/.test(colText) && /Premiere keeps only the last 50/.test(colText) && /Metadata Display/.test(colText), colText);
+    check('Add Columns confirmation: count, fields, undo limits', /400 clips/.test(colText) && /13 columns/.test(colText) && /Rank, Sharpness/.test(colText) && /start with Select/.test(colText) && /Premiere keeps only the last 50/.test(colText) && /Metadata Display/.test(colText), colText);
     await b.shot('06-columns-dialog');
     await b.click('#dialog-ok');
     await b.waitFor(`__mock.calls.some(function(c){return c.fn==='columns';})`);
     const col = (await calls('columns'))[0].args;
-    check('Add Columns sends one call, rows ranked by view order', col.rows.length === 400 && col.rows[0].values.SelectRank === '0001' && col.rows[399].values.SelectRank === '0400' && col.fields.length === 6, col.rows[0]);
-    await b.waitFor(`/Added 6 columns/.test(${text('foot-verdict')})`);
+    check('Add Columns sends one call, rows ranked by view order', col.rows.length === 400 && col.rows[0].values.SelectRank === '0001' && col.rows[399].values.SelectRank === '0400' && col.fields.length === 13, col.rows[0]);
+    await b.waitFor(`/Added 13 columns/.test(${text('foot-verdict')})`);
     await sleep(320);
     check('columns read back and shown: green', (await footNow()).background === GREEN, (await footNow()).sentence);
     await b.evalIn(`SelectApp.state.outcome=null;SelectApp.applyView()`);
@@ -601,10 +613,10 @@ async function main() {
     const sortedFoot = await b.evalIn(`(function(){var u=getComputedStyle(document.getElementById('undo-write'));return {f:${foot},undoBg:u.backgroundColor,undoColor:u.color,sentence:getComputedStyle(document.getElementById('foot-sentence')).color};})()`);
     check('bins read back: green foot, plain words, Undo in white', sortedFoot.f.background === GREEN && /^Sorted into 6 bins$/.test(sortedFoot.f.verdict) && /^400 clips moved\. Your files weren't touched\.$/.test(sortedFoot.f.sentence) && sortedFoot.undoBg === 'rgb(255, 255, 255)' && sortedFoot.undoColor === GREEN && sortedFoot.sentence === 'rgb(255, 255, 255)', sortedFoot);
     await b.shot('08-bins-green');
-    await b.click('#presets button[data-id="softest"]');
+    await pressPreset(b, 'softest');
     await sleep(320);
     check('a new view moves on from the green foot', (await footNow()).background !== GREEN);
-    await b.click('#presets button[data-id="sharpest"]');
+    await pressPreset(b, 'sharpest');
 
     // -------- a read-back that does not match is never green
     await b.evalIn(`__mock.misplaced=3`);
@@ -803,8 +815,8 @@ async function main() {
     await b.waitFor(`SelectApp.state.scan.state==='Done'`);
     const dirty = await b.evalIn(text('status-unread'));
     check('junk lines and clip errors are counted', /^16 clips could not be read: /.test(dirty) && /engine lines could not be understood/.test(dirty) && (await b.evalIn(`SelectApp.state.store.errors`)) === 16, dirty);
-    await b.click('#presets button[data-id="shoot"]');
-    await b.click('#presets button[data-id="shoot"]');
+    await pressPreset(b, 'shoot');
+    await pressPreset(b, 'shoot');
     await b.shot('10-errors');
     b.engineEnv.FAKE_MODE = '';
     b.engineEnv.FAKE_ERRORS = '';
@@ -861,12 +873,12 @@ async function main() {
 
     // -------- 620 px, the panel's minimum
     await b.size(620, 420);
-    await b.evalIn(`(function(){var o=document.querySelector('#presets button[data-id="softest"]');if(!o.classList.contains('on')){o.click();}})()`);
+    await b.evalIn(`(function(){var o=document.querySelector('#presets [data-id="colour"]');if(!o.classList.contains('on')){o.click();}})()`);
     await sleep(120);
     const narrow = await b.evalIn(`(function(){var d=document.documentElement,w=innerWidth,inside=function(sel){var r=document.querySelector(sel).getBoundingClientRect();return r.left>=0&&r.right<=w&&r.bottom<=innerHeight;};
-      var words=Array.from(document.querySelectorAll('#presets button')).map(function(x){var r=x.getBoundingClientRect();return {t:Math.round(r.top),r:r.right};});
-      return {page:d.scrollWidth,lines:new Set(words.map(function(x){return x.t;})).size,wordsIn:words.every(function(x){return x.r<=w;}),bins:inside('#do-bins'),label:inside('#do-label'),more:inside('#more'),source:inside('#source'),verdict:document.getElementById('foot-verdict').scrollWidth<=document.getElementById('foot-verdict').clientWidth,table:document.getElementById('grid').scrollWidth,grid:document.getElementById('grid').clientWidth,head:document.getElementById('top').scrollWidth};})()`);
-    check('at 620 px nothing leaves the panel: presets wrap, the foot and the header stay whole', narrow.page <= 620 && narrow.lines >= 1 && narrow.lines <= 2 && narrow.wordsIn && narrow.bins && narrow.label && narrow.more && narrow.source && narrow.verdict && narrow.head <= 620, narrow);
+      var words=Array.from(document.querySelectorAll('#presets .word')).map(function(x){var r=x.getBoundingClientRect();return {t:Math.round(r.top),r:r.right};});
+      return {page:d.scrollWidth,lines:new Set(words.map(function(x){return x.t;})).size,modes:inside('#mode-grid'),search:inside('#search-box'),wordsIn:words.every(function(x){return x.r<=w;}),bins:inside('#do-bins'),label:inside('#do-label'),more:inside('#more'),source:inside('#source'),verdict:document.getElementById('foot-verdict').scrollWidth<=document.getElementById('foot-verdict').clientWidth,table:document.getElementById('grid').scrollWidth,grid:document.getElementById('grid').clientWidth,head:document.getElementById('top').scrollWidth};})()`);
+    check('at 620 px nothing leaves the panel: the sort row is one line, the foot and the header stay whole', narrow.page <= 620 && narrow.lines === 1 && narrow.modes && narrow.search && narrow.wordsIn && narrow.bins && narrow.label && narrow.more && narrow.source && narrow.verdict && narrow.head <= 620, narrow);
     check('at 620 px the table scrolls inside itself', narrow.table >= narrow.grid, narrow);
     await b.shot('19-620-light');
     await b.size(900, 620);
@@ -876,12 +888,12 @@ async function main() {
     await b.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
     const still = await b.evalIn(`({spin:getComputedStyle(document.querySelector('#foot-mark .m-arc')).animationName,fade:getComputedStyle(document.getElementById('foot')).transitionDuration})`);
     check('prefers-reduced-motion: the arc stands still and nothing fades', still.spin === 'none' && /^0s/.test(still.fade), still);
-    await b.evalIn(`document.querySelector('#presets button[data-id="darkest"]').click()`);
+    await b.evalIn(`document.querySelector('#presets [data-id="shoot"]').click()`);
     check('prefers-reduced-motion: new foot words arrive without a fade', (await b.evalIn(`document.getElementById('foot-verdict').getAnimations().length`)) === 0);
     await b.send('Emulation.setEmulatedMedia', { features: [] });
-    await b.evalIn(`document.querySelector('#presets button[data-id="static"]').click()`);
+    await b.evalIn(`document.querySelector('#presets [data-id="colour"]').click()`);
     check('new foot words fade in', (await b.evalIn(`document.getElementById('foot-verdict').getAnimations().length`)) === 1);
-    await b.evalIn(`document.querySelector('#presets button[data-id="softest"]').click()`);
+    await b.evalIn(`document.querySelector('#presets [data-id="shoot"]').click()`);
     const box = await b.evalIn(`(function(){var r=document.getElementById('do-bins').getBoundingClientRect();return {x:r.left+r.width/2,y:r.top+r.height/2};})()`);
     await b.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: box.x, y: box.y });
     await b.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: box.x, y: box.y, button: 'left', clickCount: 1 });
@@ -895,6 +907,233 @@ async function main() {
     // -------- colour discipline, on the finished panel and on the sheets
     const cobalts = await b.evalIn(`(function(){var c=[getComputedStyle(document.documentElement).getPropertyValue('--cobalt')],hits=[];document.querySelectorAll('body *').forEach(function(e){if(e.closest('[hidden]')){return;}var s=getComputedStyle(e);if(s.backgroundColor==='rgb(47, 111, 230)'||s.color==='rgb(47, 111, 230)'){hits.push(e.id||e.className);}});return hits;})()`);
     check('cobalt is on the primary action only', cobalts.join() === 'do-bins', cobalts);
+
+    // -------- search, the three stages, the grid, colour, groups and failures of Tier 2
+    await b.evalIn(`__mock.skin={red:35,green:35,blue:35};__mock.listeners['com.adobe.csxs.events.ThemeColorChanged'].forEach(function(f){f();});SelectApp.setMode('list')`);
+    await b.evalIn(`document.getElementById('clear-view').click()`);
+    await setItems(b, 400);
+
+    // stage three, live: rows usable, writes usable, the foot calm
+    b.engineEnv.FAKE_DELAY_MS = '3';
+    await b.click('#source button[data-src="project"]');
+    await pressScan(b);
+    await b.waitFor(`SelectApp.state.scan.handle&&document.getElementById('foot').className==='understanding'`, 'stage three', 30000);
+    const stage = await footNow();
+    const menuWait = await (async () => { await b.click('#presets [data-group="people"]'); const t = await b.evalIn(`Array.from(document.querySelectorAll('#sort-menu button')).map(function(x){return x.textContent;})`); await b.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 }); await b.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 }); return t; })();
+    const legible = await b.evalIn(`(function(){var el=document.getElementById('foot-sentence');return {anims:el.getAnimations().length,opacity:getComputedStyle(el).opacity,w:el.getBoundingClientRect().width};})()`);
+    check('the stage-three count changes in place, legible, with no fade restarting', legible.anims === 0 && legible.opacity === '1' && legible.w > 100, legible);
+    check('stage three: the foot says it is still looking closer, and the writes work', /^Still looking closer, on this Mac: \d+ of 392$/.test(stage.sentence) && stage.mark === 'running' && stage.actions.join() === 'stop,do-label,do-columns,do-bins*', stage);
+    check('the group menu counts what has landed so far', menuWait.length === 7 && menuWait.some(t => /^People\d+$/.test(t)), menuWait);
+    await b.evalIn(`document.querySelector('#presets [data-id="colour"]').click()`);
+    await sleep(120);
+    const holding = await b.evalIn(`({bins:document.getElementById('do-bins').disabled,label:document.getElementById('do-label').disabled,columns:document.getElementById('do-columns').disabled,shown:!document.getElementById('do-bins').hidden,why:document.getElementById('status-unread').textContent,title:document.getElementById('do-bins').title,running:!!SelectApp.state.scan.handle})`);
+    check('in stage three, a Colour write waits: visible, off, with a plain reason', holding.running && holding.shown && holding.bins && holding.label && holding.columns && /^Colour needs every clip looked at/.test(holding.why) && holding.why.startsWith(holding.title), holding);
+    await b.shot('35-stage-three-waiting');
+    await b.evalIn(`__mock.calls.length=0`);
+    await b.evalIn(`document.getElementById('do-bins').disabled=false`);
+    await b.click('#do-bins');
+    await sleep(80);
+    check('even forced, a held write refuses before any sheet or host call', !(await modalOpen()) && (await b.evalIn(`__mock.calls.filter(function(c){return c.fn!=='status';}).length`)) === 0 && /needs every clip/.test(await noteText()));
+    await b.waitFor(`!document.getElementById('do-bins').disabled`, 'writes turn on by themselves', 30000);
+    const turned = await b.evalIn(`({clicked:__mock.calls.length,landed:SelectCore.understandingShare(SelectApp.state.store).landed||!SelectApp.state.scan.handle})`);
+    check('and turns on by itself once every clip has landed', turned.landed, turned);
+    await b.waitFor(`SelectApp.state.scan.state==='Done'`, 'done', 30000);
+    await b.evalIn(`document.getElementById('clear-view').click()`);
+
+    // a Tier 1 write in stage three works, and Add Columns writes only Tier 1 fields
+    await pressScan(b);
+    await b.waitFor(`SelectApp.state.scan.handle&&document.getElementById('foot').className==='understanding'`, 'stage three again', 30000);
+    await b.evalIn(`document.querySelector('#presets [data-id="shoot"]').click()`);
+    await sleep(80);
+    check('a Tier 1 sort writes during stage three', !(await b.evalIn(`document.getElementById('do-bins').disabled||document.getElementById('do-columns').disabled`)));
+    await b.evalIn(`__mock.calls.length=0`);
+    await b.click('#do-columns');
+    await waitModal();
+    const earlySheet = await dialogText();
+    await b.click('#dialog-ok');
+    await b.waitFor(`__mock.calls.some(function(c){return c.fn==='columns';})`);
+    const earlyCols = (await calls('columns'))[0].args;
+    check('Add Columns in stage three writes the 6 Tier 1 fields and says the rest come later', earlyCols.fields.length === 6 && !earlyCols.fields.some(f => f.name === 'SelectColour') && /Adds 6 columns/.test(earlySheet) && /The other 7/.test(earlySheet), earlyCols.fields.map(f => f.name));
+    await b.waitFor(`SelectApp.state.scan.state==='Done'`, 'done', 30000);
+    await b.evalIn(`SelectApp.state.outcome=null;document.getElementById('clear-view').click()`);
+    await b.evalIn(`document.getElementById('clear-view').click()`);
+
+    // search, real keystrokes
+    await b.click('#search');
+    await b.send('Input.insertText', { text: 'bread' });
+    await b.waitFor(`SelectApp.state.query==='bread'`);
+    const found = await b.evalIn(`({shown:SelectApp.state.order.length,count:document.getElementById('search-count').textContent,why:document.querySelector('#body .r .why').textContent,foot:document.getElementById('foot-sentence').textContent})`);
+    check('search narrows, says how many, and shows why a clip is there', found.shown > 0 && found.shown < 400 && found.count === `${found.shown} of 400` && found.why === 'bread' && new RegExp(`^${found.shown} of 400 clips match`).test(found.foot), found);
+    await b.send('Input.insertText', { text: ' sony' });
+    await b.waitFor(`SelectApp.state.query==='bread sony'`);
+    check('a second word narrows further', (await b.evalIn(`SelectApp.state.order.length`)) < found.shown, await b.evalIn(`document.getElementById('search-count').textContent`));
+    await b.send('Input.insertText', { text: ' zzz' });
+    await b.waitFor(`/Nothing matches/.test(document.getElementById('empty-words').textContent)`);
+    check('an empty search says so in plain words, with a way back', (await b.evalIn(text('empty-words'))) === 'Nothing matches “bread sony zzz”.' && !(await b.evalIn(`document.getElementById('empty-clear').hidden`)));
+    await b.shot('30-search-empty');
+    await b.click('#empty-clear');
+    check('Clear search puts every clip back', (await b.evalIn(`SelectApp.state.order.length`)) === 400 && (await b.evalIn(`document.getElementById('search').value`)) === '');
+
+    // the grid
+    await pressPreset(b, 'softest');
+    await b.click('#mode-grid');
+    await sleep(200);
+    const tiles = await b.evalIn(`({shown:document.querySelectorAll('#tiles .t').length,head:document.getElementById('head').hidden,list:document.getElementById('body').hidden,on:document.getElementById('mode-grid').classList.contains('on'),rows:SelectApp.state.L.cols,name:document.querySelector('#tiles .t[data-at="0"] .n').textContent,fact:document.querySelector('#tiles .t[data-at="0"] .f').textContent,w:document.querySelector('#tiles .t').getBoundingClientRect().width,order:SelectApp.state.store.rows[SelectApp.state.order[0]]})`);
+    check('the grid shows the same clips in the same order, with a name and one fact', tiles.head && tiles.list && tiles.on && tiles.rows >= 5 && tiles.name === tiles.order.name && tiles.fact === tiles.order.sharpness.toFixed(3) && tiles.w > 120, { cols: tiles.rows, shown: tiles.shown, fact: tiles.fact, w: tiles.w });
+    await b.waitFor(`Array.from(document.querySelectorAll('#tiles img[src]')).some(function(i){return i.complete&&i.naturalWidth>0;})`, 'tile pictures');
+    await b.shot('31-grid');
+    await b.evalIn(`SelectApp.state.selected.clear();SelectApp.state.anchor=null;SelectApp.applyView()`);
+    const tile = n => `#tiles .t[data-at="${n}"]`;
+    await b.click(tile(1));
+    await b.click(tile(3), { shift: true });
+    await b.click(tile(7), { meta: true });
+    const sel = await b.evalIn(`({n:SelectApp.state.selected.size,cls:document.querySelectorAll('#tiles .t.sel').length,ring:getComputedStyle(document.querySelector('#tiles .t.sel .pic')).boxShadow,foot:document.getElementById('foot-sentence').textContent})`);
+    check('click, shift-click and cmd-click select tiles, with a grey ring, never cobalt', sel.n === 4 && sel.cls === 4 && !/47, 111, 230/.test(sel.ring) && /^4 of 400 clips selected/.test(sel.foot), sel);
+    await b.click('#mode-list');
+    check('a selection made in the grid is the selection in the list', (await b.evalIn(`document.querySelectorAll('#body .r.sel').length`)) === 4);
+    await b.click('#mode-grid');
+    await b.evalIn(`__mock.calls.length=0`);
+    await b.click('#do-label');
+    await waitModal();
+    await b.click('#dialog-ok');
+    await b.waitFor(`/Labelled 4 clips/.test(${text('foot-verdict')})`);
+    const fromGrid = (await calls('label'))[0].args;
+    check('a write from the grid covers exactly the selected tiles', fromGrid.ids.length === 4, fromGrid.ids);
+    await b.evalIn(`SelectApp.state.selected.clear();SelectApp.state.outcome=null;SelectApp.applyView();__mock.calls.length=0`);
+    await b.click(tile(2), { count: 2 });
+    await b.waitFor(`__mock.calls.some(function(c){return c.fn==='open';})`);
+    check('double-clicking a tile opens the clip', /^id\d+$/.test((await calls('open'))[0].args.id));
+    await b.evalIn(`SelectApp.state.selected.clear();SelectApp.applyView()`);
+
+    // colour in the grid
+    await pressPreset(b, 'colour');
+    const rainbow = await b.evalIn(`(function(){var r=${ids},keys=r.map(function(x){return x.rainbow;}).filter(function(k){return typeof k==='number';}),up=keys.every(function(k,i){return !i||keys[i-1]<=k;}),first=r[0].colorName,lastHue=keys.filter(function(k){return k<800;}).length,neutral=r.filter(function(x){return x.colorName==='neutral';}).length;return {up:up,first:first,hued:lastHue,neutral:neutral,chips:!document.querySelector('#tiles .t[data-at="0"] .p').hidden,fact:document.querySelector('#tiles .t[data-at="0"] .f').hidden};})()`);
+    check('Colour sorts by hue from red, neutrals after, blanks last, and tiles show their palette', rainbow.up && rainbow.first === 'red' && rainbow.hued > 200 && rainbow.neutral > 10 && rainbow.chips && rainbow.fact, rainbow);
+    await b.click('#families [data-family="teal"]');
+    const teal = await b.evalIn(`({n:SelectApp.state.order.length,all:${ids}.every(function(r){return r.colorName==='teal';}),verdict:document.getElementById('foot-verdict').textContent,dot:document.querySelector('#families [data-family="teal"]').classList.contains('on')})`);
+    check('a colour family filters, in the grid, with its dot on', teal.n > 5 && teal.all && teal.verdict === 'Teal, colour' && teal.dot, teal);
+    await b.evalIn(`__mock.calls.length=0`);
+    await b.click('#do-bins');
+    await waitModal();
+    const tealSheet = await dialogText();
+    await b.click('#dialog-ok');
+    await b.waitFor(`/Sorted into 1 bin/.test(${text('foot-verdict')})`);
+    await sleep(320);
+    const tealBins = (await calls('bins'))[0].args;
+    check('Sort into Bins by category names the bins, reads back, and goes green', /01 Teal/.test(tealSheet) && tealBins.buckets[0].name === '01 Teal' && tealBins.buckets[0].ids.length === teal.n && (await footNow()).background === GREEN, tealBins.buckets.map(x => x.name));
+    await b.click('#undo-write');
+    await waitModal();
+    await b.click('#dialog-ok');
+    await b.waitFor(`SelectApp.state.outcome&&/Undone/.test(SelectApp.state.outcome.verdict)`);
+    await b.click('#families [data-family="teal"]');
+    await b.evalIn(`__mock.calls.length=0;__mock.misplaced=1`);
+    await b.click('#do-bins');
+    await waitModal();
+    const rainbowSheet = await dialogText();
+    await b.click('#dialog-ok');
+    await b.waitFor(`/of 400 clips/.test(${text('foot-verdict')})`);
+    await sleep(320);
+    check('every family has its bin, in rainbow order, and a stray is not green', /01 Red[\s\S]*02 Orange[\s\S]*09 Neutral[\s\S]*10 No value/.test(rainbowSheet) && (await footNow()).background !== GREEN, (await footNow()).verdict);
+    await b.evalIn(`__mock.misplaced=0;SelectApp.state.outcome=null;SelectApp.applyView()`);
+
+    // groups, in both views, arriving last
+    b.engineEnv.FAKE_DELAY_MS = '4';
+    await pressPreset(b, 'similar');
+    await pressScan(b);
+    await b.waitFor(`SelectApp.state.scan.handle&&SelectApp.state.store.tier1>50`, 'scan under way', 30000);
+    const waiting = await b.evalIn(`({text:document.getElementById('empty-words').textContent,hidden:document.getElementById('empty').hidden})`);
+    check('Similar shots waits in plain words until the line arrives', !waiting.hidden && /arrive last/.test(waiting.text), waiting);
+    await b.waitFor(`SelectApp.state.scan.state==='Done'&&SelectApp.state.order.length>0`, 'groups', 30000);
+    await sleep(120);
+    const grouped = await b.evalIn(`({heads:Array.from(document.querySelectorAll('#tiles .gh')).filter(function(h){return !h.hidden;}).map(function(h){return h.textContent;}),count:SelectApp.state.groupCount,top:document.querySelector('#tiles .gh').style.top,foot:document.getElementById('foot-sentence').textContent})`);
+    const shelves = await b.evalIn(`(function(){var h=SelectApp.state.L.heads;return {same:h[0].y===h[1].y,x:h[1].x>0};})()`);
+    check('groups land last and show as groups in the grid, packed along shelves', grouped.count > 5 && grouped.heads[0] === 'Group 1 · 3 clips' && /groups, /.test(grouped.foot) && shelves.same && shelves.x, grouped);
+    await b.shot('32-grid-groups');
+    await b.click('#mode-list');
+    await sleep(100);
+    const listed = await b.evalIn(`Array.from(document.querySelectorAll('#body .gh')).filter(function(h){return !h.hidden;}).map(function(h){return h.textContent;})`);
+    check('and as groups in the list, with no sideways scroll', listed[0] === 'Group 1 · 3 clips' && listed.length > 1 && (await b.evalIn(`document.getElementById('grid').scrollWidth<=document.getElementById('grid').clientWidth`)), listed.slice(0, 3));
+    await b.shot('33-list-groups');
+    await pressPreset(b, 'similar');
+
+    // what Tier 2 can do wrong
+    b.engineEnv.FAKE_DELAY_MS = '0';
+    b.engineEnv.FAKE_TIER2 = 'fail';
+    await scanAndWait(b);
+    const t2Fail = await b.evalIn(`({failed:SelectApp.state.store.tier2Failed,errors:SelectApp.state.store.errors,foot:document.getElementById('status-unread').textContent,kept:SelectApp.state.store.rows.filter(function(r){return r.notUnderstood&&r.tier===1&&typeof r.luma==='number';}).length})`);
+    check('a Tier 2 failure leaves the clip whole, and says so once', t2Fail.failed > 5 && t2Fail.errors === 8 && t2Fail.kept > 0 && /could not be looked at more closely/.test(t2Fail.foot), t2Fail);
+    const slowRow = await b.evalIn(`(function(){var o=SelectApp.state.order,rows=SelectApp.state.store.rows;for(var i=0;i<o.length;i++){if(rows[o[i]].lookReason&&!rows[o[i]].reason){document.getElementById('grid').scrollTop=i*40;return rows[o[i]].name;}}return null;})()`);
+    await sleep(140);
+    const slowWhy = await b.evalIn(`(function(){var r=Array.from(document.querySelectorAll('#body .r')).filter(function(x){return x.querySelector('.n').textContent===${JSON.stringify(slowRow)};})[0];return r?{why:r.querySelector('.why').textContent,color:getComputedStyle(r.querySelector('.why')).color}:null;})()`);
+    check('a Tier 2 timeout shows its reason quietly under the name, like Tier 1', slowRow && slowWhy && slowWhy.why === 'Looking closer at this clip took too long, so it was left out.' && slowWhy.color === 'rgb(173, 173, 177)', slowWhy);
+    await b.evalIn(`document.getElementById('grid').scrollTop=0`);
+    b.engineEnv.FAKE_TIER2 = 'crash';
+    await scanAndWait(b);
+    const t2Crash = await b.evalIn(`({read:SelectApp.state.store.tier1,tier2:SelectApp.state.store.tier2,foot:document.getElementById('foot-sentence').textContent,bins:!document.getElementById('do-bins').hidden})`);
+    check('the engine dying in Tier 2 keeps every row, and the writes', t2Crash.read === 392 && t2Crash.tier2 > 0 && /What was read stays/.test(t2Crash.foot) && t2Crash.bins, t2Crash);
+    b.engineEnv.FAKE_TIER2 = 'off';
+    await scanAndWait(b);
+    await pressPreset(b, 'closeups');
+    const noData = await b.evalIn(`({text:document.getElementById('empty-words').textContent,foot:document.getElementById('foot-sentence').textContent})`);
+    check('a sort on data no clip has says so plainly, not an empty table', /No clip has shot size data/.test(noData.text) && /No clip has shot size data/.test(noData.foot), noData);
+    await b.click('#presets [data-group="people"]');
+    const noHint = await b.evalIn(`document.querySelector('#sort-menu [data-id="closeups"] span').textContent`);
+    check('the group menu says no data', noHint === 'no data', noHint);
+    await b.click('#sort-menu [data-id="closeups"]');
+    b.engineEnv.FAKE_TIER2 = '';
+
+    // 1,000 clips: search, sort and scroll in the grid
+    await setItems(b, 1000);
+    await b.click('#mode-grid');
+    await scanAndWait(b);
+    await sleep(300);
+    const search1000 = [];
+    await b.click('#search');
+    for (const ch of 'bread water') {
+      await b.send('Input.insertText', { text: ch });
+      await b.waitFor(`SelectApp.state.query.slice(-1)===${JSON.stringify(ch)}`);
+      search1000.push(await b.evalIn('SelectApp.state.searchMs'));
+    }
+    await b.evalIn(`document.getElementById('search').value='';document.getElementById('search').dispatchEvent(new Event('input'))`);
+    const worstSearch = Math.max(...search1000), meanSearch = search1000.reduce((x, y) => x + y, 0) / search1000.length;
+    check('search at 1,000 clips, each keystroke with repaint, 16 ms or less', worstSearch <= 16, `worst ${worstSearch.toFixed(1)} ms, mean ${meanSearch.toFixed(1)} ms over ${search1000.length} keystrokes`);
+    const gridSorts = [];
+    for (const id of ['colour', 'softest', 'people', 'shoot', 'shakiest', 'colour']) {
+      await b.evalIn(`SelectApp.state.sortMs=null`);
+      await pressPreset(b, id);
+      gridSorts.push(await b.evalIn('SelectApp.state.sortMs'));
+    }
+    const worstGrid = Math.max(...gridSorts);
+    check('grid re-sort and repaint at 1,000 clips, 16 ms or less', worstGrid <= 16, `worst ${worstGrid.toFixed(1)} ms over ${gridSorts.length} sorts`);
+    const gridScroll = await b.evalIn(`new Promise(function(resolve){
+      var g=document.getElementById('grid'),max=g.scrollHeight-g.clientHeight,n=0,last=performance.now(),gaps=[],nodes=0;
+      function step(now){gaps.push(now-last);last=now;g.scrollTop=(n%2?max*(n/240):max*(1-n/240));
+        nodes=Math.max(nodes,document.querySelectorAll('#tiles .t').length);
+        if(++n<240){requestAnimationFrame(step);}else{gaps.shift();gaps.sort(function(a,b){return a-b;});
+          resolve({frames:n,max:gaps[gaps.length-1],p99:gaps[Math.floor(gaps.length*.99)],median:gaps[gaps.length>>1],nodes:nodes,height:g.scrollHeight});}}
+      requestAnimationFrame(step);})`);
+    check('the grid is virtualised at 1,000 clips', gridScroll.nodes < 80 && gridScroll.height > 15000, gridScroll);
+    check('scrolling the grid end to end every frame stays near 60 fps (headless, software)', gridScroll.p99 <= 34, gridScroll);
+    await b.evalIn(`document.getElementById('grid').scrollTop=9000`);
+    await sleep(120);
+    const tilesRight = await b.evalIn(`(function(){var bad=0,n=0;document.querySelectorAll('#tiles .t').forEach(function(t){if(t.style.display==='none'){return;}n++;var r=SelectApp.state.store.rows[SelectApp.state.order[Number(t.dataset.at)]];if(t.querySelector('.n').textContent!==r.name){bad++;}});return {bad:bad,n:n};})()`);
+    check('after a long scroll every tile shows the right clip', tilesRight.bad === 0 && tilesRight.n > 20, tilesRight);
+    await b.evalIn(`document.getElementById('grid').scrollTop=0`);
+
+    // the grid at the smallest panel, and in Premiere's light theme
+    await b.size(620, 420);
+    await sleep(160);
+    const narrowGrid = await b.evalIn(`(function(){var r=document.querySelector('#tiles .t').getBoundingClientRect(),g=document.getElementById('grid'),cols=SelectApp.state.L.cols,last=document.querySelector('#tiles .t[data-at="'+(cols-1)+'"]').getBoundingClientRect();return {cols:cols,w:Math.round(r.width),over:g.scrollWidth-g.clientWidth,right:last.right,page:document.documentElement.scrollWidth,sortLines:document.getElementById('presets').getBoundingClientRect().height};})()`);
+    check('the grid fits 620 px with no sideways scroll, and the sort row stays one line', narrowGrid.cols >= 3 && narrowGrid.over === 0 && narrowGrid.right <= 620 && narrowGrid.page <= 620 && narrowGrid.sortLines <= 20, narrowGrid);
+    await b.evalIn(`__mock.skin={red:230,green:230,blue:230};__mock.listeners['com.adobe.csxs.events.ThemeColorChanged'].forEach(function(f){f();})`);
+    await sleep(100);
+    await b.shot('34-grid-620-light');
+    const lightGrid = await b.evalIn(`({caption:getComputedStyle(document.querySelector('#tiles .t .n')).color,bg:getComputedStyle(document.getElementById('grid')).backgroundColor})`);
+    check('the grid follows the light theme of Premiere', lightGrid.caption === 'rgb(29, 29, 31)' && lightGrid.bg === 'rgb(255, 255, 255)', lightGrid);
+    await b.size(900, 620);
+    await b.evalIn(`__mock.skin={red:35,green:35,blue:35};__mock.listeners['com.adobe.csxs.events.ThemeColorChanged'].forEach(function(f){f();});SelectApp.setMode('list')`);
+    await setItems(b, 400);
+    await b.evalIn(`document.getElementById('clear-view').click()`);
 
     // -------- the panel sends nothing
     const outside = b.requests.filter(u => !/^(file|data|about|blob):/.test(u));
@@ -923,4 +1162,4 @@ async function main() {
 
 if (require.main === module) { main(); }
 
-module.exports = { launch, setItems, clips, scanAndWait, pressScan, setDeadline, stopEverything, fixture, sleep, foot, OUT };
+module.exports = { pressPreset, launch, setItems, clips, scanAndWait, pressScan, setDeadline, stopEverything, fixture, sleep, foot, OUT };

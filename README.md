@@ -3,10 +3,19 @@
 A Premiere Pro panel that ranks hundreds of clips in seconds, so you know where to look first.
 
 <p align="center">
-  <img src="docs/media/demo.png" width="760" alt="An animated illustration of the Select panel. A list of clips fills in as a scan runs, one sort moves the softest clips to the top, and after Sort into Bins the bottom of the panel turns green and says Sorted into 5 bins.">
+  <img src="docs/media/demo.png" width="760" alt="An animated illustration of the Select panel with invented clips. The grid of clips sorts itself by colour into rainbow order, a search narrows it down, and a write to the project ends with the bottom of the panel turning green.">
 </p>
 
-Select lives in a panel inside Premiere. Choose your clips, press **Scan**, and every clip gets looked at: one frame for picture, a few short moments for sound, and the file's own details. Then sort. Softest first, darkest, most clipped, silent, near duplicates.
+Select lives in a panel inside Premiere. Choose your clips, press **Scan**, and every clip gets looked at: three moments for picture, a few short stretches for sound, and the file's own details. Then sort or search. Softest first, darkest, most clipped, people, close-ups, speech, music, steadiest, similar shots, and every clip by colour.
+
+Everything happens on your Mac. No clip, frame or word leaves it.
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/media/panel-grid-dark.png">
+    <img src="docs/media/panel-grid.png" width="760" alt="The Select panel in grid view with 24 invented clips, simple drawn scenes rather than real footage, sorted by colour: reds and oranges first, then yellows, greens, blues and purples, with grey clips last. Each clip shows a small strip of its main colours.">
+  </picture>
+</p>
 
 Sorting changes nothing. Your project only changes when you press a button that says so, and your files never change at all.
 
@@ -50,8 +59,15 @@ All of these are places to look first. None of them is a verdict on a clip.
 - **Most clipped.** How much of that one frame hits the top of the range. It can do little on log footage, because log rarely clips. A window or a lamp can account for all of it.
 - **Most motion, Static.** A stand-in, not real motion tracking. It reads how much the compressed frame sizes change along the clip, without looking at a single frame. It's weak on all-intra footage, where every frame is stored whole, and busy detail or a change of light can read as motion.
 - **Silent.** Clips with no audio track, or where the sampled moments are silent. Sound is sampled, not read in full, so sound elsewhere in a clip can be missed.
-- **Interviews.** Clips with sound, in the calmest 40% of the scan, longest first. It doesn't detect faces or speech, so a quiet ambience shot passes too.
-- **Near duplicates.** Groups clips whose chosen frames look alike, sharpest first in each group. It hasn't been tested on real repeated takes yet, so treat the groups as a suggestion.
+- **Interviews.** Speech and a face, and steady where the camera recorded that. It finds likely interviews, not certain ones.
+- **People, No people.** How many people Select saw in the busiest of three moments. It misses people in the dark and undercounts crowds. On 60 real clips it was right about whether anyone was there on 57.
+- **Close-ups, Mediums, Wides.** From the size of the head or body in the frame, on tall frames as well as wide ones. A statue can get a face. On 30 real clips with someone in them it agreed with a person's call on 27. Close-ups are the weak end: it called only 4 of 973. Nearly all of those clips were tall frames, so wide frames are less tested.
+- **Speech, Music.** From six seconds of sound sampled across the clip, so a word or a song elsewhere in it can be missed. Crowd noise can read as speech. We've checked this less than the rest.
+- **Steadiest, Shakiest.** From the camera's own gyro, on the Sony clips that record one. Other clips stay blank. It's measured over about a second and a half of the clip.
+- **Text on screen.** Words on signs and titles. It found about half of what was readable, mostly big clear lettering, and about two words in five are misreads. It's good for finding the shot of the sign.
+- **Colour.** Clips in rainbow order by their main colour, with neutral clips last. It reads log footage through its own curve, so S-Log has real colours here. On 60 real clips it matched what a person would say on 57.
+- **Similar shots.** Groups clips that show the same setup, such as repeated takes, among the clips in one folder. On 973 real clips it made 45 groups. Of 33 we checked, 31 were true repeats, and the two misses were flat textures. The same place from another angle usually stays apart.
+- **Near duplicates.** A strict match on one frame. On those same 973 clips it found only 2 pairs, so Similar shots is the one for repeated takes.
 - **Shoot order.** By the time written in the file, then by name. It trusts the camera's clock.
 
 <p align="center">
@@ -62,13 +78,14 @@ All of these are places to look first. None of them is a verdict on a clip.
 
 - **Your files are never changed.** The bins and columns write to the project, never to your files.
 - **Use Undo in the panel, not Cmd+Z.** Premiere only keeps its last 50 steps, so Cmd+Z can't take back a big **Label**, **Add Columns** or **Sort into Bins**. **Undo** in the panel checks that each clip really went back and tells you if one didn't. It remembers your last write until the panel is reloaded.
-- **It's quick, and how quick depends on your Mac.** 973 clips, 510 GB, took about 5 seconds on an M5 Max from a USB SSD, which is about 2 seconds per 400. A rescan took under a tenth of a second, because results are remembered. Yours will vary.
+- **It's quick, and how quick depends on your Mac.** On an M5 Max from a USB SSD, 973 clips, 510 GB, got their file details and scores in about 5 seconds, which is about 2 seconds per 400, and the full look at people, words, sound and colour finished after 14 seconds. The list is usable from the start. A rescan took under a tenth of a second, because results are remembered. Yours will vary.
+- **Labels and words are suggestions.** They come from Apple's on-device models, and they're often right and sometimes odd. On 60 real clips the top labels were fair on 47 of 57, and the misses were mostly art taken literally.
 - **Camera and lens depend on sidecar files.** Select reads them from the small file some cameras write beside each clip, such as Sony's `M01.XML`. Move a clip without it and those columns go blank.
 - **A blank score means Select couldn't get it, never a guess.** Blank clips sort last. When a clip's picture can't be read, Select says why. If your Mac has no decoder for a clip, the file details stay and the picture scores stay blank. See [Formats](#formats).
 
 ## Formats
 
-MP4 and MOV work on their own. MXF works when [ffmpeg](https://ffmpeg.org) is installed, and it's much slower, because each clip goes through ffmpeg: a project of 396 MP4 and 129 MXF clips took 22 seconds on the same M5 Max. RED and BRAW aren't supported yet.
+MP4 and MOV work on their own. MXF works when [ffmpeg](https://ffmpeg.org) is installed, and it's much slower, because each clip goes through ffmpeg: the full look took 0.3 to 2 seconds per MXF clip on the same M5 Max, against about 0.15 seconds for an MP4. RED and BRAW aren't supported yet.
 
 Select uses your Mac's own video decoders, and not every Mac has one for every format. H.264 10-bit 4:2:2, which is what Sony's XAVC S-I modes record, is the one to watch: on the Mac tested, macOS only decodes it with hardware. A Mac without that hardware leaves the picture scores blank, unless ffmpeg is installed, which fills them in more slowly. The file details and sound work either way.
 
@@ -80,9 +97,11 @@ The full picture, and how sure we are of each part, is in [docs/FORMATS.md](docs
 
 The panel sends nothing. There's no account, no tracking and no check for updates, so a new version is something you download yourself.
 
+Labels, faces, words and sounds are all worked out on your Mac, with models that come with macOS. We scanned with the network blocked and every result came out the same, and the engine opened no network connection during a scan.
+
 **Report a Bug** only opens a GitHub page in your browser. Nothing is sent unless you type it in and press submit. Please leave out file names, paths and client names.
 
-Results and thumbnails stay on your Mac, in `~/Library/Caches/com.skyfallstatus.select`. Select writes nothing beside your media.
+Results, thumbnails and the fingerprints used to compare shots stay on your Mac, in `~/Library/Caches/com.skyfallstatus.select`. It's kept under 2 GB, about 50,000 clips, by dropping the clips used longest ago. Select writes nothing beside your media.
 
 ## Contributing
 

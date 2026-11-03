@@ -6,6 +6,8 @@
 //                  deaf: ignores SIGTERM   noend: exit 0 without a done line
 //   FAKE_THUMBS    a folder of generated pictures, one per fixture clip, named <index>.png
 //   FAKE_REPLAY    a real engine's JSON Lines file: replayed as they are, paced by FAKE_DELAY_MS
+//   FAKE_TIER2     off: stop after Tier 1, as an older engine would   fail: every 40th clip fails Tier 2, one way or the other
+//                  crash: exit 4 half way through Tier 2   nogroups: no groups line
 'use strict';
 const fs = require('fs');
 const path = require('path');
@@ -15,7 +17,7 @@ const args = process.argv.slice(2);
 if (args[0] === 'version') { console.log('0.0.0-fake'); process.exit(0); }
 if (args[0] !== 'scan' || !args.includes('--paths-file')) { console.error('usage: scan --paths-file <file|->'); process.exit(2); }
 const file = args[args.indexOf('--paths-file') + 1];
-const tierArg = args.includes('--tier') ? Number(args[args.indexOf('--tier') + 1]) : 1;
+const tierArg = args.includes('--tier') ? Number(args[args.indexOf('--tier') + 1]) : 2;
 const env = process.env;
 const delay = Number(env.FAKE_DELAY_MS || 0), mode = env.FAKE_MODE || '', every = Number(env.FAKE_ERRORS || 0);
 const thumbs = env.FAKE_THUMBS || '';
@@ -24,6 +26,8 @@ const fixture = new Map();
 for (const line of fs.readFileSync(path.join(__dirname, 'fixtures/clips.jsonl'), 'utf8').split('\n')) {
   if (line) { const r = JSON.parse(line); fixture.set(r.path, r); }
 }
+
+const known = [...fixture.values()].filter(r => r.tier2 && r.tier2.moments);
 
 function synth(p) {
   const h = crypto.createHash('sha1').update(p).digest();
@@ -34,6 +38,7 @@ function synth(p) {
       bitDepth: 10, chroma: '422', allIntra: false, mbps: 50 + u(3) * 200, hasAudio: u(4) > 0.2, audioChannels: 2, createdAt: new Date(1.76e12 + h.readUInt32LE(4) * 500).toISOString(),
       timecode: '00:00:00:00', camera: 'SONY ILME-FX3', lens: null, gamma: 's-log3-cine', isLog: true, gpsLat: null, gpsLon: null, keyframeBytesMean: u(5) * 1e5, motionProxy: u(6)
     },
+    tier2: known[h.readUInt32LE(0) % known.length].tier2,
     tier1: {
       sharpness: u(7), luma: u(8), contrast: u(9), clipHighPct: u(10) * 3, clipLowPct: u(11) * 3, saturation: u(12), warmth: u(13) * 2 - 1,
       dhash: h.subarray(0, 8).toString('hex'), audioDb: u(4) > 0.2 ? -60 + u(14) * 50 : null, silent: u(4) > 0.2 ? u(14) < 0.1 : null, thumb: null
@@ -54,9 +59,7 @@ function shuffled(list, seed) {
 
 // Clips beyond the fixture borrow a fixture clip's picture.
 function fixtureThumb(p) {
-  const h = crypto.createHash('sha1').update(p).digest().readUInt32LE(0);
-  const known = [...fixture.values()].filter(r => r.tier1 && !r.tier1.reason);
-  return known[h % known.length].index;
+  return known[crypto.createHash('sha1').update(p).digest().readUInt32LE(0) % known.length].index;
 }
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -108,6 +111,29 @@ async function main() {
       if (thumbs && !t1.reason) { t1.thumb = path.join(thumbs, (rec(p).index === undefined ? fixtureThumb(p) : rec(p).index) + '.png'); }
       await emit({ type: 'clip', tier: 1, path: p, cached: false, ms: 41, ...t1 });
       done++;
+    }
+  }
+  const t2 = env.FAKE_TIER2 || '';
+  if (tierArg > 1 && t2 !== 'off') {
+    const live = shuffled(paths, 19).filter(p => !failed.has(p));
+    let at = 0;
+    for (const p of live) {
+      if (leaving) { return; }
+      if (t2 === 'crash' && at > live.length / 2) { console.error('fake engine: simulated crash in Tier 2'); process.exit(4); }
+      at++;
+      if (t2 === 'fail' && at % 80 === 0) { await emit({ type: 'error', tier: 2, path: p, message: 'could not look closer' }); continue; }
+      if (t2 === 'fail' && at % 40 === 0) { await emit({ type: 'clip', tier: 2, path: p, cached: false, ms: 0, moments: 0 }); continue; }
+      if (t2 === 'fail' && at % 60 === 0) { await emit({ type: 'clip', tier: 2, path: p, cached: false, ms: 0, moments: 0, people: null, labels: null, text: null, palette: null, colorName: null, reason: 'Looking closer at this clip took too long, so it was left out.' }); continue; }
+      await emit({ type: 'clip', tier: 2, path: p, cached: false, ms: 90, ...rec(p).tier2 });
+    }
+    if (t2 !== 'nogroups') {
+      const looks = new Map();
+      for (const p of live) {
+        const r = fixture.get(p);
+        if (r && r.index % 11 <= 2 && r.tier2 && r.tier2.moments) { if (!looks.has(r.look)) { looks.set(r.look, []); } looks.get(r.look).push(p); }
+      }
+      const groups = [...looks.values()].filter(g => g.length > 1).map((g, i) => ({ id: i + 1, paths: g }));
+      await emit({ type: 'groups', groups });
     }
   }
   if (mode === 'noend') { return; }

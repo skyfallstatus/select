@@ -20,6 +20,8 @@ struct AudioWindow {
     let bytes: Int
     /// AAC only: each packet's position within the read and its size.
     let packets: [(at: Int, size: Int)]
+    /// Sound windows only: pieces with the same number follow on from each other in the clip.
+    var run = 0
 }
 
 struct AudioPlan {
@@ -37,6 +39,14 @@ struct ClipPlan {
     var height = 0
     var fallback = false
     var bitDepth: Int?
+    /// Keyframes to look at in Tier 2, in clip order.
+    var moments: [VideoPlan] = []
+    var rtmd: RtmdPlan?
+    /// The file or its sidecar says this is a log curve.
+    var isLog = false
+    /// Longer sampled windows than `audio`, for telling sounds apart.
+    var sound: AudioPlan?
+    var audioRate = 0.0
     /// For messages: "H.264 10-bit 4:2:2".
     var formatName = "this format"
 }
@@ -225,6 +235,94 @@ func channelCount(_ t: Track) -> Int? {
     return n > 0 ? n : nil
 }
 
+/// Sound classification wants about a second at a time, so each of these windows walks a few chunks in a row.
+private let soundWindowCount = 3
+private let soundWindowSeconds = 2.0
+/// What one clip may read for sound. A real clip uses about a megabyte, and a damaged table can't ask for more than this.
+private let soundBudgetBytes = 32 << 20
+/// Some cameras store a packet or two per chunk, and each chunk is its own read.
+private let soundMaxReads = 48
+
+/// From the sample description, because the track's timescale isn't always the sample rate.
+private func sampleRate(_ t: Track) -> Double {
+    let fixed = Double(t.stsdEntry.u32(24)) / 65536
+    return fixed >= 8000 ? fixed : Double(t.timescale)
+}
+
+private func soundPlan(_ t: Track) -> AudioPlan? {
+    let duration = t.timescale > 0 ? Double(t.sttsTotal()) / Double(t.timescale) : 0
+    guard duration > 0 else { return nil }
+    let span = min(soundWindowSeconds, duration / Double(soundWindowCount))
+    let starts = (0..<soundWindowCount).map { duration * (Double($0) + 0.5) / Double(soundWindowCount) - span / 2 }
+    var pieces: [AudioWindow] = []
+    var budget = soundBudgetBytes
+    if let (kind, frameBytes) = pcmFormat(t) {
+        let singleFrames = t.stszFixed != 0 && (Int(t.stszFixed) == frameBytes || t.stszFixed == 1)
+        for start in starts {
+            var at = max(0, start), left = min(Int(span * sampleRate(t)) * frameBytes, budget)
+            var guardSteps = 0
+            while left > 0, guardSteps < 32 {
+                guardSteps += 1
+                let sample = t.sampleAt(mediaTime: UInt64(at * Double(t.timescale)))
+                guard let loc = t.locate(sample) else { break }
+                var offset = t.chunkOffset(loc.chunk)
+                var bytes: Int
+                if singleFrames {
+                    offset += Int64(loc.indexInChunk * frameBytes)
+                    bytes = (loc.samplesInChunk - loc.indexInChunk) * frameBytes
+                } else {
+                    guard let o = t.sampleOffset(sample) else { break }
+                    offset = o
+                    bytes = 0
+                    var s = sample, run = loc.samplesInChunk - loc.indexInChunk
+                    while run > 0, bytes < left, s < t.sampleCount {
+                        bytes += t.sampleSize(s)
+                        s += 1
+                        run -= 1
+                    }
+                }
+                bytes = min(bytes, left)
+                bytes -= bytes % frameBytes
+                guard bytes > 0 else { break }
+                pieces.append(AudioWindow(offset: offset, bytes: bytes, packets: []))
+                left -= bytes
+                budget -= bytes
+                at += Double(bytes / frameBytes) / Double(t.timescale)
+            }
+        }
+        return pieces.isEmpty ? nil : AudioPlan(kind: kind, windows: pieces)
+    }
+    if t.format == fourCC("mp4a"), let esds = findESDS(t) {
+        let channels = channelCount(t) ?? 1
+        for (run, start) in starts.enumerated() {
+            var sample = t.sampleAt(mediaTime: UInt64(max(0, start) * Double(t.timescale)))
+            let last = min(sample + Int(span * 48), t.sampleCount)     // 48 packets a second covers AAC at 48 kHz
+            var reads = 0
+            while sample < last, reads < soundMaxReads {
+                reads += 1
+                guard let loc = t.locate(sample), let off = t.sampleOffset(sample) else { break }
+                var packets: [(at: Int, size: Int)] = []
+                var end = 0
+                let inChunk = min(loc.samplesInChunk - loc.indexInChunk, last - sample)
+                for s in sample..<(sample + inChunk) {
+                    guard let o = t.sampleOffset(s) else { break }
+                    let at = Int(o - off), size = t.sampleSize(s)
+                    guard at >= 0, at + size <= 1 << 21 else { break }
+                    packets.append((at, size))
+                    end = at + size
+                }
+                sample += max(1, inChunk)
+                if !packets.isEmpty, end <= budget {
+                    pieces.append(AudioWindow(offset: off, bytes: end, packets: packets, run: run))
+                    budget -= end
+                }
+            }
+        }
+        return pieces.isEmpty ? nil : AudioPlan(kind: .aac(esds: esds, channels: channels), windows: pieces)
+    }
+    return nil
+}
+
 private func audioPlan(_ t: Track) -> AudioPlan? {
     let duration = t.timescale > 0 ? Double(t.sttsTotal()) / Double(t.timescale) : 0
     guard duration > 0 else { return nil }
@@ -342,18 +440,29 @@ func tier0(path: String) throws -> Tier0Result {
     plan.hasAudio = !audios.isEmpty
     plan.bitDepth = info.bitDepth
     plan.formatName = info.displayName
-    let target = v.sampleAt(mediaTime: mediaTicks / 2)
-    let sync = v.nearestSync(to: target)
-    if let off = v.sampleOffset(sync), v.sampleSize(sync) > 0, v.sampleSize(sync) < maxSampleBytes, codedW > 0, codedH > 0 {
-        plan.video = VideoPlan(offset: off, size: v.sampleSize(sync), format: v.format,
-                               codedWidth: codedW, codedHeight: codedH, atoms: decoderAtoms(v))
+    plan.isLog = meta.gamma?.lowercased().contains("log") ?? false
+    let atoms = decoderAtoms(v)
+    func videoPlan(atTicks ticks: UInt64) -> VideoPlan? {
+        let sync = v.nearestSync(to: v.sampleAt(mediaTime: ticks))
+        guard let off = v.sampleOffset(sync), v.sampleSize(sync) > 0, v.sampleSize(sync) < maxSampleBytes,
+              codedW > 0, codedH > 0 else { return nil }
+        return VideoPlan(offset: off, size: v.sampleSize(sync), format: v.format, codedWidth: codedW, codedHeight: codedH, atoms: atoms)
+    }
+    plan.video = videoPlan(atTicks: mediaTicks / 2)
+    // Three moments spread through the clip. A short clip with one keyframe may give only one.
+    for sixths in [1, 3, 5] as [UInt64] {
+        guard let m = videoPlan(atTicks: mediaTicks / 6 * sixths), !plan.moments.contains(where: { $0.offset == m.offset }) else { continue }
+        plan.moments.append(m)
     }
     // Level is read from the widest track, which is the one ffmpeg would pick by default.
     if let best = audios.enumerated().max(by: {
         (channelCount($0.element) ?? 0, -$0.offset) < (channelCount($1.element) ?? 0, -$1.offset)
     })?.element {
         plan.audio = audioPlan(best)
+        plan.sound = soundPlan(best)
+        plan.audioRate = sampleRate(best)
     }
+    plan.rtmd = rtmdPlan(m)
 
     let mbps = duration > 0 ? Double(f.size) * 8 / duration / 1e6 : nil
     let fields = tier0Fields(path: path, size: f.size, duration: duration, fps: fps, w: w, h: h, rotation: rotation,

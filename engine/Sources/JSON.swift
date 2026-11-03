@@ -35,5 +35,7 @@ struct Fields {
         }
         parts.append("\"\(k)\":" + String(format: "%.\(places)f", v))
     }
+    /// A value that is already JSON, such as an array.
+    mutating func addRaw(_ k: String, _ json: String?) { parts.append("\"\(k)\":" + (json ?? "null")) }
     var joined: String { parts.joined(separator: ",") }
 }

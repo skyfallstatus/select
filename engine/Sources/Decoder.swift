@@ -28,11 +28,18 @@ enum Decoded<T> {
 // Set only by engine/tests/contract.sh, to reach the paths a Mac without the decoder would take.
 private let forcedFailure = ProcessInfo.processInfo.environment["ENGINE_TEST_DECODER"]
 
+/// The shape a session hands frames back in. Tier 1 reads native 10-bit planes, Tier 2 small BGRA images.
+private enum FrameOutput: Hashable {
+    case native
+    case scaled(width: Int, height: Int)
+}
+
 private struct SessionKey: Hashable {
     let format: UInt32
     let width: Int
     let height: Int
     let atoms: [String: Data]
+    var output = FrameOutput.native
 }
 
 private final class PooledSession {
@@ -106,7 +113,11 @@ final class DecoderPool {
                                                 height: Int32(key.height), extensions: ext as CFDictionary,
                                                 formatDescriptionOut: &desc)
         guard status == 0, let desc else { return nil }
-        let attrs: [String: Any] = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange]
+        var attrs: [String: Any] = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange]
+        if case .scaled(let w, let h) = key.output {
+            attrs = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+                     kCVPixelBufferWidthKey as String: w, kCVPixelBufferHeightKey as String: h]
+        }
         var session: VTDecompressionSession?
         status = VTDecompressionSessionCreate(allocator: nil, formatDescription: desc, decoderSpecification: nil,
                                               imageBufferAttributes: attrs as CFDictionary, outputCallback: nil,
@@ -165,20 +176,39 @@ final class DecoderPool {
 
     /// Decodes one sample and passes the locked frame to `body`. When VideoToolbox refuses, this says why,
     /// and the caller takes the slow route or reports the clip.
-    func decode<T>(_ plan: VideoPlan, sample: ReadBuffer, body: (FrameView, Bool) -> T) -> Decoded<T> {
+    func decode<T>(_ plan: VideoPlan, sample: ReadBuffer, body: (FrameView, Bool, CVPixelBuffer) -> T) -> Decoded<T> {
         let key = SessionKey(format: plan.format, width: plan.codedWidth, height: plan.codedHeight, atoms: plan.atoms)
+        return guarded(key) { self.attempt(key, sample, body) }
+    }
+
+    /// Decodes one sample to a small BGRA image, for Vision. The image is only valid inside `body`.
+    func decodeScaled<T>(_ plan: VideoPlan, sample: ReadBuffer, width: Int, height: Int, body: (CVPixelBuffer, Bool) -> T) -> Decoded<T> {
+        var key = SessionKey(format: plan.format, width: plan.codedWidth, height: plan.codedHeight, atoms: plan.atoms)
+        key.output = .scaled(width: width, height: height)
+        return guarded(key) {
+            self.withImage(key, sample) { image, pooled -> Decoded<T> in
+                guard CVPixelBufferGetPixelFormatType(image) == kCVPixelFormatType_32BGRA else {
+                    return .refused(DecodeFailure(noDecoder: false, status: kVTPixelTransferNotSupportedErr))
+                }
+                return .frame(body(image, pooled.hardware))
+            }
+        }
+    }
+
+    /// Runs one decode under the rules that keep a Mac without a decoder from losing time.
+    private func guarded<T>(_ key: SessionKey, _ run: () -> Decoded<T>) -> Decoded<T> {
         let s = state(for: key)
         lock.lock()
         let proven = s.proven
         lock.unlock()
-        if proven { return attempt(key, sample, body) }
+        if proven { return run() }
 
         s.gate.lock()
         defer { s.gate.unlock() }
         lock.lock()
         if s.proven {
             lock.unlock()
-            return attempt(key, sample, body)
+            return run()
         }
         if let closed = s.closed {
             s.skipped += 1
@@ -189,10 +219,34 @@ final class DecoderPool {
             }
         }
         lock.unlock()
-        return learn(attempt(key, sample, body), s)
+        return learn(run(), s)
     }
 
-    private func attempt<T>(_ key: SessionKey, _ sample: ReadBuffer, _ body: (FrameView, Bool) -> T) -> Decoded<T> {
+    private func attempt<T>(_ key: SessionKey, _ sample: ReadBuffer, _ body: (FrameView, Bool, CVPixelBuffer) -> T) -> Decoded<T> {
+        withImage(key, sample) { image, pooled -> Decoded<T> in
+            // The maths reads 16-bit words, so a decoder that hands back anything else is a refusal, not a frame.
+            guard CVPixelBufferGetPixelFormatType(image) == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
+                  CVPixelBufferGetPlaneCount(image) == 2,
+                  CVPixelBufferLockBaseAddress(image, .readOnly) == 0 else {
+                return .refused(DecodeFailure(noDecoder: false, status: kVTPixelTransferNotSupportedErr))
+            }
+            defer { CVPixelBufferUnlockBaseAddress(image, .readOnly) }
+            guard let yBase = CVPixelBufferGetBaseAddressOfPlane(image, 0),
+                  let uvBase = CVPixelBufferGetBaseAddressOfPlane(image, 1) else {
+                return .refused(DecodeFailure(noDecoder: false, status: kVTPixelTransferNotSupportedErr))
+            }
+            let frame = FrameView(y: UnsafePointer(yBase.assumingMemoryBound(to: UInt16.self)),
+                                  yStride: CVPixelBufferGetBytesPerRowOfPlane(image, 0) / 2,
+                                  width: CVPixelBufferGetWidthOfPlane(image, 0),
+                                  height: CVPixelBufferGetHeightOfPlane(image, 0),
+                                  uv: UnsafePointer(uvBase.assumingMemoryBound(to: UInt16.self)),
+                                  uvStride: CVPixelBufferGetBytesPerRowOfPlane(image, 1) / 2)
+            return .frame(body(frame, pooled.hardware, image))
+        }
+    }
+
+    /// Takes a session, decodes the sample and hands the image to `use`, then returns the session.
+    private func withImage<T>(_ key: SessionKey, _ sample: ReadBuffer, _ use: (CVPixelBuffer, PooledSession) -> Decoded<T>) -> Decoded<T> {
         var openStatus: OSStatus = 0
         guard let pooled = take(key) ?? openFreeingIdle(key, status: &openStatus) else {
             return .refused(DecodeFailure(noDecoder: true, status: openStatus))
@@ -232,24 +286,7 @@ final class DecoderPool {
             return .refused(DecodeFailure(noDecoder: false, status: call != 0 ? call : status))
         }
         defer { give(pooled) }
-        // The maths reads 16-bit words, so a decoder that hands back anything else is a refusal, not a frame.
-        guard CVPixelBufferGetPixelFormatType(image) == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
-              CVPixelBufferGetPlaneCount(image) == 2,
-              CVPixelBufferLockBaseAddress(image, .readOnly) == 0 else {
-            return .refused(DecodeFailure(noDecoder: false, status: kVTPixelTransferNotSupportedErr))
-        }
-        defer { CVPixelBufferUnlockBaseAddress(image, .readOnly) }
-        guard let yBase = CVPixelBufferGetBaseAddressOfPlane(image, 0),
-              let uvBase = CVPixelBufferGetBaseAddressOfPlane(image, 1) else {
-            return .refused(DecodeFailure(noDecoder: false, status: kVTPixelTransferNotSupportedErr))
-        }
-        let frame = FrameView(y: UnsafePointer(yBase.assumingMemoryBound(to: UInt16.self)),
-                              yStride: CVPixelBufferGetBytesPerRowOfPlane(image, 0) / 2,
-                              width: CVPixelBufferGetWidthOfPlane(image, 0),
-                              height: CVPixelBufferGetHeightOfPlane(image, 0),
-                              uv: UnsafePointer(uvBase.assumingMemoryBound(to: UInt16.self)),
-                              uvStride: CVPixelBufferGetBytesPerRowOfPlane(image, 1) / 2)
-        return .frame(body(frame, pooled.hardware))
+        return use(image, pooled)
     }
 
     func closeAll() {
@@ -257,5 +294,23 @@ final class DecoderPool {
         defer { lock.unlock() }
         idle.forEach { $0.close() }
         idle.removeAll()
+    }
+}
+
+/// Makes a small BGRA copy of a frame already decoded, the same shape the decoder gives Tier 2.
+final class FrameShrinker {
+    private var session: VTPixelTransferSession?
+
+    init() { VTPixelTransferSessionCreate(allocator: nil, pixelTransferSessionOut: &session) }
+    deinit { if let session { VTPixelTransferSessionInvalidate(session) } }
+
+    func shrink(_ image: CVPixelBuffer, plan: VideoPlan) -> CVPixelBuffer? {
+        guard let session else { return nil }
+        let (w, h) = scaledSize(width: plan.codedWidth, height: plan.codedHeight)
+        var out: CVPixelBuffer?
+        let attrs = [kCVPixelBufferIOSurfacePropertiesKey as String: [String: Any]()] as CFDictionary
+        guard CVPixelBufferCreate(nil, w, h, kCVPixelFormatType_32BGRA, attrs, &out) == 0, let out,
+              VTPixelTransferSessionTransferImage(session, from: image, to: out) == 0 else { return nil }
+        return out
     }
 }

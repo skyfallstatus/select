@@ -1,3 +1,4 @@
+import CoreVideo
 import Foundation
 
 // Hidden subcommands used by the test scripts. Not part of the contract.
@@ -8,7 +9,7 @@ func decodeForDebug(_ path: String, _ pool: DecoderPool, body: (FrameView, Int?)
         return
     }
     if let v = r.plan.video, !r.plan.fallback, let s = try? f.read(at: v.offset, count: v.size) {
-        if case .frame = pool.decode(v, sample: s, body: { frame, _ in body(frame, r.plan.bitDepth) }) { return }
+        if case .frame = pool.decode(v, sample: s, body: { frame, _, _ in body(frame, r.plan.bitDepth) }) { return }
     }
     _ = fallbackFrame(path: path, plan: r.plan) { body($0, r.plan.bitDepth) }
 }
@@ -25,6 +26,20 @@ func runDebug(_ a: [String]) {
             for y in 0..<f.height { fwrite(f.y + y * f.yStride, 2, f.width, out) }
             fclose(out)
         }
+    case "grade" where a.count == 5:
+        // debug grade <b> <g> <r> <a>: one BGRA pixel through the grade Vision gets. For the contract test.
+        var pb: CVPixelBuffer?
+        guard CVPixelBufferCreate(nil, 2, 2, kCVPixelFormatType_32BGRA, nil, &pb) == 0, let pb else { exit(1) }
+        let v = a.dropFirst().compactMap { UInt8($0) }
+        guard v.count == 4 else { exit(2) }
+        CVPixelBufferLockBaseAddress(pb, [])
+        let p = CVPixelBufferGetBaseAddress(pb)!.assumingMemoryBound(to: UInt8.self)
+        for i in 0..<4 { p[i] = v[i] }
+        CVPixelBufferUnlockBaseAddress(pb, [])
+        gradeForVision(pb)
+        CVPixelBufferLockBaseAddress(pb, .readOnly)
+        print((0..<4).map { String(p[$0]) }.joined(separator: " "))
+        CVPixelBufferUnlockBaseAddress(pb, .readOnly)
     case "sharpraw" where a.count >= 2:
         // debug sharpraw <file.y16>...: the shipped score on luma planes made by a test script.
         for path in a.dropFirst() {

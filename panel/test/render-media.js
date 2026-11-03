@@ -5,7 +5,7 @@
 'use strict';
 const fs = require('fs');
 const path = require('path');
-const { launch, fixture, setDeadline, sleep, OUT } = require('./harness.js');
+const { launch, fixture, setDeadline, sleep, OUT, pressPreset } = require('./harness.js');
 const { ensureThumbs } = require('./build_fixture.js');
 
 const MEDIA = path.join(__dirname, '../../docs/media');
@@ -16,7 +16,11 @@ const CUT = `html, body { background: transparent !important; }
 #modal { position: absolute; padding: 20px; }`;
 const THEME = { light: { red: 230, green: 230, blue: 230 }, dark: { red: 35, green: 35, blue: 35 } };
 
-const clean = fixture.filter(r => r.tier1 && !r.tier1.reason && r.tier1.sharpness !== null).slice(0, 301);
+const clean = fixture.filter(r => r.tier1 && !r.tier1.reason && r.tier1.sharpness !== null && r.tier2.moments).slice(0, 301);
+// The colour stills scan a real selection of 24 clips, picked across the hues, so one screen holds the whole spectrum.
+const vivid = clean.filter(r => r.tier2 && r.tier2.colorHue !== null && r.tier2.colorChroma >= .15).sort((a, c) => (a.tier2.colorHue + 340) % 360 - (c.tier2.colorHue + 340) % 360);
+const quiet = clean.filter(r => r.tier2 && r.tier2.moments && r.tier2.colorHue === null).slice(0, 4);
+const spread = [...vivid.filter((r, i) => Math.floor(i * 20 / vivid.length) !== Math.floor((i - 1) * 20 / vivid.length)), ...quiet];
 
 async function shot(b, name) {
   await b.mouse(4, 4);      // no hover on any row
@@ -27,19 +31,20 @@ async function shot(b, name) {
   console.log(file);
 }
 
-async function panel(b, theme) {
+const pictures = b => b.waitFor(`Array.from(document.querySelectorAll('img[src]')).every(function(i){return i.complete&&i.naturalWidth>0;})`, 'pictures');
+
+async function panel(b, theme, list, source) {
   await b.open();
   await b.evalIn(`(function(){var s=document.createElement('style');s.textContent=${JSON.stringify(CUT)};document.head.appendChild(s);
     __mock.skin=${JSON.stringify(THEME[theme])};__mock.listeners['com.adobe.csxs.events.ThemeColorChanged'].forEach(function(f){f();});
-    __mock.project=${JSON.stringify(PROJECT)};__mock.items=${JSON.stringify(clean.map((r, i) => ({ id: 'n' + i, path: r.path, name: path.basename(r.path) })))};})()`);
-  await b.click('#source button[data-src="project"]');
+    __mock.project=${JSON.stringify(PROJECT)};__mock.items=${JSON.stringify((list || clean).map((r, i) => ({ id: 'n' + i, path: r.path, name: path.basename(r.path) })))};})()`);
+  await b.click(`#source button[data-src="${source || 'project'}"]`);
   const n = b.engineLog.exited.length;
   await b.click('#scan');
   while (b.engineLog.exited.length === n) { await sleep(20); }
   await b.waitFor(`SelectApp.state.scan.state==='Done'`, 'scan');
-  await b.waitFor(`Array.from(document.querySelectorAll('#body img[src]')).every(function(i){return i.complete&&i.naturalWidth>0;})`, 'pictures');
+  await pictures(b);
   await b.waitFor(`document.getElementById('project-name').textContent==='Lantern Bakery Spring Menu'`, 'project name');
-  await b.click('#presets button[data-id="softest"]');
 }
 
 async function main() {
@@ -51,10 +56,25 @@ async function main() {
   await b.send('Emulation.setDefaultBackgroundColorOverride', { color: { r: 0, g: 0, b: 0, a: 0 } });
   await b.size(STAGE.width, STAGE.height);
 
+  await panel(b, 'dark', spread, 'selection');
+  await pressPreset(b, 'colour');
+  await b.click('#mode-grid');
+  await pictures(b);
+  await shot(b, 'panel-grid-dark.png');
+
+  await panel(b, 'light', spread, 'selection');
+  await pressPreset(b, 'colour');
+  await b.click('#mode-grid');
+  await pictures(b);
+  await shot(b, 'panel-grid.png');
+
   await panel(b, 'dark');
+  await b.evalIn(`SelectApp.setMode('list')`);
+  await pressPreset(b, 'softest');
   await shot(b, 'panel-dark.png');
 
   await panel(b, 'light');
+  await pressPreset(b, 'softest');
   await shot(b, 'panel.png');
   await b.click('#do-bins');
   await b.waitFor(`!document.getElementById('modal').hidden`);

@@ -64,6 +64,22 @@ If you're on one of these, a scan of a few clips and the message on a blank row 
 
 `[TESTED]` ffmpeg really out of reach: the contract test also runs the engine in a macOS sandbox that denies it the folder ffmpeg lives in. No crash, and the same plain messages.
 
+## What each camera gives
+
+The picture, sound and colour fields work on anything that decodes. The camera's own record depends on what the file carries. `[TESTED]` means read from real files here.
+
+| Source | ISO, shutter, aperture | Shake | What's there |
+|---|---|---|---|
+| Sony FX3, FX2, 24p to 60p | Yes | Yes | `rtmd` track with exposure, gyro at 2 kHz and accelerometer. `[TESTED]` |
+| Sony FX3, FX2, 100p | Yes | No | `rtmd` track with no gyro tags. 117 of the 973 clips in testing. `[TESTED]` |
+| DJI Osmo Pocket 3 | No | No | A `djmd` track that ExifTool reads ISO and shutter from. Select doesn't read it yet. `[TESTED]` |
+| iPhone 13 to 17 Pro | No | No | Timed metadata tracks, and the lens model. No per-frame exposure that ExifTool shows. `[TESTED]` |
+| MXF | No | No | Through ffmpeg. Picture and sound work. `[TESTED]` |
+
+`[TESTED]` On 24 real Sony clips, ISO, shutter and aperture all matched ExifTool's reading of the same track.
+
+`[TESTED]` Every one of the 973 clips was Sony XAVC, so everything said here about accuracy comes from one kind of camera, mostly S-Log3. The iPhone, DJI and MXF clips were run for robustness, 18 clips with 0 failures, and not scored for accuracy.
+
 ## Containers
 
 | Container | Needs ffmpeg |
