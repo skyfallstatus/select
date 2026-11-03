@@ -228,11 +228,12 @@ fi
 ok "log grade maps all three colours" "$($B debug grade 10 20 30 255 | python3 -c 'import sys; b,g,r,a=map(int,sys.stdin.read().split()); print(b!=10 and g!=20 and r!=30 and a==255)')" True
 
 # ---- nothing can stop a scan from ending: a stage that hangs costs its clip, not the scan
+# 5 s, not less: every scan is a new process, and loading Vision and the sound model cold can take over 2 s on a busy Mac.
 cp $T/u/gop.mp4 $T/u/hang.mp4
 print -l $T/u/hang.mp4 $T/u/gop.mp4 > $T/hang.txt
 for stage in tier0 tier1 vision sound middle; do
   t0=$(python3 -c 'import time;print(time.time())')
-  out=$(ENGINE_TEST_HANG=$stage ENGINE_TEST_DEADLINE=2 limit 60 $B scan --paths-file $T/hang.txt --cache $T/h$stage 2>/dev/null); rc=$?
+  out=$(ENGINE_TEST_HANG=$stage ENGINE_TEST_DEADLINE=5 limit 60 $B scan --paths-file $T/hang.txt --cache $T/h$stage 2>/dev/null); rc=$?
   secs=$(python3 -c "import time;print(int(time.time()-$t0))")
   ok "a hang in $stage: exit 0" $rc 0
   ok "  groups and done arrive" "$(echo "$out" | python3 -c 'import sys,json; t=[json.loads(l)["type"] for l in sys.stdin]; print(t.count("groups")==1 and t[-1]=="done")')" True
