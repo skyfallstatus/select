@@ -4,7 +4,7 @@
 // each item by its id and its media path: an item whose path no longer matches is left alone and reported.
 // Nothing here renames a clip, touches a file on disk or touches a sequence.
 
-var SELECT_HOST_VERSION = '0.1.0';
+var SELECT_HOST_VERSION = '0.2.0';
 // The shape of the calls. The panel loads this file again when an older one is still in Premiere's script engine.
 var SELECT_HOST_PROTOCOL = 2;
 var SELECT_NS = 'http://ns.adobe.com/premierePrivateProjectMetaData/1.0/';

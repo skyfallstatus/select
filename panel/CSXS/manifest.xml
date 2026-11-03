@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<ExtensionManifest Version="7.0" ExtensionBundleId="com.skyfallstatus.select" ExtensionBundleVersion="0.1.0" ExtensionBundleName="Select">
+<ExtensionManifest Version="7.0" ExtensionBundleId="com.skyfallstatus.select" ExtensionBundleVersion="0.2.0" ExtensionBundleName="Select">
   <ExtensionList>
-    <Extension Id="com.skyfallstatus.select.panel" Version="0.1.0"/>
+    <Extension Id="com.skyfallstatus.select.panel" Version="0.2.0"/>
   </ExtensionList>
   <ExecutionEnvironment>
     <HostList>
