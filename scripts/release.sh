@@ -2,7 +2,8 @@
 # Builds a release and uploads it to GitHub Releases. Only ever run by hand.
 #   scripts/release.sh --dry-run     everything but the upload
 #   scripts/release.sh               the same, then asks before it uploads
-# Needs what scripts/sign-zxp.sh needs from the environment. The steps are in docs/RELEASING.md.
+# Needs what scripts/sign-zxp.sh needs from the environment, and the update key that scripts/sign-update.js reads from
+# ~/.config/skyfallstatus/signing. The steps are in docs/RELEASING.md.
 #
 # A mistake here reaches every tester, and a bad signature fails quietly: the panel just isn't there. So this refuses a
 # changed tree, a version that isn't higher than the last, private words, and anything unsigned, and looks at GitHub,
@@ -32,6 +33,8 @@ fi
 for tool in ffmpeg ffprobe node; do
   command -v $tool >/dev/null || refuse "$tool isn't installed, so tests would be skipped. A release runs all of them."
 done
+# Before the long part: installed copies only take a release signed with the key they carry.
+node scripts/sign-update.js check-key || refuse "Without the update key, installed copies couldn't update to this release."
 scripts/test.sh
 scripts/privacy-scan.sh
 scripts/build-panel.sh
@@ -42,9 +45,33 @@ TOOL=${ZXPSIGNCMD:-$(command -v ZXPSignCmd)}
 [[ $("$TOOL" -verify dist/$NAME.zxp || true) == *"Signature verified successfully"* ]] || refuse "dist/$NAME.zxp isn't signed."
 [[ $("$TOOL" -verify dist/signed/$BUNDLE_ID || true) == *"Signature verified successfully"* ]] || refuse "The folder in the installer isn't signed."
 
-print "dist/$NAME.pkg and dist/$NAME.zxp are ready for $TAG."
+# The manifest installed copies check before they take dist/$NAME.zxp, checked against the key the new panel carries.
+MANIFEST=dist/$NAME-update.json
+node scripts/sign-update.js sign dist/$NAME.zxp $MANIFEST dist/signed/$BUNDLE_ID/client/update.js
+
+# The install steps in the notes are README's, word for word.
+NOTES=dist/release-notes.md
+{
+  print "$NAME $VERSION."
+  print
+  print "## Install"
+  awk '/^### Steps$/ { on = 1; next } on && /^##/ { exit } on' README.md
+  print "Already on $NAME 0.2 or later? It updates itself. **··· › Check for Updates** asks now."
+  print
+  print "What to try, and what to send back: [BETA.md](https://github.com/$REPO/blob/$TAG/BETA.md)."
+} > $NOTES
+[[ $(grep -cE '^[0-9]+\. ' $NOTES) -ge 3 ]] || refuse "The install steps didn't come out of README.md. Check its ### Steps section."
+ASSETS=(dist/$NAME.pkg dist/$NAME.zxp $MANIFEST)
+
+print "${ASSETS[*]} are ready for $TAG. Notes: $NOTES"
 (( DRY )) && exit 0
 read "ANSWER?Upload $TAG to $REPO for everyone? Type yes: "
 [[ $ANSWER == yes ]] || { print "Nothing uploaded."; exit 1 }
 [[ $(git rev-parse HEAD) == $COMMIT && -z $(git status --porcelain) ]] || refuse "The tree moved while this was building. Nothing uploaded."
-gh release create $TAG dist/$NAME.pkg dist/$NAME.zxp --repo $REPO --target $COMMIT --title "$NAME $VERSION" --notes "$NAME $VERSION. See BETA.md."
+# A draft first, so releases/latest never shows a release whose files are still uploading. Installed copies ask that URL.
+gh release create $TAG $ASSETS --repo $REPO --target $COMMIT --title "$NAME $VERSION" --notes-file $NOTES --draft
+UPLOADED=$(gh release view $TAG --repo $REPO --json assets --jq '[.assets[] | "\(.name) \(.size)"] | sort | join(",")')
+EXPECTED=$(for f in $ASSETS; do print "${f:t} $(stat -f %z $f)"; done | LC_ALL=C sort | paste -sd, -)
+[[ $UPLOADED == $EXPECTED ]] || refuse "The draft's files aren't what was built ($UPLOADED). It's still a draft: fix it on GitHub or delete it."
+gh release edit $TAG --repo $REPO --draft=false --latest
+print "released $TAG"

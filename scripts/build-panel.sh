@@ -16,6 +16,11 @@ OUT=dist/$BUNDLE_ID
 HOST=$(sed -n 's|.*<ScriptPath>\./\(.*\)</ScriptPath>.*|\1|p' panel/CSXS/manifest.xml)
 [[ -f panel/$HOST ]] || refuse "The manifest names $HOST, and it isn't in panel/."
 grep -q "/bin/$ENGINE'" panel/client/app.js || refuse "The panel doesn't run an engine called $ENGINE. Check panel/client/app.js."
+# The updater's side: the repository it asks, the engine it tries, and the host version it reads after a restart.
+grep -q "^  var REPO = '$REPO';" panel/client/update.js || refuse "panel/client/update.js asks another repository than $REPO for updates."
+grep -q "^  var ENGINE = '$ENGINE';" panel/client/update.js || refuse "panel/client/update.js checks an engine that isn't called $ENGINE."
+grep -q "^var SELECT_HOST_VERSION = '" panel/$HOST || refuse "$HOST doesn't define SELECT_HOST_VERSION, which panel/client/update.js reads after an update."
+grep -q '<script src="update.js"></script>' panel/client/index.html || refuse "panel/client/index.html doesn't load update.js, so this build couldn't update itself."
 
 rm -rf $OUT
 mkdir -p $OUT/bin

@@ -1,6 +1,8 @@
 #!/bin/zsh
 # Builds dist/<name>.pkg from the signed folder that scripts/sign-zxp.sh leaves in dist/signed.
-# It installs for all users into Adobe's system extensions folder, with no scripts, and asks for an admin password.
+# It installs for the current user only, into ~/Library/Application Support/Adobe/CEP/extensions, with no scripts and no
+# administrator password. A home install runs as that user, so the files are theirs, and the panel can later replace its
+# own folder when it updates itself. See docs/PACKAGING.md.
 #   scripts/build-pkg.sh                   the real one. Refuses a folder with no signature
 #   scripts/build-pkg.sh --unsigned-test   dist/<name>-UNSIGNED-test.pkg, to inspect the build. Premiere won't load it
 # INSTALLER_IDENTITY, when set to a Developer ID Installer identity, signs the package itself. Without one,
@@ -9,6 +11,7 @@ set -e -o pipefail
 cd "${0:A:h}/.."
 refuse() { print -u2 -- "$1"; exit 1 }
 source ./product.conf
+# In a home install, Installer puts this under the user's home folder: ~/Library/Application Support/...
 LOCATION="/Library/Application Support/Adobe/CEP/extensions/$BUNDLE_ID"
 
 if [[ $1 == --unsigned-test ]]; then
@@ -36,7 +39,7 @@ lsbom $WORK/mine.bom | sed -E 's|	[0-9]+/[0-9]+|	0/0|' > $WORK/rooted.txt
 mkbom -i $WORK/rooted.txt $WORK/component/Bom
 cat > $WORK/component/PackageInfo <<XML
 <?xml version="1.0" encoding="utf-8"?>
-<pkg-info format-version="2" identifier="$BUNDLE_ID" version="$VERSION" install-location="$LOCATION" auth="root" relocatable="false" overwrite-permissions="true" postinstall-action="none">
+<pkg-info format-version="2" identifier="$BUNDLE_ID" version="$VERSION" install-location="$LOCATION" auth="none" relocatable="false" overwrite-permissions="true" postinstall-action="none">
     <payload numberOfFiles="$(find $ROOT | wc -l | tr -d ' ')" installKBytes="$(du -sk $ROOT | cut -f1)"/>
 </pkg-info>
 XML
@@ -46,16 +49,18 @@ cat > $WORK/resources/conclusion.html <<HTML
 <html><body style="font-family: -apple-system, sans-serif; font-size: 13px">
 <p><b>$NAME is installed.</b></p>
 <p>Quit Premiere if it's open, then open it again. You'll find $NAME under <b>Window &rsaquo; Extensions</b>.</p>
+<p>From now on $NAME updates itself. You can turn that off in its <b>&middot;&middot;&middot;</b> menu.</p>
 </body></html>
 HTML
 
 # hostArchitectures keeps Apple silicon from asking for Rosetta. Without it the Installer treats the package as Intel only.
+# The home folder is the only domain: no administrator password, and nothing in /Library.
 cat > $WORK/Distribution.xml <<XML
 <?xml version="1.0" encoding="utf-8"?>
 <installer-gui-script minSpecVersion="2">
   <title>$NAME</title>
   <options customize="never" require-scripts="false" hostArchitectures="arm64,x86_64"/>
-  <domains enable_anywhere="false" enable_currentUserHome="false" enable_localSystem="true"/>
+  <domains enable_anywhere="false" enable_currentUserHome="true" enable_localSystem="false"/>
   <volume-check><allowed-os-versions><os-version min="$MIN_MACOS"/></allowed-os-versions></volume-check>
   <conclusion file="conclusion.html" mime-type="text/html"/>
   <choices-outline><line choice="default"><line choice="$BUNDLE_ID"/></line></choices-outline>
