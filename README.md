@@ -1,12 +1,12 @@
 # Select
 
-A Premiere Pro panel that sorts and searches hundreds of clips in seconds, so you know where to look first.
+A Premiere Pro panel that sorts hundreds of clips in seconds, so you know where to look first.
 
 <p align="center">
   <img src="docs/media/demo.png" width="760" alt="An animated illustration of the Select panel with invented clips. The grid of clips sorts itself by colour into rainbow order, a search narrows it down, and a write to the project ends with the bottom of the panel turning green.">
 </p>
 
-Select lives in a panel inside Premiere. Pick your clips, press **Scan**, and a few seconds later every clip has been looked at: its picture, its sound and the camera's own details. Then two menus do the rest. **Show** picks which clips you see, such as interviews, people, speech or similar shots. **Sort** puts them in order, by shoot time, length, sharpness, brightness, colour and more. They work together, so *Interviews, longest first* is two clicks.
+Press **Scan** and Select looks at every clip: the picture, the sound and the camera's details. Then pick what to **Show** (interviews, people, speech, similar shots…) and how to **Sort** (sharpness, brightness, colour, length…). Search finds what's in your clips. Everything stays on your Mac.
 
 <p align="center">
   <picture>
@@ -15,115 +15,36 @@ Select lives in a panel inside Premiere. Pick your clips, press **Scan**, and a 
   </picture>
 </p>
 
-Sorting changes nothing. Your project only changes when you press a button that says so, and your files never change at all.
+Select is in beta. Sorting changes nothing, but try the buttons that write to your project on a copy first.
 
-Select is in beta, so please try the buttons that write to your project on a copy of it first.
+## Install
 
-## Download
-
-Get **Select.pkg** from the [latest release](https://github.com/skyfallstatus/select/releases/latest).
-
-You'll need a Mac with macOS 13 or later, and Premiere Pro 2023 or later. So far it has only been tested on Premiere 26.5, on macOS 27 with Apple silicon. Older versions and Intel Macs are untested, so if you're on one, please try it and tell us how it goes. Windows isn't supported.
-
-## Installing
-
-Select isn't signed by Apple yet, so macOS asks you to confirm the first time. It takes a minute, and you only do it once per version.
+Get **Select.pkg** from the [latest release](https://github.com/skyfallstatus/select/releases/latest). You need macOS 13 or later and Premiere Pro 2023 or later.
 
 1. Open `Select.pkg`. macOS says it can't be opened. Click **Done**.
-2. Go to **System Settings › Privacy & Security** and scroll down to **Security**.
-3. Next to the message about Select, click **Open Anyway**, enter your password, then click **Open**.
-4. Follow the installer. It asks for your password again.
-5. Quit Premiere if it's open, and open it again.
-6. In Premiere, choose **Window › Extensions › Select**. Dock the panel wherever you like; Premiere remembers.
+2. Go to **System Settings › Privacy & Security**, scroll down, and click **Open Anyway** next to Select.
+3. Follow the installer.
+4. Restart Premiere, then choose **Window › Extensions › Select**.
 
-On macOS 13 or 14 you can skip steps 1 to 3: Control-click the package and choose **Open**.
+On macOS 13 or 14, you can instead Control-click the package and choose **Open**.
 
-You don't need the Terminal, and you don't need Adobe's debug mode.
+## Use
 
-## Using it
+1. Choose **Selection**, **Project** or **Folder** at the top, and press **Scan**.
+2. Pick from **Show** and **Sort**, tap a colour dot, or search.
+3. Happy with the view? **Label**, **Add Columns** or **Sort into Bins** puts it in your project. **Undo** takes it back.
 
-1. At the top right, choose what to scan: **Selection** (clips or bins selected in the Project panel), **Project**, or a **Folder** on disk.
-2. Press **Scan**. The list fills in straight away, and the deeper look at people, words, sound and colour finishes a few seconds later.
-3. Use **Show** and **Sort**, the colour dots, and the search box. The grid button at the right shows big thumbnails.
-4. When the view is what you want, **Label**, **Add Columns** or **Sort into Bins** write it to the project. **Undo** takes it back.
-
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/media/panel-dark.png">
-    <img src="docs/media/panel.png" width="760" alt="The Select panel after a scan, listing clips in rows with columns for their scores, sorted softest first, with the Show and Sort menus along the top.">
-  </picture>
-</p>
-
-<details>
-<summary>What Show and Sort look at, and how sure they are</summary>
-
-All of these are places to look first. None of them is a verdict on a clip.
-
-**Show** picks which clips are on screen.
-
-- **Interviews.** Speech heard and a face seen, 15 seconds or longer, and steady where the camera recorded that. Shorter clips with someone talking were nearly always not interviews. On a real event shoot it found 20 clips, and 19 were interviews. It finds likely interviews, not certain ones.
-- **People, No people.** Whether Select saw anyone in three moments of the clip. It misses people in the dark and undercounts crowds. On 60 real clips it was right about whether anyone was there on 57.
-- **Mediums, Wides.** From the size of the head or body in the frame, on tall frames as well as wide ones: medium is someone from about the waist up, or closer; wide is people small in the frame. A statue can get a face. On 30 real clips with someone in them it agreed with a person's call on 27. Nearly all of those clips were tall frames, so wide frames are less tested.
-- **Speech, Music, Silent.** From six seconds of sound sampled across the clip, so a word or a song elsewhere in it can be missed. Crowd noise can read as speech. Silent is clips with no audio track, or silence wherever it was sampled. We've checked sound less than the rest.
-- **Text on screen.** Words on signs and titles. It found about half of what was readable, mostly big clear lettering, and about two words in five are misreads. It's good for finding the shot of the sign.
-- **Similar shots.** Groups clips that show the same setup, such as repeated takes, among the clips in one folder, and keeps each group together. On 973 real clips it made 45 groups. Of 33 we checked, 31 were true repeats, and the two misses were flat textures. The same place from another angle usually stays apart.
-
-**Sort** puts them in order. Each starts the useful way round, and the arrows beside it turn it round.
-
-- **Shoot order.** By the time written in the file, then by name. It trusts the camera's clock.
-- **Duration, Loudness.** Longest first, loudest first. Loudness is the average level of the sampled sound.
-- **Sharpness.** Sharpest first, or softest first turned round. Good at finding soft clips. It doesn't rank in-focus clips against each other, so the top isn't "your best shot". It reads one frame per clip, so a clip that's soft for a moment can slip past, and a plain wall scores low because it has no fine detail.
-- **Brightness.** The average brightness of that one frame. Log footage and night scenes sit low on purpose.
-- **Highlights.** How much of that one frame hits the top of the range. It can do little on log footage, because log rarely clips. A window or a lamp can account for all of it.
-- **Motion.** A stand-in, not real motion tracking. It reads how much the compressed frame sizes change along the clip, without looking at a single frame. It's weak on all-intra footage, where every frame is stored whole, and busy detail or a change of light can read as motion.
-- **Camera shake.** Steadiest first, from the camera's own gyro, on the Sony clips that record one. Other clips stay blank at the end. It's measured over about a second and a half of the clip.
-- **Colour.** Clips in rainbow order by their main colour, with neutral clips last. It reads log footage through its own curve, so S-Log has real colours here. On 60 real clips it matched what a person would say on 57. The colour dots show one colour at a time.
-
-**Sort into Bins** follows what's on screen: a bin per colour when sorted by colour, a bin per day in shoot order, a bin per group of similar shots, one bin for a Show such as Interviews, and five bins from top to bottom for the other sorts.
-
-</details>
-
-<p align="center">
-  <img src="docs/media/panel-sorted.png" width="760" alt="The Select panel after Sort into Bins, with clips sorted softest first. The bottom of the panel is green and says Sorted into 5 bins, 301 clips moved, your files were not touched, with an Undo button.">
-</p>
-
-## Good to know
-
-- **Your files are never changed.** The bins and columns write to the project, never to your files.
-- **Use Undo in the panel, not Cmd+Z.** Premiere only keeps its last 50 steps, so Cmd+Z can't take back a big **Label**, **Add Columns** or **Sort into Bins**. **Undo** in the panel checks that each clip really went back and tells you if one didn't. It remembers your last write until the panel is reloaded.
-- **It's quick, and how quick depends on your Mac.** On an M5 Max from a USB SSD, 973 clips, 510 GB, got their file details and scores in about 5 seconds, which is about 2 seconds per 400, and the full look at people, words, sound and colour finished after 14 seconds. The list is usable from the start. A rescan took under a tenth of a second, because results are remembered. Yours will vary.
-- **Labels and words are suggestions.** They come from Apple's on-device models, and they're often right and sometimes odd. On 60 real clips the top labels were fair on 47 of 57, and the misses were mostly art taken literally.
-- **Camera and lens depend on sidecar files.** Select reads them from the small file some cameras write beside each clip, such as Sony's `M01.XML`. Move a clip without it and those columns go blank.
-- **A blank score means Select couldn't get it, never a guess.** Blank clips sort last. When a clip's picture can't be read, Select says why. If your Mac has no decoder for a clip, the file details stay and the picture scores stay blank. Open **Formats** below for more.
-
-<details>
-<summary>Formats</summary>
-
-MP4 and MOV work on their own. MXF works when [ffmpeg](https://ffmpeg.org) is installed, and it's much slower, because each clip goes through ffmpeg: the full look took 0.3 to 2 seconds per MXF clip on the same M5 Max, against about 0.15 seconds for an MP4. RED and BRAW aren't supported yet.
-
-Select uses your Mac's own video decoders, and not every Mac has one for every format. H.264 10-bit 4:2:2, which is what Sony's XAVC S-I modes record, is the one to watch: on the Mac tested, macOS only decodes it with hardware. A Mac without that hardware leaves the picture scores blank, unless ffmpeg is installed, which fills them in more slowly. The file details and sound work either way.
-
-To install ffmpeg, get [Homebrew](https://brew.sh) and run `brew install ffmpeg`. Select finds it by itself.
-
-The full picture, and how sure we are of each part, is in [docs/FORMATS.md](docs/FORMATS.md).
-
-</details>
+Your media files are never changed. What each option measures, and how accurate it is, is in [What Select looks at](docs/WHAT-IT-LOOKS-AT.md).
 
 ## Privacy
 
-Select sends nothing. There's no account, no tracking and no check for updates. Labels, faces, words and sounds are all worked out on your Mac, with models that come with macOS.
+Nothing leaves your Mac: no account, no tracking, no network. Results are kept in `~/Library/Caches/com.skyfallstatus.select`.
 
-**Report a Bug** only opens a GitHub page in your browser. Nothing is sent unless you type it in and press submit. Please leave out file names, paths and client names.
+## Feedback
 
-Results and thumbnails stay on your Mac, in `~/Library/Caches/com.skyfallstatus.select`, kept under 2 GB. Select writes nothing beside your media.
+Bugs, odd formats and ideas are welcome. Use **Report a Bug** in the panel's **···** menu, or see [BETA.md](BETA.md) for what's most useful to hear.
 
-## Removing it
-
-Quit Premiere, then delete the `com.skyfallstatus.select` folder from `/Library/Application Support/Adobe/CEP/extensions`. macOS asks for your password. To remove its remembered results too, delete `~/Library/Caches/com.skyfallstatus.select`.
-
-## Contributing
-
-Bug reports, odd formats and ideas are all welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
+To remove Select, quit Premiere and delete `com.skyfallstatus.select` from `/Library/Application Support/Adobe/CEP/extensions`.
 
 <details>
 <summary>Building from source</summary>
@@ -148,8 +69,10 @@ docs/             the engine's interface, formats, packaging, releasing
 product.conf      the name, ids and version, in one place
 ```
 
+See [CONTRIBUTING.md](CONTRIBUTING.md).
+
 </details>
 
 ## License
 
-MIT. See [LICENSE](LICENSE). Credits are in [NOTICE](NOTICE).
+MIT. See [LICENSE](LICENSE).
