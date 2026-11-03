@@ -1759,7 +1759,7 @@
   }
 
   function showAbout() {
-    var version = N.available ? N.manifestVersion(extensionRoot()) : null;
+    var version = S.runningVersion;
     var timing = S.sortMs === null ? '' : '<p class="quiet">Last re-sort: ' + S.sortMs.toFixed(1) + ' ms, ' + fmtInt(S.sortRows) + ' rows.</p>';
     return dialog('About Select', '<p>' + (version ? 'Version ' + esc(version) : 'Version unknown') + '</p><p class="quiet">' + esc(C.FORMATS_NOTE) + '</p><p class="quiet">Everything runs on this Mac: reading, looking closer, sorting and search. No accounts. Once a day Select asks GitHub whether there\'s a new version. That request is the only thing it sends, and Check Automatically in this menu turns it off. When there is a new version, Select downloads it from the same GitHub release.</p><p class="quiet">Every result is a suggestion. People and faces are counts, never who someone is.</p>' + timing, 'Done', null);
   }
@@ -1767,6 +1767,8 @@
   var MENU = { rescan: startScan, columns: showColumns, 'undo-view': undoView, undo: doUndoWrite, clear: clearResults, bug: reportBug, about: showAbout };
 
   function init() {
+    // The version this page was loaded from. An update can put a newer one on disk before Restart, and About must say what runs.
+    S.runningVersion = N.available ? N.manifestVersion(extensionRoot()) : null;
     applyHostTheme();
     buildBar();
 
