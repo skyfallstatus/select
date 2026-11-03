@@ -16,12 +16,29 @@ struct Level {
     }
 }
 
-private func addPCM(_ b: Bytes, bits: Int, float: Bool, big: Bool, into level: inout Level) {
-    forEachPCM(b, bits: bits, float: float, big: big) { level.add($0) }
+/// A level per channel, so a quiet channel can't hide a loud one. Fed interleaved samples, a window at a time. Past 64 channels
+/// they share, which only a damaged file asks for.
+struct ChannelLevels {
+    private var levels: [Level]
+    private let channels: Int
+    private var at = 0
+    init(channels: Int) {
+        self.channels = max(1, channels)
+        levels = Array(repeating: Level(), count: min(self.channels, 64))
+    }
+    /// Windows hold whole frames, but one cut short by the end of a file mustn't shift the channels of the next.
+    mutating func startWindow() { at = 0 }
+    mutating func add(_ v: Double) {
+        levels[at % levels.count].add(v)
+        at += 1
+        if at == channels { at = 0 }
+    }
+    /// The loudest channel, in dBFS.
+    var db: Double? { levels.compactMap(\.db).max() }
 }
 
 @inline(__always)
-private func forEachPCM(_ b: Bytes, bits: Int, float: Bool, big: Bool, _ add: (Double) -> Void) {
+func forEachPCM(_ b: Bytes, bits: Int, float: Bool, big: Bool, _ add: (Double) -> Void) {
     let width = bits / 8
     let n = b.count / width
     let p = UnsafeRawPointer(b.base)
@@ -89,14 +106,8 @@ private let feedCallback: AudioConverterComplexInputDataProc = { _, ioPackets, i
     return 0
 }
 
-/// Decodes short AAC runs with one converter. The first packets of a window only prime the
-/// overlap, so their output is dropped.
-private func addAAC(esds: Data, windows: [(ReadBuffer, [(at: Int, size: Int)])], into level: inout Level) -> Bool {
-    decodeAAC(esds: esds, windows: windows) { pcm, _ in
-        for v in pcm { level.add(Double(v)) }
-    }
-}
-
+/// Decodes short AAC runs with one converter. The first packets of a window only prime the overlap, so their output is dropped.
+/// `sink` gets whole frames, interleaved, with the number of channels.
 private func decodeAAC(esds: Data, windows: [(ReadBuffer, [(at: Int, size: Int)])], sink: (UnsafeBufferPointer<Float>, Int) -> Void) -> Bool {
     var asbd = AudioStreamBasicDescription()
     var size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
@@ -150,23 +161,30 @@ private func decodeAAC(esds: Data, windows: [(ReadBuffer, [(at: Int, size: Int)]
     return added
 }
 
+/// The level of the loudest channel in one track's sampled windows, in dBFS.
 func measureAudio(_ plan: AudioPlan, file: MediaFile) -> Double? {
-    var level = Level()
     switch plan.kind {
-    case .pcm(let bits, let float, let big, _):
+    case .pcm(let bits, let float, let big, let channels):
+        var levels = ChannelLevels(channels: channels)
         for w in plan.windows {
             guard let b = try? file.read(at: w.offset, count: w.bytes) else { continue }
-            addPCM(b.bytes, bits: bits, float: float, big: big, into: &level)
+            levels.startWindow()
+            forEachPCM(b.bytes, bits: bits, float: float, big: big) { levels.add($0) }
         }
+        return levels.db
     case .aac(let esds, _):
         var reads: [(ReadBuffer, [(at: Int, size: Int)])] = []
         for w in plan.windows {
             guard let b = try? file.read(at: w.offset, count: w.bytes), b.count == w.bytes else { continue }
             reads.append((b, w.packets))
         }
-        guard addAAC(esds: esds, windows: reads, into: &level) else { return nil }
+        var levels: ChannelLevels?
+        guard decodeAAC(esds: esds, windows: reads, sink: { pcm, channels in
+            if levels == nil { levels = ChannelLevels(channels: channels) }
+            for v in pcm { levels!.add(Double(v)) }
+        }) else { return nil }
+        return levels?.db
     }
-    return level.db
 }
 
 /// Mono samples from the planned sound windows at 16 kHz, which is what the classifier listens at. Windows follow on directly,
@@ -174,32 +192,29 @@ func measureAudio(_ plan: AudioPlan, file: MediaFile) -> Double? {
 struct MonoAudio {
     var samples: [Float] = []
     var rate = 0.0
+    /// Mean square, for choosing the loudest track. Under 1e-6, -60 dBFS, there's nothing to listen to.
+    var energy: Float { samples.isEmpty ? 0 : samples.reduce(Float(0)) { $0 + $1 * $1 } / Float(samples.count) }
 }
 
-private let soundRate = 16000.0
+let soundRate = 16000.0
 
-func readMono(_ plan: AudioPlan, sourceRate: Double, file: MediaFile) -> MonoAudio? {
-    guard sourceRate >= 8000, sourceRate <= 384_000 else { return nil }
-    var out = MonoAudio()
-    out.rate = soundRate
-    // Everything goes to 16 kHz, which is the only rate the classifier answered at in testing. Higher rates are averaged down
-    // a whole frame at a time. Lower ones are drawn between neighbouring samples, so that 8 kHz isn't heard at double speed.
-    let step = soundRate / sourceRate
-    var acc = 0.0, inFrame = 0, frames = 0, phase = 0.0, sum = 0.0, previous: Double?
-    func take(_ v: Double, _ channels: Int) {
-        acc += v
-        inFrame += 1
-        guard inFrame == channels else { return }
-        let value = acc / Double(channels)
-        acc = 0
-        inFrame = 0
+/// Takes one signal to 16 kHz. Higher rates are averaged down a whole frame at a time. Lower ones are drawn between
+/// neighbouring samples, so that 8 kHz isn't heard at double speed.
+private struct Resampler {
+    let step: Double
+    var phase = 0.0, sum = 0.0, frames = 0
+    var previous: Double?
+    var out: [Float] = []
+    init(sourceRate: Double) { step = soundRate / sourceRate }
+
+    mutating func add(_ value: Double) {
         if step <= 1 {
             sum += value
             frames += 1
             phase += step
             if phase >= 1 {
                 phase -= 1
-                out.samples.append(Float(sum / Double(frames)))
+                out.append(Float(sum / Double(frames)))
                 sum = 0
                 frames = 0
             }
@@ -210,17 +225,70 @@ func readMono(_ plan: AudioPlan, sourceRate: Double, file: MediaFile) -> MonoAud
             while phase >= 1 {
                 phase -= 1
                 let t = 1 - phase / step
-                out.samples.append(Float(from + (value - from) * t))
+                out.append(Float(from + (value - from) * t))
             }
             previous = value
         }
     }
+}
+
+private func meanSquare(_ s: [Float]) -> Float { s.isEmpty ? 0 : s.reduce(Float(0)) { $0 + $1 * $1 } / Float(s.count) }
+
+/// Makes one 16 kHz signal from interleaved channels. A channel more than 40 dB below the loudest is left out: it's a dead
+/// input, which adds nothing and would halve a live one, such as a lav beside it. A quieter channel with something on it stays:
+/// the classifier still heard a tone 24 dB down in a mix. The rest are mixed, unless the mix keeps less than a
+/// quarter of their mean energy, which only channels in opposite polarity do: then the loudest is heard on its own. Two
+/// unrelated channels mix to half their mean, a camera mic under a lav included, so they still mix. Up to 16 channels a track
+/// are heard; a file claiming more is damaged.
+struct MonoPicker {
+    private var each: [Resampler]
+    private let channels: Int
+    private var at = 0
+
+    init(channels: Int, sourceRate: Double) {
+        self.channels = max(1, channels)
+        each = Array(repeating: Resampler(sourceRate: sourceRate), count: min(self.channels, 16))
+    }
+
+    mutating func startWindow() { at = 0 }
+
+    mutating func add(_ v: Double) {
+        if at < each.count { each[at].add(v) }
+        at += 1
+        if at == channels { at = 0 }
+    }
+
+    func finish() -> MonoAudio? {
+        // Resampling is linear, so mixing the 16 kHz channels is the same as resampling their mix.
+        let outs = each.map(\.out)
+        let energy = outs.map(meanSquare)
+        guard let loudest = energy.indices.max(by: { energy[$0] < energy[$1] }) else { return nil }
+        let kept = energy.indices.filter { energy[$0] * 10_000 >= energy[loudest] && outs[$0].count == outs[loudest].count }
+        var chosen = outs[loudest]
+        if kept.count > 1 {
+            var mix = [Float](repeating: 0, count: chosen.count)
+            for c in kept { for i in mix.indices { mix[i] += outs[c][i] } }
+            let k = Float(kept.count)
+            for i in mix.indices { mix[i] /= k }
+            let mean = kept.map { energy[$0] }.reduce(0, +) / k
+            if meanSquare(mix) >= 0.25 * mean { chosen = mix }
+        }
+        return chosen.isEmpty ? nil : MonoAudio(samples: chosen, rate: soundRate)
+    }
+}
+
+/// One track's sound windows as a single 16 kHz signal, mixed or its loudest channel, as `MonoPicker` decides.
+func readMono(_ plan: AudioPlan, file: MediaFile) -> MonoAudio? {
+    guard plan.rate >= 8000, plan.rate <= 384_000 else { return nil }
     switch plan.kind {
     case .pcm(let bits, let float, let big, let channels):
+        var picker = MonoPicker(channels: channels, sourceRate: plan.rate)
         for w in plan.windows {
             guard let b = try? file.read(at: w.offset, count: w.bytes) else { continue }
-            forEachPCM(b.bytes, bits: bits, float: float, big: big) { take($0, channels) }
+            picker.startWindow()
+            forEachPCM(b.bytes, bits: bits, float: float, big: big) { picker.add($0) }
         }
+        return picker.finish()
     case .aac(let esds, _):
         // Pieces of one run are joined before decoding, because the decoder needs its first packets to settle and a piece
         // can be a single packet.
@@ -238,9 +306,11 @@ func readMono(_ plan: AudioPlan, sourceRate: Double, file: MediaFile) -> MonoAud
             r.bytes.withUnsafeBytes { raw.copyMemory(from: $0.baseAddress!, byteCount: $0.count) }
             return (ReadBuffer(raw: raw, skip: 0, count: r.bytes.count), r.packets)
         }
+        var picker: MonoPicker?
         guard decodeAAC(esds: esds, windows: reads, sink: { pcm, channels in
-            for v in pcm { take(Double(v), channels) }
+            if picker == nil { picker = MonoPicker(channels: channels, sourceRate: plan.rate) }
+            for v in pcm { picker!.add(Double(v)) }
         }) else { return nil }
+        return picker?.finish()
     }
-    return out.samples.isEmpty ? nil : out
 }

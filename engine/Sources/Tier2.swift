@@ -52,20 +52,21 @@ struct MiddleLook {
     let colors: ColorSampler
 }
 
-func lookAtMiddle(_ image: CVPixelBuffer, isLog: Bool, rotation: Int, offset: Int64, worker: Tier2Worker, path: String = "") -> MiddleLook? {
+func lookAtMiddle(_ image: CVPixelBuffer, color: ColorPlan, rotation: Int, offset: Int64, worker: Tier2Worker, path: String = "") -> MiddleLook? {
     testHang("middle", path: path)
     var colors = ColorSampler()
-    colors.add(image, isLog: isLog)
-    if isLog { gradeForVision(image) }
+    colors.add(image, convert: color.convert)
+    if color.sLog3 { gradeForVision(image) }
     guard let v = worker.vision.look(at: image, orientation: orientation(forRotation: rotation)) else { return nil }
     return MiddleLook(offset: offset, vision: v, colors: colors)
 }
 
 /// Looks at middle moments beside Tier 1. It takes what it can: a full queue drops the frame and Tier 2 decodes it again later,
 /// so Tier 1 never waits for this. It keeps at most `keep` results, about 60 KB each, so a huge project costs a few more decodes
-/// rather than memory. A job past its deadline is given up on, so `finish` always returns.
+/// rather than memory. A job past its deadline is given up on, and once every thread is stuck the jobs still waiting are dropped
+/// too, so `finish` always returns.
 final class MiddleQueue {
-    private var jobs: [(index: Int, image: CVPixelBuffer, isLog: Bool, rotation: Int, offset: Int64, path: String)] = []
+    private var jobs: [(index: Int, image: CVPixelBuffer, color: ColorPlan, rotation: Int, offset: Int64, path: String)] = []
     private let lock = NSCondition()
     private var closed = false
     private var sealed = false
@@ -75,17 +76,25 @@ final class MiddleQueue {
     private let capacity = 32
     private let keep = 1024
     private let deadline = tier2Deadline
+    private let threads: Int
+    /// Threads whose job ran past its deadline and hasn't come back.
+    private var stuck = 0
 
     init(threads: Int) {
+        self.threads = threads
         for _ in 0..<threads {
             let t = Thread { [self] in
                 let worker = Tier2Worker(sound: false)
                 while let job = next(worker) {
                     let look = autoreleasepool {
-                        lookAtMiddle(job.image, isLog: job.isLog, rotation: job.rotation, offset: job.offset, worker: worker, path: job.path)
+                        lookAtMiddle(job.image, color: job.color, rotation: job.rotation, offset: job.offset, worker: worker, path: job.path)
                     }
                     lock.lock()
-                    if running.removeValue(forKey: job.index) != nil, !sealed, let look { results[job.index] = look }
+                    if running.removeValue(forKey: job.index) != nil {
+                        if !sealed, let look { results[job.index] = look }
+                    } else {
+                        stuck -= 1              // given up on, and back after all
+                    }
                     lock.broadcast()
                     lock.unlock()
                 }
@@ -96,7 +105,7 @@ final class MiddleQueue {
         }
     }
 
-    private func next(_ worker: Tier2Worker) -> (index: Int, image: CVPixelBuffer, isLog: Bool, rotation: Int, offset: Int64, path: String)? {
+    private func next(_ worker: Tier2Worker) -> (index: Int, image: CVPixelBuffer, color: ColorPlan, rotation: Int, offset: Int64, path: String)? {
         lock.lock()
         defer { lock.unlock() }
         while jobs.isEmpty {
@@ -108,7 +117,7 @@ final class MiddleQueue {
         return job
     }
 
-    func offer(_ index: Int, image: CVPixelBuffer, isLog: Bool, rotation: Int, offset: Int64, path: String) {
+    func offer(_ index: Int, image: CVPixelBuffer, color: ColorPlan, rotation: Int, offset: Int64, path: String) {
         lock.lock()
         defer { lock.unlock() }
         guard jobs.count < capacity, accepted < keep, !closed else {
@@ -116,11 +125,12 @@ final class MiddleQueue {
             return
         }
         accepted += 1
-        jobs.append((index, image, isLog, rotation, offset, path))
+        jobs.append((index, image, color, rotation, offset, path))
         lock.signal()
     }
 
-    /// Waits for the queue to empty. A job running past its deadline is cancelled and given up on.
+    /// Waits for the queue to empty. A job running past its deadline is cancelled and given up on. When no thread is left to
+    /// take the jobs still waiting, they're dropped: Tier 2 decodes those moments again itself.
     func finish() {
         lock.lock()
         closed = true
@@ -129,8 +139,13 @@ final class MiddleQueue {
             let t = now()
             for (index, job) in running where t - job.started > deadline * 1000 {
                 running[index] = nil
+                stuck += 1
                 job.worker.vision.cancel()
                 trace.route("middle-late")
+            }
+            if stuck >= threads, !jobs.isEmpty {
+                for _ in jobs { trace.route("middle-dropped") }
+                jobs.removeAll()
             }
             if jobs.isEmpty && running.isEmpty { break }
             lock.wait(until: Date().addingTimeInterval(0.1))
@@ -160,19 +175,19 @@ func tier2(path: String, plan: ClipPlan, pool: DecoderPool, worker: Tier2Worker,
     }
     if let p = plan.rtmd, let file { rtmd = readRtmd(p, file: file) }
     lap("rtmd")
-    let isLog = rtmd.isLog || plan.isLog
 
     // Picture. Each moment reaches `use` as a small BGRA image.
     var seen: [FrameVision] = []
+    var blind = 0                   // moments decoded that Vision couldn't answer at all
     var colors = ColorSampler()
     let turn = orientation(forRotation: plan.rotation)
     func use(_ image: CVPixelBuffer) {
         autoreleasepool {
             lap("decode")
-            colors.add(image, isLog: isLog)
-            if isLog { gradeForVision(image) }
+            colors.add(image, convert: plan.color.convert)
+            if plan.color.sLog3 { gradeForVision(image) }
             lap("color")
-            if let v = worker.vision.look(at: image, orientation: turn, path: path) { seen.append(v) }
+            if let v = worker.vision.look(at: image, orientation: turn, path: path) { seen.append(v) } else { blind += 1 }
             lap("vision")
         }
     }
@@ -208,27 +223,38 @@ func tier2(path: String, plan: ClipPlan, pool: DecoderPool, worker: Tier2Worker,
     var out = Fields()
     out.add("moments", seen.count)
     let looked = !seen.isEmpty
+    // A field is reported only when its request answered at every moment looked at. One that failed anywhere is null: a
+    // missed moment could have held the face or the word. People and shot size also use faces and labels.
+    let labelsKnown = blind == 0 && seen.allSatisfy(\.labelsKnown)
+    let facesKnown = blind == 0 && seen.allSatisfy(\.facesKnown)
+    let peopleKnown = labelsKnown && facesKnown && seen.allSatisfy(\.peopleKnown)
+    let wordsKnown = blind == 0 && seen.allSatisfy(\.wordsKnown)
     let peopleCounts = seen.map { countPeople($0) }
     let faceCounts = seen.map { countFaces($0) }
-    out.add("people", looked ? peopleCounts.max() : nil)
-    out.add("faces", looked ? faceCounts.max() : nil)
-    out.add("shotSize", looked ? shotSize(seen) : nil)
-    out.addRaw("labels", looked ? jsonNamed(chooseLabels(seen)) : nil)
-    out.addRaw("text", looked ? "[" + chooseWords(seen).map(jsonString).joined(separator: ",") + "]" : nil)
+    out.add("people", looked && peopleKnown ? peopleCounts.max() : nil)
+    out.add("faces", looked && facesKnown ? faceCounts.max() : nil)
+    out.add("shotSize", looked && peopleKnown ? shotSize(seen) : nil)
+    out.addRaw("labels", looked && labelsKnown ? jsonNamed(chooseLabels(seen)) : nil)
+    out.addRaw("text", looked && wordsKnown ? "[" + chooseWords(seen).map(jsonString).joined(separator: ",") + "]" : nil)
 
     // Sound.
     var sounds: [(name: String, conf: Double)]?
     var speech: Bool?, music: Bool?
     if plan.hasAudio {
-        var mono: MonoAudio?
         lap("other")
-        if let p = plan.sound, let file { mono = readMono(p, sourceRate: plan.audioRate, file: file) }
+        // The loudest track is the one listened to. Silence counts only when every track was heard.
+        let direct = file.map { f in plan.sound.compactMap { readMono($0, file: f) } } ?? []
+        var mono = direct.max { $0.energy < $1.energy }
+        var allHeard = direct.count >= plan.audioTracks
         lap("soundread")
-        if mono == nil { mono = fallbackMono(path: path, duration: plan.durationS) }
+        if mono == nil || (!allHeard && mono!.energy < 1e-6),
+           let slow = fallbackMono(path: path, duration: plan.durationS, streams: plan.audioStreams) {
+            mono = slow
+            allHeard = true
+        }
         if let mono {
-            let energy = mono.samples.reduce(Float(0)) { $0 + $1 * $1 } / Float(mono.samples.count)
-            if energy < 1e-6 {          // quieter than -60 dBFS: nothing to listen to
-                (sounds, speech, music) = ([], false, false)
+            if mono.energy < 1e-6 {          // quieter than -60 dBFS: nothing to listen to
+                if allHeard { (sounds, speech, music) = ([], false, false) }
             } else if let heard = autoreleasepool(invoking: { worker.sound?.classify(mono, path: path) }) {
                 (sounds, speech, music) = chooseSounds(heard)
             }
@@ -259,8 +285,10 @@ func tier2(path: String, plan: ClipPlan, pool: DecoderPool, worker: Tier2Worker,
         let mean = colors.mean
         print = ClipPrint(values: prints.flatMap { $0 }, count: prints.count, revision: first.printRevision, a: mean?.a ?? 0, b: mean?.b ?? 0)
     }
-    // A clip that should have had a picture or sound and didn't may do better next time, so that's never remembered.
-    return Tier2Result(fields: out.joined, print: print, remember: looked && print != nil && (!plan.hasAudio || sounds != nil))
+    // A clip that should have had a picture or sound and didn't may do better next time, so that's never remembered, and
+    // neither is one with a field left unknown.
+    let complete = peopleKnown && wordsKnown && seen.allSatisfy { $0.print != nil }
+    return Tier2Result(fields: out.joined, print: print, remember: looked && complete && print != nil && (!plan.hasAudio || sounds != nil))
 }
 
 // Everything below decides what counts. The numbers come from looking at real clips, not from defaults.

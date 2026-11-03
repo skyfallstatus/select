@@ -27,12 +27,23 @@ struct AudioWindow {
 struct AudioPlan {
     let kind: AudioKind
     let windows: [AudioWindow]
+    /// Samples per second, from the sample description.
+    var rate = 0.0
 }
+
+/// A clip with more audio tracks than this is judged on its first ones. Real cameras use one to eight.
+let maxAudioTracks = 8
 
 struct ClipPlan {
     var video: VideoPlan?
-    var audio: AudioPlan?
+    /// Level windows, for each audio track the direct reader can take.
+    var audio: [AudioPlan] = []
     var hasAudio = false
+    /// Audio tracks that hold samples, up to `maxAudioTracks`. More of these than plans means some need ffmpeg, and until
+    /// they're heard the clip can't be called silent.
+    var audioTracks = 0
+    /// Audio streams as ffmpeg numbers them, up to `maxAudioTracks`, for the slow route.
+    var audioStreams = 0
     var durationS = 0.0
     var rotation = 0
     var width = 0
@@ -42,11 +53,10 @@ struct ClipPlan {
     /// Keyframes to look at in Tier 2, in clip order.
     var moments: [VideoPlan] = []
     var rtmd: RtmdPlan?
-    /// The file or its sidecar says this is a log curve.
-    var isLog = false
-    /// Longer sampled windows than `audio`, for telling sounds apart.
-    var sound: AudioPlan?
-    var audioRate = 0.0
+    /// How the picture becomes display colour: converted from log, or as recorded.
+    var color = ColorPlan()
+    /// Longer sampled windows than `audio`, for telling sounds apart, for each track the direct reader can take.
+    var sound: [AudioPlan] = []
     /// For messages: "H.264 10-bit 4:2:2".
     var formatName = "this format"
 }
@@ -290,7 +300,7 @@ private func soundPlan(_ t: Track) -> AudioPlan? {
                 at += Double(bytes / frameBytes) / Double(t.timescale)
             }
         }
-        return pieces.isEmpty ? nil : AudioPlan(kind: kind, windows: pieces)
+        return pieces.isEmpty ? nil : AudioPlan(kind: kind, windows: pieces, rate: sampleRate(t))
     }
     if t.format == fourCC("mp4a"), let esds = findESDS(t) {
         let channels = channelCount(t) ?? 1
@@ -318,7 +328,7 @@ private func soundPlan(_ t: Track) -> AudioPlan? {
                 }
             }
         }
-        return pieces.isEmpty ? nil : AudioPlan(kind: .aac(esds: esds, channels: channels), windows: pieces)
+        return pieces.isEmpty ? nil : AudioPlan(kind: .aac(esds: esds, channels: channels), windows: pieces, rate: sampleRate(t))
     }
     return nil
 }
@@ -364,7 +374,7 @@ private func audioPlan(_ t: Track) -> AudioPlan? {
             avail -= avail % frameBytes
             if avail > 0 { windows.append(AudioWindow(offset: off, bytes: avail, packets: [])) }
         }
-        return windows.isEmpty ? nil : AudioPlan(kind: kind, windows: windows)
+        return windows.isEmpty ? nil : AudioPlan(kind: kind, windows: windows, rate: sampleRate(t))
     }
 
     if t.format == fourCC("mp4a"), let esds = findESDS(t) {
@@ -386,7 +396,7 @@ private func audioPlan(_ t: Track) -> AudioPlan? {
             }
             if packets.count >= 4 { windows.append(AudioWindow(offset: off, bytes: end, packets: packets)) }
         }
-        return windows.isEmpty ? nil : AudioPlan(kind: .aac(esds: esds, channels: channels), windows: windows)
+        return windows.isEmpty ? nil : AudioPlan(kind: .aac(esds: esds, channels: channels), windows: windows, rate: sampleRate(t))
     }
     return nil
 }
@@ -430,7 +440,7 @@ func tier0(path: String) throws -> Tier0Result {
     meta.lens = side?.lens ?? meta.lens
     meta.make = side?.make ?? meta.make
     meta.model = side?.model ?? meta.model
-    meta.created = side?.created ?? meta.created
+    meta.created = side?.created.flatMap(isoDate) ?? meta.created
 
     var plan = ClipPlan()
     plan.durationS = duration
@@ -440,7 +450,6 @@ func tier0(path: String) throws -> Tier0Result {
     plan.hasAudio = !audios.isEmpty
     plan.bitDepth = info.bitDepth
     plan.formatName = info.displayName
-    plan.isLog = meta.gamma?.lowercased().contains("log") ?? false
     let atoms = decoderAtoms(v)
     func videoPlan(atTicks ticks: UInt64) -> VideoPlan? {
         let sync = v.nearestSync(to: v.sampleAt(mediaTime: ticks))
@@ -454,26 +463,26 @@ func tier0(path: String) throws -> Tier0Result {
         guard let m = videoPlan(atTicks: mediaTicks / 6 * sixths), !plan.moments.contains(where: { $0.offset == m.offset }) else { continue }
         plan.moments.append(m)
     }
-    // Level is read from the widest track, which is the one ffmpeg would pick by default.
-    if let best = audios.enumerated().max(by: {
-        (channelCount($0.element) ?? 0, -$0.offset) < (channelCount($1.element) ?? 0, -$1.offset)
-    })?.element {
-        plan.audio = audioPlan(best)
-        plan.sound = soundPlan(best)
-        plan.audioRate = sampleRate(best)
-    }
+    // Every track is planned: a lav or a second microphone often has a track of its own, and the first may be silent.
+    let heard = Array(audios.prefix(maxAudioTracks))
+    plan.audioTracks = heard.count
+    plan.audioStreams = min(m.tracks.filter { $0.handler == fourCC("soun") }.count, maxAudioTracks)
+    plan.audio = heard.compactMap(audioPlan)
+    plan.sound = heard.compactMap(soundPlan)
     plan.rtmd = rtmdPlan(m)
+    plan.color = colorPlan(gamma: meta.gamma, primaries: side?.primaries, rtmd: plan.rtmd.flatMap { rtmdColor($0, file: f) })
 
     let mbps = duration > 0 ? Double(f.size) * 8 / duration / 1e6 : nil
     let fields = tier0Fields(path: path, size: f.size, duration: duration, fps: fps, w: w, h: h, rotation: rotation,
                              info: info, allIntra: allIntra, mbps: mbps, hasAudio: !audios.isEmpty,
-                             channels: channels > 0 ? channels : nil, meta: meta, keyframe: keyframe, motion: motion)
+                             channels: channels > 0 ? channels : nil, meta: meta, keyframe: keyframe, motion: motion,
+                             colorNote: plan.color.note)
     return Tier0Result(fields: fields, plan: plan, size: f.size, mtime: f.mtime)
 }
 
 func tier0Fields(path: String, size: Int64, duration: Double, fps: Double?, w: Int, h: Int, rotation: Int, info: CodecInfo,
                  allIntra: Bool?, mbps: Double?, hasAudio: Bool, channels: Int?, meta: Embedded,
-                 keyframe: Double?, motion: Double?) -> String {
+                 keyframe: Double?, motion: Double?, colorNote: String?) -> String {
     var out = Fields()
     out.add("name", (path as NSString).lastPathComponent)
     out.add("sizeBytes", size)
@@ -496,6 +505,7 @@ func tier0Fields(path: String, size: Int64, duration: Double, fps: Double?, w: I
     out.add("lens", meta.lens)
     out.add("gamma", meta.gamma)
     out.add("isLog", meta.gamma.map { $0.lowercased().contains("log") })
+    out.add("colorNote", colorNote)
     out.add("gpsLat", meta.lat, 6)
     out.add("gpsLon", meta.lon, 6)
     out.add("keyframeBytesMean", keyframe, 0)

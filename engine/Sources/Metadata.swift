@@ -28,6 +28,50 @@ func parseISO6709(_ s: String) -> (Double, Double)? {
     return (parts[0], parts[1])
 }
 
+/// A date as `2023-11-02T16:45:07+01:00`, or with `Z` for UTC, so the panel can show it in local time. Takes what cameras and
+/// muxers write: `T` or a space between date and time, `-` or `:` in the date, a fraction of a second, which is dropped, and
+/// `Z`, `+01:00`, `+0100` or `+01`. A time with no offset could be in any zone, so it gives nil and the next source is tried.
+func isoDate(_ text: String) -> String? {
+    let c = Array(text.trimmingCharacters(in: .whitespacesAndNewlines).utf8)
+    func num(_ at: Int, _ n: Int) -> Int? {
+        guard at >= 0, at + n <= c.count else { return nil }
+        var v = 0
+        for i in at..<(at + n) {
+            guard c[i] >= 48, c[i] <= 57 else { return nil }
+            v = v * 10 + Int(c[i] - 48)
+        }
+        return v
+    }
+    guard c.count >= 20, let y = num(0, 4), c[4] == 45 || c[4] == 58, let mo = num(5, 2), c[7] == c[4], let d = num(8, 2),
+          c[10] == 84 || c[10] == 32, let h = num(11, 2), c[13] == 58, let mi = num(14, 2), c[16] == 58, let s = num(17, 2),
+          (1900...2200).contains(y), (1...12).contains(mo), (1...31).contains(d), h < 24, mi < 60, s <= 60 else { return nil }
+    var at = 19
+    if c[at] == 46 || c[at] == 44 {
+        at += 1
+        while at < c.count, c[at] >= 48, c[at] <= 57 { at += 1 }
+    }
+    guard at < c.count else { return nil }
+    var zone = "Z"
+    if c[at] == 90 {
+        guard at + 1 == c.count else { return nil }
+    } else if c[at] == 43 || c[at] == 45 {
+        guard let zh = num(at + 1, 2), zh <= 14 else { return nil }
+        var end = at + 3, zm = 0
+        if end < c.count {
+            if c[end] == 58 { end += 1 }
+            guard let m = num(end, 2), m < 60 else { return nil }
+            zm = m
+            end += 2
+        }
+        guard end == c.count else { return nil }
+        zone = String(format: "%@%02d:%02d", c[at] == 43 ? "+" : "-", zh, zm)
+    } else {
+        return nil
+    }
+    // A leap second would stop most date parsers, so it reads as the second before.
+    return String(format: "%04d-%02d-%02dT%02d:%02d:%02d", y, mo, d, h, mi, min(s, 59)) + zone
+}
+
 private func clean(_ s: String?) -> String? {
     guard let t = s?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty else { return nil }
     return t
@@ -67,7 +111,7 @@ private func parseKeyed(_ meta: Bytes, into e: inout Embedded) {
             case "com.apple.quicktime.make", "com.android.manufacturer": e.make = text
             case "com.apple.quicktime.model", "com.android.model": e.model = text
             case "com.apple.quicktime.camera.lens_model": e.lens = text
-            case "com.apple.quicktime.creationdate": e.created = text
+            case "com.apple.quicktime.creationdate": e.created = isoDate(text) ?? e.created
             case "com.apple.quicktime.location.ISO6709":
                 if let (la, lo) = parseISO6709(text) { (e.lat, e.lon) = (la, lo) }
             default: break
@@ -95,7 +139,7 @@ func embeddedMetadata(_ m: Movie) -> Embedded {
             switch b.type {
             case 0xA96D_616B: e.make = e.make ?? qtText(b.body)
             case 0xA96D_6F64: e.model = e.model ?? qtText(b.body)
-            case 0xA964_6179: e.created = e.created ?? qtText(b.body)
+            case 0xA964_6179: e.created = e.created ?? qtText(b.body).flatMap(isoDate)
             case 0xA978_797A:
                 if e.lat == nil, let t = qtText(b.body), let (la, lo) = parseISO6709(t) { (e.lat, e.lon) = (la, lo) }
             case fourCC("meta"):
@@ -110,6 +154,7 @@ func embeddedMetadata(_ m: Movie) -> Embedded {
             }
         }
     }
+    // The container's own time is UTC, so it's the last resort, behind anything that knows the camera's zone.
     if e.created == nil { e.created = iso1904(m.mvhdCreation) }
     return e
 }
@@ -176,6 +221,7 @@ struct Sidecar {
     var model: String?
     var lens: String?
     var gamma: String?
+    var primaries: String?
     var created: String?
     var timecode: String?
 }
@@ -204,13 +250,18 @@ private func sonyTimecode(_ s: String) -> String? {
     return String(format: "%02d:%02d:%02d%@%02d", bcd(hh, 0x3f), bcd(mm, 0x7f), bcd(ss, 0x7f), drop ? ";" : ":", frames)
 }
 
-/// Sony `C0023M01.XML` beside the clip, read with a plain text scan.
-func readSidecar(clipPath: String) -> Sidecar? {
+/// Where Sony keeps a clip's sidecar: `C0023M01.XML` beside `C0023.MP4`. Nil for a file that never has one.
+func sidecarPath(clipPath: String) -> String? {
     guard clipPath.hasSuffix(".MP4") || clipPath.hasSuffix(".mp4") || clipPath.hasSuffix(".MXF") || clipPath.hasSuffix(".mxf") else {
         return nil
     }
-    let path = String(clipPath.dropLast(4)) + "M01.XML"
-    guard let f = try? MediaFile(path: path), f.size > 0, f.size < 1 << 20,
+    return String(clipPath.dropLast(4)) + "M01.XML"
+}
+
+/// Sony `C0023M01.XML` beside the clip, read with a plain text scan.
+func readSidecar(clipPath: String) -> Sidecar? {
+    guard let path = sidecarPath(clipPath: clipPath),
+          let f = try? MediaFile(path: path), f.size > 0, f.size < 1 << 20,
           let b = try? f.read(at: 0, count: Int(f.size)) else { return nil }
     let s = String(decoding: UnsafeBufferPointer(start: b.view, count: b.count), as: UTF8.self)
     guard s.contains("NonRealTimeMeta") else { return nil }
@@ -220,11 +271,13 @@ func readSidecar(clipPath: String) -> Sidecar? {
     out.lens = attr(s, tag: "<Lens ", name: "modelName")
     out.created = attr(s, tag: "<CreationDate ", name: "value")
     out.timecode = sonyTimecode(s)
-    if let r = s.range(of: "name=\"CaptureGammaEquation\"") {
+    func item(_ name: String) -> String? {
+        guard let r = s.range(of: "name=\"\(name)\"") else { return nil }
         let tail = s[r.upperBound...].prefix(120)
-        if let a = tail.range(of: "value=\""), let q = tail.range(of: "\"", range: a.upperBound..<tail.endIndex) {
-            out.gamma = clean(String(tail[a.upperBound..<q.lowerBound]))
-        }
+        guard let a = tail.range(of: "value=\""), let q = tail.range(of: "\"", range: a.upperBound..<tail.endIndex) else { return nil }
+        return clean(String(tail[a.upperBound..<q.lowerBound]))
     }
+    out.gamma = item("CaptureGammaEquation")
+    out.primaries = item("CaptureColorPrimaries")
     return out
 }

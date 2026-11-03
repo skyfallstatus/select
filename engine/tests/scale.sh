@@ -15,7 +15,7 @@ T=$(mktemp -d "${TMPDIR:-/tmp}/engine-scale.XXXXXX") || exit 1
 free=$(df -k "$T" | tail -1 | awk '{print $4}')
 (( free > 3 * 1024 * 1024 )) || { echo "Stopped: less than 3 GB free."; rm -rf $T; exit 1 }
 LIMIT_KB=$(( 2500 * 1024 ))
-cleanup() { [[ -n $WATCH ]] && kill $WATCH 2>/dev/null; pkill -f "$T" 2>/dev/null; [[ -n $SCALE_KEEP ]] && { mv $T/out.jsonl $T/err.txt $SCALE_KEEP/ 2>/dev/null; mv $T/cold.jsonl $SCALE_KEEP/ 2>/dev/null; du -sk $T/cache/* > $SCALE_KEEP/du.txt 2>/dev/null; cp $T/cache/prints-v3.bin $T/cache/index-v3.tsv $SCALE_KEEP/ 2>/dev/null; cp $T/coldprints.bin $SCALE_KEEP/ 2>/dev/null }; rm -rf "$T" }
+cleanup() { [[ -n $WATCH ]] && kill $WATCH 2>/dev/null; pkill -f "$T" 2>/dev/null; [[ -n $SCALE_KEEP ]] && { mv $T/out.jsonl $T/err.txt $SCALE_KEEP/ 2>/dev/null; mv $T/cold.jsonl $SCALE_KEEP/ 2>/dev/null; du -sk $T/cache/* > $SCALE_KEEP/du.txt 2>/dev/null; cp $T/cache/prints-v4.bin $T/cache/index-v4.tsv $SCALE_KEEP/ 2>/dev/null; cp $T/coldprints.bin $SCALE_KEEP/ 2>/dev/null }; rm -rf "$T" }
 trap cleanup EXIT
 trap 'echo "Stopped: out of time, out of room, or interrupted."; exit 3' TERM INT
 # Stops everything if the folder grows past its limit or the run passes 15 minutes.
@@ -66,5 +66,5 @@ P
 }
 echo "--- $N clips, cold"; run
 echo "cache: $(du -sh $T/cache | cut -f1)"
-cp $T/out.jsonl $T/cold.jsonl; cp $T/cache/prints-v3.bin $T/coldprints.bin
+cp $T/out.jsonl $T/cold.jsonl; cp $T/cache/prints-v4.bin $T/coldprints.bin
 echo "--- $N clips, cached"; run

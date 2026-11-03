@@ -145,14 +145,14 @@ func noPictureReason(_ plan: ClipPlan, _ why: DecodeFailure?) -> String {
 
 /// `remember` is false for a result that installing ffmpeg would change.
 func tier1(path: String, plan: ClipPlan, pool: DecoderPool, thumbPath: String?, shrinker: FrameShrinker?) throws
-    -> (fields: String, timing: Tier1Timing, remember: Bool, middle: CVPixelBuffer?, isLog: Bool) {
+    -> (fields: String, timing: Tier1Timing, remember: Bool, middle: CVPixelBuffer?) {
     var timing = Tier1Timing()
     let file = try MediaFile(path: path)
     var metrics: Metrics?
     var refused: DecodeFailure?
     var middle: CVPixelBuffer?
     var t = now()
-    let isLog = plan.isLog || (plan.rtmd.map { rtmdSaysLog($0, file: file) } ?? false)
+    let convertLog = plan.color.convert
     if let v = plan.video, !plan.fallback {
         let sample = try file.read(at: v.offset, count: v.size)
         guard sample.count == v.size else { throw MP4Error.truncated }
@@ -163,7 +163,7 @@ func tier1(path: String, plan: ClipPlan, pool: DecoderPool, thumbPath: String?, 
             decodedAt = now()
             timing.route = hw ? "vt-hw" : "vt-sw"
             middle = shrinker?.shrink(image, plan: v)
-            return analyze(frame, rotation: plan.rotation, sourceBits: plan.bitDepth, isLog: isLog, thumbPath: thumbPath)
+            return analyze(frame, rotation: plan.rotation, sourceBits: plan.bitDepth, convertLog: convertLog, thumbPath: thumbPath)
         }
         switch result {
         case .frame(let m): metrics = m
@@ -185,20 +185,16 @@ func tier1(path: String, plan: ClipPlan, pool: DecoderPool, thumbPath: String?, 
         } else if !plan.fallback, plan.rotation == 90 || plan.rotation == 270 {
             swap(&slowPlan.width, &slowPlan.height)
         }
-        metrics = fallbackFrame(path: path, plan: slowPlan) { analyze($0, rotation: plan.rotation, sourceBits: plan.bitDepth, isLog: isLog, thumbPath: thumbPath) } ?? nil
+        metrics = fallbackFrame(path: path, plan: slowPlan) {
+            analyze($0, rotation: plan.rotation, sourceBits: plan.bitDepth, convertLog: convertLog, thumbPath: thumbPath)
+        } ?? nil
         timing.decode = now() - t
     }
     if metrics == nil { timing.route = "none" }
     timing.thumb = metrics?.thumbMs ?? 0
 
     t = now()
-    var db: Double?
-    if plan.hasAudio {
-        if let a = plan.audio {
-            db = measureAudio(a, file: file)
-        }
-        if db == nil { db = fallbackAudioDb(path: path, duration: plan.durationS) }
-    }
+    let db = plan.hasAudio ? clipLevel(plan, path: path, file: file) : nil
     timing.audio = now() - t
 
     // A clip with no frame still has its file details and, usually, its sound.
@@ -216,22 +212,37 @@ func tier1(path: String, plan: ClipPlan, pool: DecoderPool, thumbPath: String?, 
     out.add("thumb", metrics?.thumbWritten == true ? thumbPath : nil)
     if metrics == nil { out.add("reason", noPictureReason(plan, refused)) }
     // A blank is never remembered: the cause may be one failed ffmpeg run, and the next scan should try again.
-    return (out.joined, timing, metrics != nil, middle, isLog)
+    return (out.joined, timing, metrics != nil, middle)
 }
 
 let silenceDb = -50.0
 
-/// A Tier 1 line for a clip that ran out of time.
-let blankTier1Fields: String = {
+/// The loudest channel of any audio track, in dBFS. A clip is only called silent when every track was heard: a track that
+/// couldn't be read may be the one with the sound, so then the level is unknown unless another track is clearly not silent.
+func clipLevel(_ plan: ClipPlan, path: String, file: MediaFile) -> Double? {
+    let direct = plan.audio.compactMap { measureAudio($0, file: file) }
+    let loudest = direct.max()
+    if direct.count >= plan.audioTracks, let loudest { return loudest }
+    if let loudest, loudest >= silenceDb { return loudest }
+    return fallbackAudioDb(path: path, duration: plan.durationS, streams: plan.audioStreams)
+}
+
+/// A Tier 1 line with nothing measured, and why.
+func blankTier1Fields(_ reason: String) -> String {
     var f = Fields()
     for k in ["sharpness", "luma", "contrast", "clipHighPct", "clipLowPct", "saturation", "warmth"] { f.add(k, nil as Double?) }
     f.add("dhash", nil as String?)
     f.add("audioDb", nil as Double?)
     f.add("silent", nil as Bool?)
     f.add("thumb", nil as String?)
-    f.add("reason", "Decoding this clip took too long, so picture scores are blank. File details are fine.")
+    f.add("reason", reason)
     return f.joined
-}()
+}
+
+/// When so many clips got stuck that no thread is left to replace them, the rest of the tier is skipped with these words.
+let skippedTier0 = "Skipped, because reading earlier clips kept getting stuck. The drive may be slow or busy."
+let skippedTier1 = "Skipped, because decoding earlier clips kept getting stuck, so picture scores are blank. File details are fine."
+let skippedTier2 = "Skipped, because looking at earlier clips kept getting stuck, so these results are blank. The rest of the scan carried on."
 
 /// A Tier 2 line with nothing in it, and why.
 func blankTier2Fields(_ reason: String?) -> String {
@@ -268,8 +279,8 @@ func scan(_ o: Options) {
     let jsonPaths = paths.map(jsonString)
     let plans = UnsafeMutablePointer<ClipPlan?>.allocate(capacity: max(count, 1))
     plans.initialize(repeating: nil, count: max(count, 1))
-    let sizes = UnsafeMutablePointer<(Int64, Double)>.allocate(capacity: max(count, 1))
-    sizes.initialize(repeating: (0, 0), count: max(count, 1))
+    let keys = UnsafeMutablePointer<FileKey>.allocate(capacity: max(count, 1))
+    keys.initialize(repeating: FileKey(), count: max(count, 1))
     let status = UnsafeMutablePointer<UInt8>.allocate(capacity: max(count, 1)) // 0 pending, 1 ok, 2 failed
     status.initialize(repeating: 0, count: max(count, 1))
     let fromCache = UnsafeMutablePointer<Bool>.allocate(capacity: max(count, 1))
@@ -282,13 +293,13 @@ func scan(_ o: Options) {
     // stays flat on a huge project.
     let keepPlans = count <= 4096
 
-    func fail(_ i: Int, _ error: Error, size: Int64 = -1, mtime: Double = 0) {
+    func fail(_ i: Int, _ error: Error, key: FileKey? = nil) {
         status[i] = 2
         var f = Fields()
         f.add("message", "\(error)")
         output.emit("{\"type\":\"error\",\"path\":\(jsonPaths[i]),\(f.joined)}")
         let transient = (error as? MP4Error)?.isTransient ?? true
-        if size >= 0, !transient { cache.store(kind: "e", jsonPath: jsonPaths[i], size: size, mtime: mtime, value: f.joined) }
+        if let key, !transient { cache.store(kind: "e", jsonPath: jsonPaths[i], key: key, value: f.joined) }
     }
 
     // Each slot remembers its thread, so a late clip's ffmpeg can be stopped.
@@ -300,15 +311,12 @@ func scan(_ o: Options) {
     runGuarded(workers0, items: count, stack: 1 << 20, deadline: tier0Deadline, body: { i, slot, claim in
         noteThread(slot)
         let path = paths[i]
-        var st = stat()
-        guard stat(path, &st) == 0 else {
+        guard let key = FileKey.of(path) else {
             if claim() { fail(i, MP4Error.io(String(cString: strerror(errno)))) }
             return
         }
-        let size = Int64(st.st_size)
-        let mtime = Double(st.st_mtimespec.tv_sec) + Double(st.st_mtimespec.tv_nsec) / 1e9
-        sizes[i] = (size, mtime)
-        if let e = cache.lookup(jsonPaths[i], size: size, mtime: mtime) {
+        keys[i] = key
+        if let e = cache.lookup(jsonPaths[i], key: key) {
             if let err = e.error {
                 guard claim() else { return }
                 status[i] = 2
@@ -335,12 +343,14 @@ func scan(_ o: Options) {
             plans[i] = r.plan
             status[i] = 1
             output.emit(clipLine(tier: 0, path: jsonPaths[i], cached: false, ms: ms, fields: r.fields))
-            cache.store(kind: "0", jsonPath: jsonPaths[i], size: size, mtime: mtime, value: r.fields)
+            cache.store(kind: "0", jsonPath: jsonPaths[i], key: key, value: r.fields)
         } catch {
-            if claim() { fail(i, error, size: size, mtime: mtime) }
+            if claim() { fail(i, error, key: key) }
         }
     }, late: { i in
         fail(i, MP4Error.io("Reading this file took too long, so it was skipped. The drive may be slow or busy."))
+    }, skipped: { i in
+        fail(i, MP4Error.io(skippedTier0))
     }, cancel: stopSlot)
 
     log(String(format: "tier0 phase %.0f ms", now() - start))
@@ -354,9 +364,9 @@ func scan(_ o: Options) {
             noteThread(slot)
             guard status[i] == 1 else { return }
             let path = paths[i]
-            let (size, mtime) = sizes[i]
-            let thumb = o.thumbs ? cache.thumbPath(path: path, size: size, mtime: mtime) : nil
-            if let e = cache.lookup(jsonPaths[i], size: size, mtime: mtime), let fields = e.tier1 {
+            let key = keys[i]
+            let thumb = o.thumbs ? cache.thumbPath(path: path, key: key) : nil
+            if let e = cache.lookup(jsonPaths[i], key: key), let fields = e.tier1 {
                 let thumbReady = !o.thumbs || e.noPicture || (e.thumb.map { access($0, R_OK) == 0 } ?? false)
                 if thumbReady {
                     guard claim() else { return }
@@ -371,7 +381,7 @@ func scan(_ o: Options) {
             do {
                 let plan: ClipPlan
                 if let p = plans[i] { plan = p } else { plan = try tier0(path: path).plan }
-                let wantsLook = wantsMiddle && cache.lookup(jsonPaths[i], size: size, mtime: mtime)?.tier2 == nil
+                let wantsLook = wantsMiddle && cache.lookup(jsonPaths[i], key: key)?.tier2 == nil
                 if wantsLook, slot < workers1 + 64, shrinkers[slot] == nil { shrinkers[slot] = FrameShrinker() }
                 let r = try tier1(path: path, plan: plan, pool: pool, thumbPath: thumb,
                                   shrinker: wantsLook && slot < workers1 + 64 ? shrinkers[slot] : nil)
@@ -382,17 +392,23 @@ func scan(_ o: Options) {
                 trace.row(String(format: "1\t%.2f\t%@\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%@", ms, tm.route, tm.read, tm.decode, tm.analyze, tm.thumb, tm.audio, path))
                 output.emit(clipLine(tier: 1, path: jsonPaths[i], cached: false, ms: ms, fields: r.fields))
                 if tm.route == "none" { noPicture[i] = true }
-                if r.remember { cache.store(kind: "1", jsonPath: jsonPaths[i], size: size, mtime: mtime, value: r.fields) }
+                if r.remember { cache.store(kind: "1", jsonPath: jsonPaths[i], key: key, value: r.fields) }
                 if let image = r.middle, let offset = plan.video?.offset {
-                    middles?.offer(i, image: image, isLog: r.isLog, rotation: plan.rotation, offset: offset, path: path)
+                    middles?.offer(i, image: image, color: plan.color, rotation: plan.rotation, offset: offset, path: path)
                 }
                 if !keepPlans { plans[i] = nil }
             } catch {
-                if claim() { fail(i, error, size: size, mtime: mtime) }
+                if claim() { fail(i, error, key: key) }
             }
         }, late: { i in
             noPicture[i] = true
-            output.emit(clipLine(tier: 1, path: jsonPaths[i], cached: false, ms: tier1Deadline * 1000, fields: blankTier1Fields))
+            output.emit(clipLine(tier: 1, path: jsonPaths[i], cached: false, ms: tier1Deadline * 1000,
+                                 fields: blankTier1Fields("Decoding this clip took too long, so picture scores are blank. File details are fine.")))
+        }, skipped: { i in
+            guard status[i] == 1 else { return }
+            noPicture[i] = true
+            fromCache[i] = false
+            output.emit(clipLine(tier: 1, path: jsonPaths[i], cached: false, ms: 0, fields: blankTier1Fields(skippedTier1)))
         }, cancel: stopSlot)
         pool.closeAll()
     }
@@ -409,11 +425,11 @@ func scan(_ o: Options) {
         runGuarded(workers2, items: count, stack: 1 << 22, deadline: tier2Deadline, body: { i, slot, claim in
             noteThread(slot)
             guard status[i] == 1 else { return }
-            let (size, mtime) = sizes[i]
+            let key = keys[i]
             // A result without its print can't take part in grouping, and neither can a print from another Vision revision,
             // so both count as not there.
-            if let fields = cache.lookup(jsonPaths[i], size: size, mtime: mtime)?.tier2,
-               let stored = cache.storedPrint(jsonPaths[i], size: size, mtime: mtime), stored.revision == currentPrintRevision {
+            if let fields = cache.lookup(jsonPaths[i], key: key)?.tier2,
+               let stored = cache.storedPrint(jsonPaths[i], key: key), stored.revision == currentPrintRevision {
                 guard claim() else { return }
                 output.emit(clipLine(tier: 2, path: jsonPaths[i], cached: true, ms: 0, fields: fields))
                 sources[i] = .stored(stored)
@@ -435,13 +451,17 @@ func scan(_ o: Options) {
             output.emit(clipLine(tier: 2, path: jsonPaths[i], cached: false, ms: now() - t0, fields: r.fields))
             var stored: PrintRef?
             if r.remember {
-                cache.store(kind: "2", jsonPath: jsonPaths[i], size: size, mtime: mtime, value: r.fields)
-                if let p = r.print { stored = cache.storePrint(p, jsonPath: jsonPaths[i], size: size, mtime: mtime) }
+                cache.store(kind: "2", jsonPath: jsonPaths[i], key: key, value: r.fields)
+                if let p = r.print { stored = cache.storePrint(p, jsonPath: jsonPaths[i], key: key) }
             }
             if let stored { sources[i] = .stored(stored) } else if let p = r.print { sources[i] = .held(p) }
         }, late: { i in
             output.emit(clipLine(tier: 2, path: jsonPaths[i], cached: false, ms: tier2Deadline * 1000,
                                  fields: blankTier2Fields("Looking at this clip took too long, so these results are blank. The rest of the scan carried on.")))
+        }, skipped: { i in
+            guard status[i] == 1 else { return }
+            fromCache[i] = false
+            output.emit(clipLine(tier: 2, path: jsonPaths[i], cached: false, ms: 0, fields: blankTier2Fields(skippedTier2)))
         }, cancel: { slot in
             if slot < workers2 + 64 { local[slot]?.vision.cancel() }
             stopSlot(slot)

@@ -5,7 +5,40 @@ import simd
 
 // Dominant colours in Oklab, a space built so that distances match what people see.
 // Log footage is flat by design, so it goes back to linear light through its own curve and gamut first.
-// Without that step almost every S-Log clip reads as a washed-out neutral.
+// Without that step almost every S-Log clip reads as a washed-out neutral. Only S-Log3 with S-Gamut3.Cine is converted, and
+// only when the file says so: see `colorPlan`.
+
+/// How a clip's picture becomes display colour.
+struct ColorPlan {
+    /// S-Log3 with S-Gamut3.Cine: thumbnails and colour go through that curve and gamut.
+    var convert = false
+    /// The curve is S-Log3, whatever the gamut. Vision then gets the curve undone channel by channel, which needs no gamut.
+    var sLog3 = false
+    /// Why the colour wasn't converted, when the file names a curve or gamut this engine doesn't convert.
+    var note: String?
+}
+
+/// Decides from what the sidecar, Sony's data track and the colour atom name. The sidecar comes first, as it does for `gamma`.
+/// A log curve, HLG or PQ that isn't S-Log3 with S-Gamut3.Cine is read as recorded rather than through the wrong transform.
+func colorPlan(gamma: String?, primaries: String?, rtmd: (sLog3: Bool, cine: Bool)?) -> ColorPlan {
+    let g = gamma?.lowercased(), p = primaries?.lowercased()
+    var c = ColorPlan()
+    c.sLog3 = g.map { $0 == "s-log3" || $0 == "s-log3-cine" } ?? (rtmd?.sLog3 ?? false)
+    // Sony names the pair `s-log3-cine`, so that gamma alone says the gamut, unless the primaries say otherwise.
+    let cine = p.map { $0 == "s-gamut3-cine" } ?? (g == "s-log3-cine" || (g == nil && rtmd?.cine == true))
+    c.convert = c.sLog3 && cine
+    if c.convert { return c }
+    let asRecorded = "which \(productName) doesn't convert, so the thumbnail and colours are as recorded"
+    if c.sLog3 {
+        c.note = "Recorded in S-Log3 with a gamut other than S-Gamut3.Cine, \(asRecorded), flatter than the shot."
+    } else if let g, g.contains("log") {
+        let name = g.split(separator: "-").map { $0.prefix(1).uppercased() + $0.dropFirst() }.joined(separator: "-")
+        c.note = "Recorded in \(name), \(asRecorded), flatter than the shot."
+    } else if let g, g.hasPrefix("hlg") || g.contains("-hlg") || g == "pq" || g.contains("2084") {
+        c.note = "Recorded in \(g.contains("hlg") ? "HLG" : "PQ"), \(asRecorded)."
+    }
+    return c
+}
 
 struct ColorResult {
     var hue: Double?
@@ -120,7 +153,8 @@ struct ColorSampler {
     private var pixels: [SIMD3<Float>] = []
     private let perMoment = 3200
 
-    mutating func add(_ image: CVPixelBuffer, isLog: Bool) {
+    /// `convert`: the pixels are S-Log3 with S-Gamut3.Cine, see `ColorPlan`.
+    mutating func add(_ image: CVPixelBuffer, convert: Bool) {
         guard CVPixelBufferLockBaseAddress(image, .readOnly) == 0 else { return }
         defer { CVPixelBufferUnlockBaseAddress(image, .readOnly) }
         guard let base = CVPixelBufferGetBaseAddress(image) else { return }
@@ -128,7 +162,7 @@ struct ColorSampler {
         guard width > 0, height > 0 else { return }
         let step = max(1, Int((Double(width * height) / Double(perMoment)).squareRoot()))
         let p = base.assumingMemoryBound(to: UInt8.self)
-        let table = isLog ? sLog3ToLinear : displayToLinear
+        let table = convert ? sLog3ToLinear : displayToLinear
         table.withUnsafeBufferPointer { t in
             var y = step / 2
             while y < height {
@@ -137,7 +171,7 @@ struct ColorSampler {
                 while x < width {
                     let px = line + x * 4       // BGRA
                     var c = SIMD3(t[Int(px[2])], t[Int(px[1])], t[Int(px[0])])
-                    if isLog {
+                    if convert {
                         c = sGamut3CineTo709 * c
                         c = SIMD3(filmic(max(0, c.x) * 2.2), filmic(max(0, c.y) * 2.2), filmic(max(0, c.z) * 2.2))
                     }

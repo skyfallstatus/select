@@ -18,10 +18,12 @@ func testHang(_ stage: String, path: String) {
 
 /// Runs `body` for every item on `threads` threads. `body` calls `claim` just before it reports anything, and only reports if
 /// that returns true. An item past its deadline is claimed by the runner instead and handed to `late`. Its thread is cancelled
-/// as far as `cancel` can, left behind, and replaced, up to a limit. Returns once every item is settled.
+/// as far as `cancel` can, left behind, and replaced, up to a limit. Once that limit is reached, every item not yet started is
+/// handed to `skipped` instead: something is stuck for good, and the scan must still end. Returns once every item is settled.
 func runGuarded(_ threads: Int, items: Int, stack: Int, deadline: Double,
                 body: @escaping (_ item: Int, _ slot: Int, _ claim: () -> Bool) -> Void,
                 late: @escaping (_ item: Int) -> Void,
+                skipped: @escaping (_ item: Int) -> Void,
                 cancel: @escaping (_ slot: Int) -> Void = { _ in }) {
     guard items > 0 else { return }
     let spares = 64
@@ -86,15 +88,17 @@ func runGuarded(_ threads: Int, items: Int, stack: Int, deadline: Double,
         lock.wait(until: Date().addingTimeInterval(0.1))
         let t = now()
         var lateItems: [(item: Int, slot: Int)] = []
+        var lost = 0
         for slot in 0..<slotsUsed {
             guard let w = working[slot], !abandoned[slot], t - w.started > deadline * 1000 else { continue }
             abandoned[slot] = true
             working[slot] = nil
+            lost += 1
             // A thread that already began reporting gets no second line, only an end to the wait.
             if state[w.item] == 0 { lateItems.append((w.item, slot)) }
             settle(w.item)
         }
-        if lateItems.isEmpty { continue }
+        if lost == 0 { continue }
         lock.unlock()
         for (item, slot) in lateItems {
             trace.route("late")
@@ -102,10 +106,26 @@ func runGuarded(_ threads: Int, items: Int, stack: Int, deadline: Double,
             cancel(slot)
         }
         lock.lock()
-        for _ in lateItems where slotsUsed < threads + spares && next < items {
+        var unstarted = 0..<0
+        for _ in 0..<lost where next < items {
+            guard slotsUsed < threads + spares else {
+                // No replacement left. Nothing more is handed out: what's waiting is settled here, with its reason.
+                unstarted = next..<items
+                next = items
+                break
+            }
             start(slotsUsed)
             slotsUsed += 1
         }
+        if unstarted.isEmpty { continue }
+        for i in unstarted { state[i] = 2 }
+        lock.unlock()
+        for i in unstarted {
+            trace.route("unstarted")
+            skipped(i)
+        }
+        lock.lock()
+        settledCount += unstarted.count
     }
     lock.unlock()
 }

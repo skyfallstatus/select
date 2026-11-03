@@ -80,6 +80,24 @@ The picture, sound and colour fields work on anything that decodes. The camera's
 
 `[TESTED]` Every one of the 973 clips was Sony XAVC, so everything said here about accuracy comes from one kind of camera, mostly S-Log3. The iPhone, DJI and MXF clips were run for robustness, 18 clips with 0 failures, and not scored for accuracy.
 
+## Colour curves
+
+The thumbnail and the colour fields are converted from log only for S-Log3 with S-Gamut3.Cine, and only when the file says that pair. Anything else is read as recorded, and `colorNote` says why. See [the engine](ENGINE.md).
+
+| What the file says | Thumbnail and colour |
+|---|---|
+| S-Log3 with S-Gamut3.Cine, in a Sony sidecar or Sony's data track | converted. `[TESTED]` 973 real clips: 360 with a sidecar, where the sidecar and the data track always agreed, and 613 with the data track alone |
+| S-Log2, S-Log3 with S-Gamut3, other log curves | as recorded, with a note. `[TESTED]` made-up sidecars and data tracks only |
+| HLG or PQ, in the colour atom, a sidecar or what ffprobe reports | as recorded, with a note. `[TESTED]` made-up sidecars only |
+
+`[UNKNOWN]` How far off the S-Gamut3.Cine conversion is on any camera, and what the other curves would need. No real S-Log2, S-Gamut3, HLG or PQ clip has been run.
+
+## Sound tracks
+
+Every audio track is heard, up to 8, so a silent first track doesn't make a clip silent and a lav on its own track is listened to. Through ffmpeg, all of a file's audio streams are read together, which matters for MXF, where each channel is often a stream of its own.
+
+`[TESTED]` Generated clips: a silent first track with sound on the second, in MOV and in MXF, a second track only ffmpeg can read, and speech in opposite polarity on two channels. `[TESTED]` The 973 real clips each had one two-channel track. `[UNKNOWN]` Real files with several tracks, from any camera.
+
 ## Containers
 
 | Container | Needs ffmpeg |

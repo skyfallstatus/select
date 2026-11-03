@@ -178,37 +178,47 @@ final class DecoderPool {
     /// and the caller takes the slow route or reports the clip.
     func decode<T>(_ plan: VideoPlan, sample: ReadBuffer, body: (FrameView, Bool, CVPixelBuffer) -> T) -> Decoded<T> {
         let key = SessionKey(format: plan.format, width: plan.codedWidth, height: plan.codedHeight, atoms: plan.atoms)
-        return guarded(key) { self.attempt(key, sample, body) }
+        return guarded(key) { decoded in self.attempt(key, sample, decoded, body) }
     }
 
     /// Decodes one sample to a small BGRA image, for Vision. The image is only valid inside `body`.
     func decodeScaled<T>(_ plan: VideoPlan, sample: ReadBuffer, width: Int, height: Int, body: (CVPixelBuffer, Bool) -> T) -> Decoded<T> {
         var key = SessionKey(format: plan.format, width: plan.codedWidth, height: plan.codedHeight, atoms: plan.atoms)
         key.output = .scaled(width: width, height: height)
-        return guarded(key) {
+        return guarded(key) { decoded in
             self.withImage(key, sample) { image, pooled -> Decoded<T> in
                 guard CVPixelBufferGetPixelFormatType(image) == kCVPixelFormatType_32BGRA else {
                     return .refused(DecodeFailure(noDecoder: false, status: kVTPixelTransferNotSupportedErr))
                 }
+                decoded()
                 return .frame(body(image, pooled.hardware))
             }
         }
     }
 
-    /// Runs one decode under the rules that keep a Mac without a decoder from losing time.
-    private func guarded<T>(_ key: SessionKey, _ run: () -> Decoded<T>) -> Decoded<T> {
+    /// Runs one decode under the rules that keep a Mac without a decoder from losing time. `run` calls `decoded` once it has
+    /// a frame, before it hands the frame on: from then on the format is proven and the gate is open, so whatever the caller
+    /// does with the frame, even a Vision call that never returns, can't hold up other clips of the same format.
+    private func guarded<T>(_ key: SessionKey, _ run: (_ decoded: () -> Void) -> Decoded<T>) -> Decoded<T> {
         let s = state(for: key)
         lock.lock()
         let proven = s.proven
         lock.unlock()
-        if proven { return run() }
+        if proven { return run {} }
 
         s.gate.lock()
-        defer { s.gate.unlock() }
+        var held = true
+        func open() {
+            guard held else { return }
+            held = false
+            s.gate.unlock()
+        }
+        defer { open() }
         lock.lock()
         if s.proven {
             lock.unlock()
-            return run()
+            open()
+            return run {}
         }
         if let closed = s.closed {
             s.skipped += 1
@@ -219,10 +229,19 @@ final class DecoderPool {
             }
         }
         lock.unlock()
-        return learn(run(), s)
+        let result = run {
+            self.lock.lock()
+            s.proven = true
+            s.closed = nil
+            s.failures = 0
+            self.lock.unlock()
+            open()
+        }
+        return learn(result, s)
     }
 
-    private func attempt<T>(_ key: SessionKey, _ sample: ReadBuffer, _ body: (FrameView, Bool, CVPixelBuffer) -> T) -> Decoded<T> {
+    private func attempt<T>(_ key: SessionKey, _ sample: ReadBuffer, _ decoded: () -> Void,
+                            _ body: (FrameView, Bool, CVPixelBuffer) -> T) -> Decoded<T> {
         withImage(key, sample) { image, pooled -> Decoded<T> in
             // The maths reads 16-bit words, so a decoder that hands back anything else is a refusal, not a frame.
             guard CVPixelBufferGetPixelFormatType(image) == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
@@ -241,6 +260,7 @@ final class DecoderPool {
                                   height: CVPixelBufferGetHeightOfPlane(image, 0),
                                   uv: UnsafePointer(uvBase.assumingMemoryBound(to: UInt16.self)),
                                   uvStride: CVPixelBufferGetBytesPerRowOfPlane(image, 1) / 2)
+            decoded()
             return .frame(body(frame, pooled.hardware, image))
         }
     }

@@ -87,6 +87,7 @@ private func capture(_ args: [String], timeout: Double = 30) -> Data? {
     posix_spawn_file_actions_addopen(&actions, 2, "/dev/null", O_WRONLY, 0)
     posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDONLY, 0)
     var pid: pid_t = 0
+    trace.route("tool-run")
     let rc = args.withCStrings { c in posix_spawn(&pid, args[0], &actions, nil, c, environ) }
     close(fds[1])
     guard rc == 0 else {
@@ -196,12 +197,15 @@ func fallbackTier0(path: String, size: Int64, mtime: Double, reason: String) thr
 
     var meta = Embedded()
     let side = readSidecar(clipPath: path)
-    meta.created = side?.created ?? (formatTags["creation_time"] as? String)
+    meta.created = side?.created.flatMap(isoDate)
+        ?? ["com.apple.quicktime.creationdate", "creation_time"].lazy.compactMap { (formatTags[$0] as? String).flatMap(isoDate) }.first
     meta.timecode = side?.timecode ?? (videoTags["timecode"] as? String) ?? (formatTags["timecode"] as? String)
     meta.make = side?.make ?? (formatTags["company_name"] as? String)
     meta.model = side?.model ?? (formatTags["product_name"] as? String)
     meta.lens = side?.lens
-    meta.gamma = side?.gamma
+    // HLG and PQ, as ffprobe names them, so the colour can say it wasn't converted.
+    let transfer: String? = ["arib-std-b67": "hlg", "smpte2084": "pq"][v["color_transfer"] as? String ?? ""]
+    meta.gamma = side?.gamma ?? transfer
 
     var plan = ClipPlan()
     plan.fallback = true
@@ -210,13 +214,16 @@ func fallbackTier0(path: String, size: Int64, mtime: Double, reason: String) thr
     plan.width = codedW
     plan.height = codedH
     plan.hasAudio = !audio.isEmpty
+    plan.audioTracks = min(audio.count, maxAudioTracks)
+    plan.audioStreams = plan.audioTracks
     plan.bitDepth = depth
     plan.formatName = info.displayName
-    plan.isLog = meta.gamma?.lowercased().contains("log") ?? false
+    plan.color = colorPlan(gamma: meta.gamma, primaries: side?.primaries, rtmd: nil)
     let mbps = duration > 0 ? Double(size) * 8 / duration / 1e6 : nil
     let fields = tier0Fields(path: path, size: size, duration: duration, fps: fps, w: w, h: h, rotation: rotation,
                              info: info, allIntra: nil, mbps: mbps, hasAudio: !audio.isEmpty,
-                             channels: channels > 0 ? channels : nil, meta: meta, keyframe: nil, motion: nil)
+                             channels: channels > 0 ? channels : nil, meta: meta, keyframe: nil, motion: nil,
+                             colorNote: plan.color.note)
     return Tier0Result(fields: fields, plan: plan, size: size, mtime: mtime)
 }
 
@@ -257,31 +264,92 @@ func fallbackImage(path: String, at time: Double, width: Int, height: Int) -> Da
     return raw
 }
 
-/// A few seconds of mono sound through ffmpeg, for clips the direct reader can't take.
-func fallbackMono(path: String, duration: Double) -> MonoAudio? {
-    guard let tool = ffmpegPath, duration > 0 else { return nil }
-    var out = MonoAudio()
-    out.rate = 16000
-    let span = min(2.0, duration / 3)
-    for fraction in [1.0, 3.0, 5.0] {
-        guard let raw = capture([tool, "-v", "error", "-nostdin", "-ss", String(format: "%.3f", max(0, duration * fraction / 6 - span / 2)),
-                                 "-t", String(format: "%.3f", span), "-i", path, "-map", "0:a:0", "-ac", "1", "-ar", "16000", "-f", "f32le", "-"]) else { continue }
-        raw.withUnsafeBytes { out.samples.append(contentsOf: $0.bindMemory(to: Float.self)) }
-    }
-    return out.samples.isEmpty ? nil : out
+/// ffmpeg arguments that put the clip's audio streams, up to `maxAudioTracks`, side by side in one output, so every channel of
+/// every track is heard. A second microphone is often a track of its own.
+private func allAudio(_ streams: Int) -> [String] {
+    guard streams > 1 else { return ["-map", "0:a:0"] }
+    let n = min(streams, maxAudioTracks)
+    return ["-filter_complex", (0..<n).map { "[0:a:\($0)]" }.joined() + "amerge=inputs=\(n)[a]", "-map", "[a]"]
 }
 
-func fallbackAudioDb(path: String, duration: Double) -> Double? {
-    guard let tool = ffmpegPath, duration > 0 else { return nil }
-    var level = Level()
-    let span = min(0.2, duration)
-    let times = duration <= 1 ? [0] : [1.0, 3.0, 5.0].map { duration * $0 / 6 }
-    for t in times {
-        guard let raw = capture([tool, "-v", "error", "-nostdin", "-ss", String(format: "%.3f", t), "-t", String(format: "%.3f", span),
-                                 "-i", path, "-map", "0:a:0", "-f", "f32le", "-"]) else { continue }
-        raw.withUnsafeBytes { (p: UnsafeRawBufferPointer) in
-            for v in p.bindMemory(to: Float.self) { level.add(Double(v)) }
+/// Interleaved float samples from a WAV that ffmpeg wrote to a pipe, with its channels and rate. A pipe can't be rewound, so
+/// the data size in the header is a placeholder and the samples run to the end.
+private func parseWAV(_ d: Data) -> (samples: [Float], channels: Int, rate: Double)? {
+    d.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> (samples: [Float], channels: Int, rate: Double)? in
+        guard let base = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return nil }
+        let b = Bytes(base: base, count: raw.count)
+        func le16(_ o: Int) -> Int { Int(b.u8(o)) | Int(b.u8(o + 1)) << 8 }
+        func le32(_ o: Int) -> Int { le16(o) | le16(o + 2) << 16 }
+        guard b.count >= 12, b.u32(0) == fourCC("RIFF"), b.u32(8) == fourCC("WAVE") else { return nil }
+        var at = 12, channels = 0, rate = 0, bits = 0
+        while b.valid(at, 8) {
+            let id = b.u32(at), size = le32(at + 4)
+            if id == fourCC("fmt "), b.valid(at + 8, 16) {
+                channels = le16(at + 10)
+                rate = le32(at + 12)
+                bits = le16(at + 22)
+            } else if id == fourCC("data") {
+                guard channels > 0, rate > 0, bits == 32 else { return nil }
+                let count = (b.count - at - 8) / 4
+                var out = [Float](repeating: 0, count: count)
+                out.withUnsafeMutableBytes { $0.copyMemory(from: UnsafeRawBufferPointer(start: base + at + 8, count: count * 4)) }
+                return (out, channels, Double(rate))
+            }
+            at += 8 + size + (size & 1)
         }
+        return nil
     }
-    return level.db
+}
+
+/// Short windows of a clip's sound, every channel of every track, through ffmpeg. One process reads them all: each window is
+/// an input of its own, seeked on its own, and they're joined end to end. That costs about a fifth of a process per window.
+/// If it fails, each window gets a process of its own, so one bad window can't cost the others.
+private func soundWindows(path: String, _ windows: [(start: Double, span: Double)], streams: Int, rate: Int?) -> [(samples: [Float], channels: Int, rate: Double)] {
+    guard let tool = ffmpegPath, !windows.isEmpty else { return [] }
+    let n = min(max(streams, 1), maxAudioTracks)
+    let output = (rate.map { ["-ar", "\($0)"] } ?? []) + ["-c:a", "pcm_f32le", "-f", "wav", "-"]
+    func input(_ w: (start: Double, span: Double)) -> [String] {
+        ["-ss", String(format: "%.3f", max(0, w.start)), "-t", String(format: "%.3f", w.span), "-i", path]
+    }
+    if windows.count > 1 {
+        var graph = ""
+        for k in windows.indices {
+            graph += (0..<n).map { "[\(k):a:\($0)]" }.joined() + (n > 1 ? "amerge=inputs=\(n)" : "anull") + "[w\(k)];"
+        }
+        graph += windows.indices.map { "[w\($0)]" }.joined() + "concat=n=\(windows.count):v=0:a=1[a]"
+        let args = [tool, "-v", "error", "-nostdin"] + windows.flatMap(input) + ["-filter_complex", graph, "-map", "[a]"] + output
+        if let wav = capture(args).flatMap(parseWAV) { return [wav] }
+    }
+    return windows.compactMap { w in
+        capture([tool, "-v", "error", "-nostdin"] + input(w) + allAudio(streams) + output).flatMap(parseWAV)
+    }
+}
+
+/// The three sound windows through ffmpeg, for clips the direct reader can't take: every channel of every track, mixed or the
+/// loudest channel on its own, as `MonoPicker` decides.
+func fallbackMono(path: String, duration: Double, streams: Int) -> MonoAudio? {
+    guard duration > 0, streams > 0 else { return nil }
+    let span = min(2.0, duration / 3)
+    let windows = [1.0, 3.0, 5.0].map { (start: duration * $0 / 6 - span / 2, span: span) }
+    var picker: MonoPicker?
+    for wav in soundWindows(path: path, windows, streams: streams, rate: 16000) {
+        if picker == nil { picker = MonoPicker(channels: wav.channels, sourceRate: wav.rate) }
+        picker!.startWindow()
+        for v in wav.samples { picker!.add(Double(v)) }
+    }
+    return picker?.finish()
+}
+
+/// The loudest channel of any track over three short windows through ffmpeg, in dBFS.
+func fallbackAudioDb(path: String, duration: Double, streams: Int) -> Double? {
+    guard duration > 0, streams > 0 else { return nil }
+    let span = min(0.2, duration)
+    let windows = (duration <= 1 ? [0] : [1.0, 3.0, 5.0].map { duration * $0 / 6 }).map { (start: $0, span: span) }
+    var levels: ChannelLevels?
+    for wav in soundWindows(path: path, windows, streams: streams, rate: nil) {
+        if levels == nil { levels = ChannelLevels(channels: wav.channels) }
+        levels!.startWindow()
+        for v in wav.samples { levels!.add(Double(v)) }
+    }
+    return levels?.db
 }

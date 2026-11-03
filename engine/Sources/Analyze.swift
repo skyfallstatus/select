@@ -190,13 +190,13 @@ private func differenceHash(_ p: Proxy) -> String {
     return String(format: "%016llx", bits)
 }
 
-private func writeThumbnail(_ p: Proxy, isLog: Bool, to path: String) -> Bool {
+private func writeThumbnail(_ p: Proxy, convertLog: Bool, to path: String) -> Bool {
     var rgb = [UInt8](repeating: 255, count: p.width * p.height * 4)
     for i in 0..<(p.width * p.height) {
         let y = (p.y[i] - 64) / 876, b = (p.cb[i] - 512) / 896, r = (p.cr[i] - 512) / 896
         var c = SIMD3<Float>(y + 1.5748 * r, y - 0.1873 * b - 0.4681 * r, y + 1.8556 * b)
         // Log is flat on purpose. A thumbnail should look like the shot, not like the recording.
-        if isLog { c = gradeLog(c) }
+        if convertLog { c = gradeLog(c) }
         rgb[i * 4] = UInt8(max(0, min(255, c.x * 255)))
         rgb[i * 4 + 1] = UInt8(max(0, min(255, c.y * 255)))
         rgb[i * 4 + 2] = UInt8(max(0, min(255, c.z * 255)))
@@ -214,7 +214,8 @@ private func writeThumbnail(_ p: Proxy, isLog: Bool, to path: String) -> Bool {
     }
 }
 
-func analyze(_ f: FrameView, rotation: Int, sourceBits: Int?, isLog: Bool, thumbPath: String?) -> Metrics? {
+/// `convertLog`: the frame is S-Log3 with S-Gamut3.Cine, and the thumbnail is converted for display. See `ColorPlan`.
+func analyze(_ f: FrameView, rotation: Int, sourceBits: Int?, convertLog: Bool, thumbPath: String?) -> Metrics? {
     guard f.width >= 8, f.height >= 8 else { return nil }
     var m = Metrics()
     tone(f, into: &m)
@@ -224,7 +225,7 @@ func analyze(_ f: FrameView, rotation: Int, sourceBits: Int?, isLog: Bool, thumb
     m.dhash = differenceHash(proxy)
     if let thumbPath {
         let t0 = DispatchTime.now().uptimeNanoseconds
-        m.thumbWritten = writeThumbnail(proxy, isLog: isLog, to: thumbPath)
+        m.thumbWritten = writeThumbnail(proxy, convertLog: convertLog, to: thumbPath)
         m.thumbMs = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1e6
     }
     return m

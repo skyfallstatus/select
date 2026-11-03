@@ -23,7 +23,7 @@ select-engine --version
 ## Output lines
 
 ```json
-{"type":"start","total":400,"schema":1,"engineVersion":"0.1.0"}
+{"type":"start","total":400,"schema":4,"engineVersion":"0.1.0"}
 {"type":"clip","tier":0,"path":"/abs/clip.mp4","cached":false,"ms":3.1, ...fields...}
 {"type":"clip","tier":1,"path":"/abs/clip.mp4","cached":false,"ms":41.0, ...fields...}
 {"type":"clip","tier":2,"path":"/abs/clip.mp4","cached":false,"ms":90.0, ...fields...}
@@ -32,7 +32,7 @@ select-engine --version
 {"type":"done","clips":400,"failed":0,"cached":0,"wallMs":7300,"degraded":0}
 ```
 
-A line carries only its own tier's fields, and the panel merges lines by `path`. All Tier 1 lines come before any Tier 2 line. `groups` comes once, after the last Tier 2 line and before `done`, and only clips in a group of two or more appear in it. A field the engine can't get is `null`, never a guess. New fields may be added, so ignore ones you don't know.
+`schema` is the cache schema, 4 since sidecars became part of the key. A line carries only its own tier's fields, and the panel merges lines by `path`. All Tier 1 lines come before any Tier 2 line. `groups` comes once, after the last Tier 2 line and before `done`, and only clips in a group of two or more appear in it. A field the engine can't get is `null`, never a guess. New fields may be added, so ignore ones you don't know.
 
 In the `done` line, `clips` counts everything with Tier 0 data, `failed` counts `error` lines and `degraded` counts clips with no picture scores.
 
@@ -52,13 +52,14 @@ In the `done` line, `clips` counts everything with Tier 0 data, `failed` counts 
 | `allIntra` | bool or null | every sample is a sync sample |
 | `mbps` | float | average bitrate |
 | `hasAudio` | bool | |
-| `audioChannels` | int or null | |
-| `createdAt` | string or null | ISO 8601, camera time when present |
+| `audioChannels` | int or null | all tracks together |
+| `createdAt` | string or null | always with its zone: `2023-11-02T16:45:07Z` or `2025-12-12T19:03:06+01:00`, whole seconds. See below |
 | `timecode` | string or null | start timecode |
 | `camera` | string or null | maker and model |
 | `lens` | string or null | from embedded metadata or a Sony sidecar `*M01.XML` |
-| `gamma` | string or null | e.g. `s-log3-cine` |
+| `gamma` | string or null | e.g. `s-log3-cine`, `hlg`, `pq` |
 | `isLog` | bool or null | gamma says log |
+| `colorNote` | string or null | only when the file names a curve or gamut the engine doesn't convert, such as S-Log2, S-Log3 with S-Gamut3, HLG or PQ: why the thumbnail and colours are as recorded. See Log footage below |
 | `gpsLat`, `gpsLon` | float or null | |
 | `keyframeBytesMean` | float or null | mean compressed sync-sample size per megapixel, from the sample table: a detail stand-in |
 | `motionProxy` | float or null | spread of compressed sample sizes along the clip, 0 to 1: a motion stand-in |
@@ -74,8 +75,8 @@ In the `done` line, `clips` counts everything with Tier 0 data, `failed` counts 
 | `saturation` | float 0..1 or null | |
 | `warmth` | float -1..1 or null | red against blue balance |
 | `dhash` | string or null | 64-bit perceptual hash, hex. The panel doesn't use it now: Similar shots groups by feature prints |
-| `audioDb` | float or null | mean level from sampled windows, never a full read |
-| `silent` | bool or null | |
+| `audioDb` | float or null | mean level of the loudest channel of any audio track, from sampled windows, never a full read |
+| `silent` | bool or null | below -50 dBFS. True only when every audio track was heard. null when a track couldn't be read and the others are quiet |
 | `thumb` | string or null | absolute path to a JPEG in the cache, 480 px on the long side, from the middle moment. Log footage is graded so it looks like the shot |
 | `reason` | string | only when there are no picture scores: why, in plain English |
 
@@ -101,7 +102,7 @@ All of this is worked out on the Mac, with models that ship with macOS. It runs 
 | `shotSize` | `medium`, `wide` or null | from head and body size. A tight face is medium: there is no close-up. null with no person or face |
 | `labels` | array of `{"name","conf"}` or null | up to 12, best first |
 | `text` | array of strings or null | up to 12 on-screen words |
-| `sounds` | array of `{"name","conf"}` or null | up to 6. null with no audio, empty when nothing was recognised |
+| `sounds` | array of `{"name","conf"}` or null | up to 6. null with no audio or when a track couldn't be heard, empty when nothing was recognised |
 | `speech`, `music` | bool or null | heard in the sampled windows |
 | `iso` | int or null | from the file, not estimated |
 | `shutterS` | float or null | exposure time in seconds |
@@ -113,7 +114,11 @@ All of this is worked out on the Mac, with models that ship with macOS. It runs 
 | `colorName` | string or null | `red orange yellow green teal blue purple pink neutral` |
 | `palette` | array of up to 5 `#rrggbb` or null | dominant colours, strongest first |
 
-With no picture, `moments` is 0 and every picture field is null, while sound and camera values stay. Picture fields are null, not empty, only when no frame was read.
+With no picture, `moments` is 0 and every picture field is null, while sound and camera values stay. A picture field is also null, never 0 or empty, when Vision's request for it failed at any moment looked at: `labels` for the classifier, `faces` for faces, `people` and `shotSize` for people, faces or the classifier, and `text` for finding or reading words. A missed moment could have held the face or the word. Vision cancels the rest of a frame's requests when one fails, so one failure often nulls several fields. Such a result isn't remembered, so the next scan tries again.
+
+### Dates
+
+`createdAt` is the camera's time when the file or its sidecar gives one with a zone: the Sony sidecar first, then the QuickTime creation date, then the date atom. Offsets are written `+01:00`, whatever the file used (`+0100`, `+01`). A time with no zone could be in any zone, so it's passed over. The container's own creation time is UTC and comes last, written with `Z`. On 973 real Sony clips, 360 had the sidecar's local time with its offset and 613 the container's UTC. The panel can hand the string straight to `new Date()`.
 
 ### How Tier 2 works
 
@@ -123,7 +128,7 @@ With no picture, `moments` is 0 and every picture field is null, while sound and
 
 **Frame size.** 1280 px on the long side. Labels, faces and people held up down to 512, but words didn't: at 768 px real signs were lost, and 1920 px took about a third longer.
 
-**Log footage.** S-Log3 is named in Sony's data track or sidecar. Vision then gets a frame graded for display, because a flat frame is hard to read. The accuracy figures below were measured with it.
+**Log footage.** The thumbnail and colours are converted from log only for S-Log3 with S-Gamut3.Cine, and only when the file says that pair: the sidecar's `CaptureGammaEquation` `s-log3-cine`, or `s-log3` with `CaptureColorPrimaries` `s-gamut3-cine`, or, with no sidecar, Sony's data track naming both. On the 360 real clips that had both, the two always agreed. Any other log curve, S-Log3 with another gamut, HLG and PQ are read as recorded rather than through the wrong transform, and `colorNote` says so. Vision gets a frame with the S-Log3 curve undone channel by channel whatever the gamut, because a flat frame is hard to read and the curve alone needs no gamut. The accuracy figures below were measured with it, on S-Log3 with S-Gamut3.Cine.
 
 **Labels.** Apple publishes a precision curve for each of its 1,303 labels. A label is kept only where that curve says at least 75% of such calls are right.
 
@@ -133,15 +138,15 @@ With no picture, `moments` is 0 and every picture field is null, while sound and
 
 **Words.** Language correction on, confidence 0.5 or more, four letters or more, no mixed case, and not mostly strokes like `Illi`.
 
-**Sound.** Everything is resampled to 16 kHz first, upward too, so 8 kHz sound isn't heard at double speed. Three windows of 2 s from the existing sample tables, joined, at 16 kHz, with a 2 s classifier window. The classifier's default of 3 s gave nothing at all on short clips. Quieter than -60 dBFS skips the classifier. Speech and music need a confidence of 0.5, and a sound needs 0.3 to be listed.
+**Sound.** Every audio track is read, up to 8, because a lav or a second microphone often has a track of its own and the first may be silent. The classifier listens to the loudest. Within a track the channels are mixed, so a camera mic under a lav is heard too, with two exceptions: a channel more than 40 dB below the loudest is a dead input and is left out, rather than halve a live one, and channels in opposite polarity, which cancel in a mix, are caught by the mix keeping less than a quarter of their mean energy, and then the loudest is heard alone. Through ffmpeg, all of a clip's audio streams are put side by side and treated the same way. Everything is resampled to 16 kHz first, upward too, so 8 kHz sound isn't heard at double speed. Three windows of 2 s from the existing sample tables, joined, at 16 kHz, with a 2 s classifier window. The classifier's default of 3 s gave nothing at all on short clips. Quieter than -60 dBFS skips the classifier. Speech and music need a confidence of 0.5, and a sound needs 0.3 to be listed.
 
 **Shake.** The angular rate from three runs of about half a second, with each run's mean removed so a steady pan doesn't count, on a log scale from 0.3 to 30 deg/s. Tripods read 0.2 to 0.9 deg/s, handheld 1.5 to 4, and whip moves 20 and up.
 
-**Colour.** Log goes back to linear light through its own curve and gamut first. Then about 3,200 pixels a moment go into Oklab. The dominant hue counts by how much of the frame wears it and how clearly. A clip is neutral when under 12% of it has any real colour, or when it's pale and warm like cream and stone.
+**Colour.** S-Log3 with S-Gamut3.Cine goes back to linear light through its own curve and gamut first, as above. Then about 3,200 pixels a moment go into Oklab. The dominant hue counts by how much of the frame wears it and how clearly. A clip is neutral when under 12% of it has any real colour, or when it's pale and warm like cream and stone.
 
 **Similar shots.** Each moment's feature print goes in the cache. Two clips match when their closest moments are under the threshold and their average colours agree, because prints hardly see colour. Only clips in the same folder are compared, each with the 256 that follow it in name order: real repeated takes sat up to 156 apart, and no similar pair crossed folders in testing. That keeps grouping linear in the size of a project. Each group is anchored on its first clip, so it can't drift across a shoot. The threshold is 0.37 for print revision 2, set on real repeated takes, with no pair from different folders under it out of 22,773. Revision 1, which older macOS uses, has its own scale and a threshold of 11, chosen to pick out the same pairs on the same clips. A print is only compared with prints of the revision this Mac makes now, so after a macOS update old prints are worked out again, and an unknown revision gets no groups.
 
-**Deadlines.** Every clip has a deadline in each tier: 20 s for Tier 0, 30 s for Tier 1, 45 s for Tier 2. Past it the clip gets its line with blanks and a `reason`, Vision is cancelled and ffmpeg stopped where they're running, and the scan moves on, so `groups` and `done` always arrive. A thread that's truly stuck is left behind and replaced. The engine also notices a closed stdout within a quarter of a second, without waiting to write.
+**Deadlines.** Every clip has a deadline in each tier: 20 s for Tier 0, 30 s for Tier 1, 45 s for Tier 2. Past it the clip gets its line with blanks and a `reason`, Vision is cancelled and ffmpeg stopped where they're running, and the scan moves on, so `groups` and `done` always arrive. A thread that's truly stuck is left behind and replaced, up to 64 times a tier. Past that something is stuck for good, so every clip of that tier not yet started gets its line at once, with a reason that says so. When every thread looking at middle frames is stuck, the frames still queued are dropped and Tier 2 decodes them itself. The engine also notices a closed stdout within a quarter of a second, without waiting to write.
 
 **Memory.** Only what grouping needs stays in memory: where each print sits in the cache file, not the print itself. The middle frames looked at beside Tier 1 are capped at 1,024, and past 4,096 clips plans are read again rather than kept. `engine/tests/scale.sh` runs 50,000 generated clips, with a stand-in for Vision's models and everything else real: 32 s and a peak of 469 MB cold, 3.0 s and 662 MB cached. The cached peak is mostly the cache's own index.
 
@@ -190,11 +195,13 @@ The engine must never crash on a clip, and ffmpeg is optional. Every clip ends i
 
 A clip that needs ffmpeg says so with the words `ffmpeg not found`, and the panel looks for those words.
 
-A Mac that lacks a decoder shouldn't lose time finding that out, so the first clips of each format go one at a time. A format stops being tried for the rest of the run when a session won't open, or when three frames fail in a row with none decoded. After that it's tried once in 16 clips, so a wrong call can't last the whole run. In the contract test, 240 clips with a forced decoder failure make 15 to 17 attempts. Only so many ffmpeg processes run at once, and after three hangs in a row the slow route stops for the run.
+A Mac that lacks a decoder shouldn't lose time finding that out, so the first clips of each format go one at a time, until a frame decodes. The format is open from that moment, before anything is done with the frame, so a Vision call that never returns can't hold up the other clips of that format. A format stops being tried for the rest of the run when a session won't open, or when three frames fail in a row with none decoded. After that it's tried once in 16 clips, so a wrong call can't last the whole run. In the contract test, 240 clips with a forced decoder failure make 15 to 17 attempts. Only so many ffmpeg processes run at once, and after three hangs in a row the slow route stops for the run.
 
 ## The cache
 
-The key is the absolute path, file size, modification time and schema version. It's local to the Mac and holds paths, thumbnails and feature prints, so it stays out of bug reports. A blank Tier 1 or Tier 2 result is never remembered, and neither is a Tier 2 result that has lost its print.
+The key is the absolute path, file size, modification time and schema version, and the size and modification time of a Sony sidecar `*M01.XML` beside the clip, or that there's none: camera, lens, date and log grading come from it, so adding, changing or removing one reads the clip again and makes a new thumbnail. It's local to the Mac and holds paths, thumbnails and feature prints, so it stays out of bug reports. A blank Tier 1 or Tier 2 result is never remembered, and neither is a Tier 2 result that has lost its print or has a field left unknown.
+
+One scan at a time writes a cache. Each scan takes an exclusive lock on the `lock` file in the cache folder, which the system lets go of however the scan ends. A second scan on the same folder waits up to 2 s for it, then runs reading the cache but writing nothing: no results, no prints, no thumbnails, so a thumbnail is `null` unless one is already there. It says so on stderr. Its Tier 2 is worked out again rather than read, because it doesn't read prints another scan may be writing. Files left by older schemas are deleted when a scan takes the lock.
 
 It's kept under 2 GB, about 50,000 clips, or what `--cache-limit-mb` says. At the end of every scan the clips used longest ago go first, with their thumbnails, until it's under 80% of the limit. Clips the scan just used are never dropped. Thumbnails nothing points to any more are deleted, and the prints file is rewritten once superseded records outnumber live ones by half. When each clip was last used is written at most every six hours, so rescans cost nothing extra.
 
@@ -215,6 +222,7 @@ These are set only by `engine/tests/contract.sh`, and the panel never sets them.
 | `ENGINE_TEST_DEADLINE=<s>` | every deadline becomes this many seconds |
 | `ENGINE_TEST_PRINT_REVISION=<n>` | asks Vision for another feature print revision |
 | `ENGINE_TEST_FAKE_VISION=1` | prints from the pixels instead of the models, for `scale.sh` |
+| `ENGINE_TEST_VISION_FAIL=<requests>` | for a clip whose path contains `vfail`, the named Vision requests, any of `classify`, `faces`, `people`, `print`, `boxes`, `text`, are asked for a revision no Mac has, so Vision fails them for real |
 | `ENGINE_TRACE=<file>` | writes per-clip timings to a file, and totals by stage to stderr |
 
 ## The panel's side

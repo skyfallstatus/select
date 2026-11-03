@@ -33,5 +33,10 @@ chmod 755 $OUT
 
 SLICES=$(lipo -archs $OUT)
 [[ $SLICES == *arm64* && $SLICES == *x86_64* ]] || { print -u2 "Expected arm64 and x86_64, got: $SLICES"; exit 1 }
-[[ $(engine/build/arm64/$ENGINE version) == $VERSION ]] || { print -u2 "The arm64 engine doesn't report $VERSION."; exit 1 }
+# The universal file runs the slice for this Mac, so the check works on Intel and Apple silicon alike. Where Rosetta is
+# there, Apple silicon checks the Intel slice too.
+[[ $($OUT version) == $VERSION ]] || { print -u2 "The engine doesn't report $VERSION on this $(uname -m) Mac."; exit 1 }
+if [[ $(uname -m) == arm64 ]] && arch -x86_64 /usr/bin/true 2>/dev/null; then
+  [[ $(arch -x86_64 $OUT version) == $VERSION ]] || { print -u2 "The x86_64 engine doesn't report $VERSION under Rosetta."; exit 1 }
+fi
 print "built $OUT, version $VERSION, $SLICES, macOS $MIN_MACOS or later"

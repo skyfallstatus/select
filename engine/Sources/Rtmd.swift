@@ -62,12 +62,14 @@ struct RtmdValues {
     var iso: Int?
     var shutterS: Double?
     var aperture: Double?
-    var isLog = false
     var shakeDegPerS: Double?
 }
 
-/// Log curves named by Sony's capture gamma label, last four bytes of the 16.
-private let sonyLogLabels: Set<UInt32> = [0x0101_0605]      // S-Log3
+/// Sony's labels for S-Log3 (tag 0x3210, capture gamma) and S-Gamut3.Cine (tag 0x3219, colour primaries). On the 360 real
+/// clips that also had a sidecar, these two came with `s-log3-cine` and `s-gamut3-cine` there, every time.
+private let sLog3Label: [UInt8] = [0x06, 0x0e, 0x2b, 0x34, 0x04, 0x01, 0x01, 0x06, 0x0e, 0x06, 0x04, 0x01, 0x01, 0x01, 0x06, 0x05]
+private let sGamut3CineLabel: [UInt8] = [0x06, 0x0e, 0x2b, 0x34, 0x04, 0x01, 0x01, 0x06, 0x0e, 0x06, 0x04, 0x01, 0x01, 0x03, 0x01, 0x05]
+private func isLabel(_ b: Bytes, _ label: [UInt8]) -> Bool { b.count == 16 && (0..<16).allSatisfy { b.u8($0) == label[$0] } }
 
 private func float32(_ b: Bytes) -> Float? {
     guard b.count == 4 else { return nil }
@@ -113,14 +115,15 @@ private struct Jitter {
     var degPerS: Double? { count > 0 ? (sum / Double(count)).squareRoot() : nil }
 }
 
-/// Whether the track names a log curve, from a small read at the start of one sample. Tier 1 can afford this.
-func rtmdSaysLog(_ plan: RtmdPlan, file: MediaFile) -> Bool {
-    guard let w = plan.windows.first, let data = try? file.read(at: w.offset, count: min(w.sizes[0], 4096)) else { return false }
-    var log = false
+/// The curve and gamut the track names, from a small read at the start of one sample. Nil when it names no curve.
+func rtmdColor(_ plan: RtmdPlan, file: MediaFile) -> (sLog3: Bool, cine: Bool)? {
+    guard let w = plan.windows.first, let data = try? file.read(at: w.offset, count: min(w.sizes[0], 4096)) else { return nil }
+    var curve: Bool?, cine = false
     walkRtmd(data.bytes) { tag, b in
-        if tag == 0x3210, b.count == 16, sonyLogLabels.contains(b.u32(12)) { log = true }
+        if tag == 0x3210, b.count == 16 { curve = isLabel(b, sLog3Label) }
+        if tag == 0x3219, b.count == 16 { cine = isLabel(b, sGamut3CineLabel) }
     }
-    return log
+    return curve.map { ($0, cine) }
 }
 
 /// Reads the planned runs and pulls out the values. Anything missing or absurd stays nil.
@@ -140,7 +143,6 @@ func readRtmd(_ plan: RtmdPlan, file: MediaFile) -> RtmdValues {
                 switch tag {
                 case 0xe43b: gyro = b
                 case 0xe439: scale = float32(b) ?? 0
-                case 0x3210 where b.count == 16: if sonyLogLabels.contains(b.u32(12)) { v.isLog = true }
                 default: break
                 }
                 // The exposure at the clip's middle stands for the clip.

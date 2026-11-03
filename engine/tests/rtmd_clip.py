@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Adds a Sony-style `rtmd` data track to a generated MP4, so the parser can be tested without a Sony file.
 
-    rtmd_clip.py <in.mp4> <out.mp4> [--iso 1600] [--shutter-den 100] [--code 53343] [--gyro 40] [--no-log]
+    rtmd_clip.py <in.mp4> <out.mp4> [--iso 1600] [--shutter-den 100] [--code 53343] [--gyro 40] [--no-log] [--gamut cine|other|none]
 
 The layout follows what real files carry: a 0x1c-byte header, then tagged values, one sample per frame, with gyro
 readings at 2 kHz. Everything is made up. fuzz.py imports this to build hostile tracks too.
@@ -18,9 +18,11 @@ def tag(t, payload):
 
 
 SLOG3 = bytes.fromhex('060e2b34040101060e06040101010605')
+# The colour primaries label real S-Log3 clips carry beside it, which their sidecars call s-gamut3-cine. `other` is made up.
+GAMUTS = {'cine': bytes.fromhex('060e2b34040101060e06040101030105'), 'other': bytes.fromhex('060e2b34040101060e06040101030199'), 'none': None}
 
 
-def sample(iso=1600, shutter_den=100, code=53343, gyro=40.0, log=True, seed=0, readings=80):
+def sample(iso=1600, shutter_den=100, code=53343, gyro=40.0, log=True, seed=0, readings=80, gamut='cine'):
     r = random.Random(seed)
     head = struct.pack('>H', 0x1c) + bytes(0x1c - 2)
     vals = [(int(r.gauss(0, gyro * 65.5)), int(r.gauss(0, gyro * 65.5)), int(r.gauss(0, gyro * 65.5))) for _ in range(readings)]
@@ -36,6 +38,8 @@ def sample(iso=1600, shutter_den=100, code=53343, gyro=40.0, log=True, seed=0, r
              tag(0xe43b, struct.pack('>II', readings, 6) + motion)]
     if log:
         parts.insert(1, tag(0x3210, SLOG3))
+        if GAMUTS[gamut]:
+            parts.insert(2, tag(0x3219, GAMUTS[gamut]))
     return head + b''.join(parts) + tag(0xffff, bytes(64))
 
 
@@ -86,7 +90,8 @@ if __name__ == '__main__':
     a.add_argument('--gyro', type=float, default=40.0)
     a.add_argument('--frames', type=int, default=24)
     a.add_argument('--no-log', action='store_true')
+    a.add_argument('--gamut', choices=sorted(GAMUTS), default='cine')
     o = a.parse_args()
     data = open(o.src, 'rb').read()
-    samples = [sample(o.iso, o.shutter_den, o.code, o.gyro, not o.no_log, seed=i) for i in range(o.frames)]
+    samples = [sample(o.iso, o.shutter_den, o.code, o.gyro, not o.no_log, seed=i, gamut=o.gamut) for i in range(o.frames)]
     open(o.dst, 'wb').write(add_track(data, samples))
