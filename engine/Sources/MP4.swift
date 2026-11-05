@@ -188,6 +188,12 @@ final class Movie {
     var tracks: [Track] = []
     var udta: Bytes?
     var meta: Bytes?
+    /// `uuid` boxes directly inside `moov`. Canon keeps its own record in one.
+    var uuids: [Bytes] = []
+    /// A top-level `meta` box next to `moov`, where Sony puts the clip's XML when it isn't beside the clip. Small, and usually
+    /// already in memory with `moov`.
+    var outerMeta: Bytes?
+    var outerMetaStorage: ReadBuffer?
     var fragmented = false
 
     init(storage: ReadBuffer, moov: Bytes) {
@@ -246,6 +252,10 @@ final class MediaFile {
     let fd: Int32
     let size: Int64
     let mtime: Double
+    /// Bytes this handle has read from the disk, page rounding included. For the trace.
+    private(set) var bytesRead = 0
+    /// Reads this handle has made. For the trace.
+    private(set) var reads = 0
 
     init(path: String) throws {
         fd = open(path, O_RDONLY | O_CLOEXEC)
@@ -285,6 +295,8 @@ final class MediaFile {
             if n == 0 { break }
             done += n
         }
+        bytesRead += done
+        reads += 1
         return ReadBuffer(raw: raw, skip: skip, count: max(0, min(count, done - skip)))
     }
 }
@@ -300,6 +312,7 @@ func loadMovie(_ f: MediaFile) throws -> Movie {
 
     var pos: Int64 = 0
     var fragmented = false
+    var outerMeta: ReadBuffer?
     var window = head
     var windowStart: Int64 = 0
     while pos + 8 <= f.size {
@@ -336,13 +349,33 @@ func loadMovie(_ f: MediaFile) throws -> Movie {
             let movie = Movie(storage: whole, moov: body)
             parseMoov(movie)
             movie.fragmented = fragmented || movie.fragmented
+            if let earlier = outerMeta {
+                (movie.outerMeta, movie.outerMetaStorage) = (earlier.bytes, earlier)
+            } else if at + Int(size) + 8 <= window.count, v.u32(at + Int(size) + 4) == fourCC("meta") {
+                // Sony writes it right after `moov`, at the end of the file, so it's usually in the read already made.
+                let metaSize = Int(v.u32(at + Int(size)))
+                if metaSize > 8, metaSize <= outerMetaLimit {
+                    if at + Int(size) + metaSize <= window.count {
+                        (movie.outerMeta, movie.outerMetaStorage) = (v.sub(at + Int(size), metaSize), window)
+                    } else if let b = try? f.read(at: pos + size, count: metaSize), b.count == metaSize {
+                        (movie.outerMeta, movie.outerMetaStorage) = (b.bytes, b)
+                    }
+                }
+            }
             return movie
         }
         if type == fourCC("moof") { fragmented = true }
+        if type == fourCC("meta"), outerMeta == nil, size > 8, size <= Int64(outerMetaLimit),
+           let b = try? f.read(at: pos, count: Int(size)), b.count == Int(size) {
+            outerMeta = b
+        }
         pos += size
     }
     throw MP4Error.noMoov
 }
+
+/// A top-level `meta` box bigger than this isn't read. Sony's is about 10 KB.
+private let outerMetaLimit = 1 << 20
 
 private func parseMoov(_ m: Movie) {
     for box in BoxIterator(m.moov) {
@@ -362,6 +395,7 @@ private func parseMoov(_ m: Movie) {
             if let t = parseTrak(box.body) { m.tracks.append(t) }
         case fourCC("udta"): m.udta = box.body
         case fourCC("meta"): m.meta = box.body
+        case fourCC("uuid"): m.uuids.append(box.body)
         case fourCC("mvex"): m.fragmented = true
         default: break
         }

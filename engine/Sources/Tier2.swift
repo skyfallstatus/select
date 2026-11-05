@@ -62,8 +62,8 @@ func lookAtMiddle(_ image: CVPixelBuffer, color: ColorPlan, rotation: Int, offse
 }
 
 /// Looks at middle moments beside Tier 1. It takes what it can: a full queue drops the frame and Tier 2 decodes it again later,
-/// so Tier 1 never waits for this. It keeps at most `keep` results, about 60 KB each, so a huge project costs a few more decodes
-/// rather than memory. A job past its deadline is given up on, and once every thread is stuck the jobs still waiting are dropped
+/// so Tier 1 never waits for this. It keeps at most `keep` results, so a huge project costs a few more decodes rather than
+/// memory. A job past its deadline is given up on, and once every thread is stuck the jobs still waiting are dropped
 /// too, so `finish` always returns.
 final class MiddleQueue {
     private var jobs: [(index: Int, image: CVPixelBuffer, color: ColorPlan, rotation: Int, offset: Int64, path: String)] = []
@@ -74,7 +74,8 @@ final class MiddleQueue {
     private var running: [Int: (started: Double, worker: Tier2Worker)] = [:]
     private var results: [Int: MiddleLook] = [:]
     private let capacity = 32
-    private let keep = 1024
+    /// About 15 KB a look with the colour samples packed: about 90 MB at most, or half that on a Mac with less than 16 GB.
+    private let keep = machineGB >= 16 ? 6144 : 3072
     private let deadline = tier2Deadline
     private let threads: Int
     /// Threads whose job ran past its deadline and hasn't come back.
@@ -162,6 +163,20 @@ final class MiddleQueue {
     }
 }
 
+/// Set only by engine/tests/contract.sh: for a clip whose path contains "rfail", reading its last moment fails, as a pulled
+/// cable or a bad block would.
+private let testReadFailure = ProcessInfo.processInfo.environment["ENGINE_TEST_READ_FAIL"] != nil
+private func testReadFails(_ path: String, moment: Int, of count: Int) -> Bool {
+    testReadFailure && count > 1 && moment == count - 1 && path.contains("rfail")
+}
+
+/// Set only by engine/tests/contract.sh: for a clip whose path contains "dfail", the decoder refuses its last moment, as it
+/// would a damaged GOP.
+private let testDecodeFailure = ProcessInfo.processInfo.environment["ENGINE_TEST_DECODE_FAIL"] != nil
+private func testDecodeFails(_ path: String, moment: Int, of count: Int) -> Bool {
+    testDecodeFailure && count > 1 && moment == count - 1 && path.contains("dfail")
+}
+
 func tier2(path: String, plan: ClipPlan, pool: DecoderPool, worker: Tier2Worker, middle: MiddleLook?) -> Tier2Result {
     let file = try? MediaFile(path: path)
     var rtmd = RtmdValues()
@@ -191,28 +206,40 @@ func tier2(path: String, plan: ClipPlan, pool: DecoderPool, worker: Tier2Worker,
             lap("vision")
         }
     }
-    var refused = plan.fallback || plan.moments.isEmpty
-    if !refused, let file {
-        for m in plan.moments {
+    // A moment that couldn't be read, as when a cable is pulled, may read next time, so while one is missing what it held is
+    // unknown. A moment the decoder refused stays refused, as a damaged GOP does: the clip is judged on the moments that
+    // decoded, as 0.3 did, and the result is kept. Only a clip with no moment decoded goes the slow way.
+    var unread = 0
+    var undecoded = 0
+    var slow = plan.fallback || plan.moments.isEmpty
+    if !slow, let file {
+        for (n, m) in plan.moments.enumerated() {
             if let middle, middle.offset == m.offset {
                 seen.append(middle.vision)
                 colors.merge(middle.colors)
                 continue
             }
-            guard let sample = try? file.read(at: m.offset, count: m.size), sample.count == m.size else { continue }
+            guard !testReadFails(path, moment: n, of: plan.moments.count),
+                  let sample = try? file.read(at: m.offset, count: m.size), sample.count == m.size else {
+                unread += 1
+                continue
+            }
             lap("read")
             let (w, h) = scaledSize(width: m.codedWidth, height: m.codedHeight)
-            if case .refused = pool.decodeScaled(m, sample: sample, width: w, height: h, body: { image, _ in use(image) }) {
-                refused = true
-                break
+            if testDecodeFails(path, moment: n, of: plan.moments.count) {
+                undecoded += 1
+            } else if case .refused = pool.decodeScaled(m, sample: sample, width: w, height: h, body: { image, _ in use(image) }) {
+                undecoded += 1
             }
         }
+        slow = seen.isEmpty && undecoded > 0
     }
-    if refused, seen.isEmpty, ffmpegPath != nil, plan.width > 1, plan.height > 1 {
+    if slow, seen.isEmpty, ffmpegPath != nil, plan.width > 1, plan.height > 1 {
         var (w, h) = (plan.width, plan.height)
         if !plan.fallback, plan.rotation == 90 || plan.rotation == 270 { swap(&w, &h) }
         let (sw, sh) = scaledSize(width: w, height: h)
         let times = plan.durationS > 3 ? [1.0, 3.0, 5.0].map { plan.durationS * $0 / 6 } : [plan.durationS / 2]
+        // ffmpeg failing at one time is the same as the decoder refusing a moment: the others stand.
         for t in times {
             guard let raw = fallbackImage(path: path, at: t, width: sw, height: sh),
                   let image = pixelBuffer(from: raw, width: sw, height: sh) else { continue }
@@ -223,12 +250,13 @@ func tier2(path: String, plan: ClipPlan, pool: DecoderPool, worker: Tier2Worker,
     var out = Fields()
     out.add("moments", seen.count)
     let looked = !seen.isEmpty
-    // A field is reported only when its request answered at every moment looked at. One that failed anywhere is null: a
-    // missed moment could have held the face or the word. People and shot size also use faces and labels.
-    let labelsKnown = blind == 0 && seen.allSatisfy(\.labelsKnown)
-    let facesKnown = blind == 0 && seen.allSatisfy(\.facesKnown)
+    // A field is reported only when its request answered at every moment decoded, and no moment went unread. One that failed
+    // anywhere gives null: a missed moment could have held the face or the word. People and shot size also use faces and labels.
+    let allSeen = blind == 0 && unread == 0
+    let labelsKnown = allSeen && seen.allSatisfy(\.labelsKnown)
+    let facesKnown = allSeen && seen.allSatisfy(\.facesKnown)
     let peopleKnown = labelsKnown && facesKnown && seen.allSatisfy(\.peopleKnown)
-    let wordsKnown = blind == 0 && seen.allSatisfy(\.wordsKnown)
+    let wordsKnown = allSeen && seen.allSatisfy(\.wordsKnown)
     let peopleCounts = seen.map { countPeople($0) }
     let faceCounts = seen.map { countFaces($0) }
     out.add("people", looked && peopleKnown ? peopleCounts.max() : nil)

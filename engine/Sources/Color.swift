@@ -9,7 +9,7 @@ import simd
 // only when the file says so: see `colorPlan`.
 
 /// How a clip's picture becomes display colour.
-struct ColorPlan {
+struct ColorPlan: Equatable {
     /// S-Log3 with S-Gamut3.Cine: thumbnails and colour go through that curve and gamut.
     var convert = false
     /// The curve is S-Log3, whatever the gamut. Vision then gets the curve undone channel by channel, which needs no gamut.
@@ -150,7 +150,12 @@ func colorName(hue: Double) -> String {
 
 /// Collects pixels from each moment, then settles on the colours.
 struct ColorSampler {
-    private var pixels: [SIMD3<Float>] = []
+    /// The sampled pixels as they came, a red, a green and a blue byte each: a fifth of the room Oklab floats take, which
+    /// matters for the middle frames held through Tier 1. They're converted when the colours are worked out, the same way
+    /// every time.
+    private var raw: [UInt8] = []
+    /// Where each moment's samples start in `raw`, and whether they're S-Log3 with S-Gamut3.Cine.
+    private var runs: [(start: Int, convert: Bool)] = []
     private let perMoment = 3200
 
     /// `convert`: the pixels are S-Log3 with S-Gamut3.Cine, see `ColorPlan`.
@@ -162,29 +167,47 @@ struct ColorSampler {
         guard width > 0, height > 0 else { return }
         let step = max(1, Int((Double(width * height) / Double(perMoment)).squareRoot()))
         let p = base.assumingMemoryBound(to: UInt8.self)
-        let table = convert ? sLog3ToLinear : displayToLinear
-        table.withUnsafeBufferPointer { t in
-            var y = step / 2
-            while y < height {
-                let line = p + y * row
-                var x = step / 2
-                while x < width {
-                    let px = line + x * 4       // BGRA
-                    var c = SIMD3(t[Int(px[2])], t[Int(px[1])], t[Int(px[0])])
-                    if convert {
-                        c = sGamut3CineTo709 * c
-                        c = SIMD3(filmic(max(0, c.x) * 2.2), filmic(max(0, c.y) * 2.2), filmic(max(0, c.z) * 2.2))
-                    }
-                    pixels.append(oklab(c))
-                    x += step
-                }
-                y += step
+        runs.append((raw.count, convert))
+        var y = step / 2
+        while y < height {
+            let line = p + y * row
+            var x = step / 2
+            while x < width {
+                let px = line + x * 4       // BGRA
+                raw.append(px[2])
+                raw.append(px[1])
+                raw.append(px[0])
+                x += step
             }
+            y += step
         }
     }
 
+    /// Every sample in Oklab, in the order they were taken.
+    private func oklabPixels() -> [SIMD3<Float>] {
+        var out: [SIMD3<Float>] = []
+        out.reserveCapacity(raw.count / 3)
+        for (n, run) in runs.enumerated() {
+            let end = n + 1 < runs.count ? runs[n + 1].start : raw.count
+            let table = run.convert ? sLog3ToLinear : displayToLinear
+            table.withUnsafeBufferPointer { t in
+                var i = run.start
+                while i + 2 < end {
+                    var c = SIMD3(t[Int(raw[i])], t[Int(raw[i + 1])], t[Int(raw[i + 2])])
+                    if run.convert {
+                        c = sGamut3CineTo709 * c
+                        c = SIMD3(filmic(max(0, c.x) * 2.2), filmic(max(0, c.y) * 2.2), filmic(max(0, c.z) * 2.2))
+                    }
+                    out.append(oklab(c))
+                    i += 3
+                }
+            }
+        }
+        return out
+    }
+
     /// k-means in Oklab, seeded across lightness so the result is the same on every run.
-    private func clusters(_ k: Int) -> [(center: SIMD3<Float>, share: Float)] {
+    private func clusters(_ k: Int, _ pixels: [SIMD3<Float>]) -> [(center: SIMD3<Float>, share: Float)] {
         let order = pixels.indices.sorted { pixels[$0].x < pixels[$1].x }
         var centers = (0..<k).map { pixels[order[(2 * $0 + 1) * order.count / (2 * k)]] }
         var totals = [SIMD3<Float>](repeating: .zero, count: k)
@@ -210,10 +233,15 @@ struct ColorSampler {
         return (0..<k).filter { counts[$0] > 0 }.map { (centers[$0], Float(counts[$0]) / Float(pixels.count)) }
     }
 
-    mutating func merge(_ other: ColorSampler) { pixels += other.pixels }
+    mutating func merge(_ other: ColorSampler) {
+        let base = raw.count
+        runs += other.runs.map { ($0.start + base, $0.convert) }
+        raw += other.raw
+    }
 
     /// The average colour of everything sampled, in Oklab.
     var mean: (a: Float, b: Float)? {
+        let pixels = oklabPixels()
         guard !pixels.isEmpty else { return nil }
         var total = SIMD3<Float>.zero
         for p in pixels { total += p }
@@ -221,6 +249,7 @@ struct ColorSampler {
     }
 
     func finish() -> ColorResult? {
+        let pixels = oklabPixels()
         guard pixels.count >= 32 else { return nil }
         var out = ColorResult()
         // A hue counts by how much of the frame wears it and how clearly. Black and white have no say.
@@ -267,7 +296,7 @@ struct ColorSampler {
                 }
             }
         }
-        let parts = clusters(5).sorted {
+        let parts = clusters(5, pixels).sorted {
             let ca = ($0.center.y * $0.center.y + $0.center.z * $0.center.z).squareRoot()
             let cb = ($1.center.y * $1.center.y + $1.center.z * $1.center.z).squareRoot()
             return $0.share * (0.3 + min(ca, 0.1) * 7) > $1.share * (0.3 + min(cb, 0.1) * 7)

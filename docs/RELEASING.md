@@ -100,7 +100,7 @@ Do these before anyone else gets it. Debug mode lets unsigned panels load, so **
 
    Then run the contract test under it: `arch -x86_64 zsh engine/tests/contract.sh`.
 
-5. **The buttons work.** Label, Add Columns, Sort into Bins and Undo, on a copy of a project. The manifest's schema version changed for this build, so this is its first real run.
+5. **The writes work.** Label (right-click), Make Sequence, Sort into Bins and Undo, on a copy of a project. The manifest's schema version changed for this build, so this is its first real run.
 
 ## Rehearse the first update
 

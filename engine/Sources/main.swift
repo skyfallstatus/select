@@ -6,7 +6,9 @@ func log(_ s: String) {
 }
 
 func usage() -> Never {
-    log("usage: \(engineName) scan --paths-file <file|-> [--tier 0|1|2] [--cache <dir>] [--workers <n>] [--no-thumbs] [--cache-limit-mb <n>]")
+    log("usage: \(engineName) scan --paths-file <file|-> [--tier 0|1|2] [--cache <dir>] [--workers <n>] [--no-thumbs] [--cache-limit-mb <n>] [--cached-only]")
+    log("       \(engineName) strip --path <clip> [--frames 2-32] [--width 64-1024] [--cache <dir>]")
+    log("       \(engineName) reveal <path> [<path> ...]")
     log("       \(engineName) version | --version")
     exit(2)
 }
@@ -49,6 +51,8 @@ struct Options {
     var thumbs = true
     /// The cache is kept under this many bytes, oldest first. 2 GB holds about 50,000 clips.
     var cacheLimit: Int64 = 2 << 30
+    /// Answer only from the cache: nothing is read from the clips beyond their size and date, and nothing is written.
+    var cachedOnly = false
 }
 
 func parseOptions(_ a: [String]) -> Options {
@@ -70,6 +74,7 @@ func parseOptions(_ a: [String]) -> Options {
             guard let n = Int(value()), n > 0, n <= 128 else { usage() }
             o.workers = n
         case "--no-thumbs": o.thumbs = false
+        case "--cached-only": o.cachedOnly = true
         case "--cache-limit-mb":
             guard let n = Int64(value()), n >= 1 else { usage() }
             o.cacheLimit = n << 20
@@ -194,8 +199,14 @@ func tier1(path: String, plan: ClipPlan, pool: DecoderPool, thumbPath: String?, 
     timing.thumb = metrics?.thumbMs ?? 0
 
     t = now()
+    let readBefore = file.bytesRead, readsBefore = file.reads
     let db = plan.hasAudio ? clipLevel(plan, path: path, file: file) : nil
     timing.audio = now() - t
+    if trace.path != nil {
+        trace.add("levelBytes", Double(file.bytesRead - readBefore))
+        trace.add("levelReads", Double(file.reads - readsBefore))
+        trace.add("levelMs", timing.audio)
+    }
 
     // A clip with no frame still has its file details and, usually, its sound.
     var out = Fields()
@@ -260,7 +271,10 @@ func blankTier2Fields(_ reason: String?) -> String {
 }
 
 func clipLine(tier: Int, path: String, cached: Bool, ms: Double, fields: String) -> String {
-    "{\"type\":\"clip\",\"tier\":\(tier),\"path\":\(path),\"cached\":\(cached),\"ms\":\(String(format: "%.1f", ms)),\(fields)}"
+    // A cached line costs nothing, and formatting a number costs more than the rest of the line: 50,000 clips from the cache
+    // write 150,000 of these.
+    let time = ms == 0 ? "0.0" : String(format: "%.1f", ms)
+    return "{\"type\":\"clip\",\"tier\":\(tier),\"path\":\(path),\"cached\":\(cached),\"ms\":\(time),\(fields)}"
 }
 
 func scan(_ o: Options) {
@@ -268,6 +282,7 @@ func scan(_ o: Options) {
         log("cannot read paths file \(o.pathsFile)")
         exit(2)
     }
+    if o.cachedOnly { return scanCachedOnly(o, paths: paths) }
     let start = now()
     let output = Output()
     let cache = ResultCache(dir: o.cacheDir)
@@ -316,7 +331,9 @@ func scan(_ o: Options) {
             return
         }
         keys[i] = key
+        var older: CacheEntry?
         if let e = cache.lookup(jsonPaths[i], key: key) {
+            older = e
             if let err = e.error {
                 guard claim() else { return }
                 status[i] = 2
@@ -324,7 +341,9 @@ func scan(_ o: Options) {
                 fromCache[i] = true
                 return
             }
-            if let fields = e.tier0 {
+            // A result from an older Tier 0 reading is read again. Tiers 1 and 2 still come from the cache, unless the picture
+            // changed, below.
+            if let fields = e.tier0, e.tier0Rev >= tier0Revision {
                 guard claim() else { return }
                 status[i] = 1
                 fromCache[i] = true
@@ -344,6 +363,13 @@ func scan(_ o: Options) {
             status[i] = 1
             output.emit(clipLine(tier: 0, path: jsonPaths[i], cached: false, ms: ms, fields: r.fields))
             cache.store(kind: "0", jsonPath: jsonPaths[i], key: key, value: r.fields)
+            // A new reading that changes the picture, such as a log curve found in the XML inside the file, leaves the cached
+            // Tiers 1 and 2 describing another picture: they're worked out again, in this scan or the next.
+            if let older, older.tier0 != nil, older.tier0Rev < 2, older.tier1 != nil || older.tier2 != nil,
+               let before = r.colorBefore, !samePicture(before, r.plan.color) {
+                cache.store(kind: "p", jsonPath: jsonPaths[i], key: key, value: "\"why\":\"picture\"")
+                trace.route("picture-changed")
+            }
         } catch {
             if claim() { fail(i, error, key: key) }
         }
@@ -356,7 +382,7 @@ func scan(_ o: Options) {
     log(String(format: "tier0 phase %.0f ms", now() - start))
     if o.tier >= 1 {
         let pool = DecoderPool(capacity: max(8, workers1 * 2))
-        middles = o.tier == 2 ? MiddleQueue(threads: 6) : nil
+        middles = o.tier == 2 ? MiddleQueue(threads: defaultMiddleThreads) : nil
         let wantsMiddle = o.tier == 2
         let shrinkers = UnsafeMutablePointer<FrameShrinker?>.allocate(capacity: workers1 + 64)
         shrinkers.initialize(repeating: nil, count: workers1 + 64)
@@ -491,24 +517,60 @@ func scan(_ o: Options) {
     log("routes \(trace.routes.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: " ")) wall \(wall) ms")
 }
 
-let defaultTier0Workers = 12
-let defaultTier1Workers = 12
-let defaultTier2Workers = 16
+// Threads fitted to the Mac. Tuned on 18 cores and 128 GB, where these come out as 12, 12, 16 and 6. Tier 0 waits on the
+// disk, so it can have about a thread a core. Tier 1 is decoding and leaves room for Premiere. Tier 2 holds Vision's models,
+// so it also gets no more threads than the Mac has gigabytes.
+let machineCores = ProcessInfo.processInfo.activeProcessorCount
+let machineGB = Int(ProcessInfo.processInfo.physicalMemory >> 30)
+let defaultTier0Workers = min(12, max(4, machineCores))
+let defaultTier1Workers = min(12, max(2, machineCores * 2 / 3), max(2, machineGB))
+let defaultTier2Workers = min(16, max(2, machineCores - 2), max(2, machineGB))
+let defaultMiddleThreads = min(6, max(1, machineCores / 3))
+
+/// The files a strip is writing, for a stop to remove. Fixed memory, made before the handler can run, because a signal handler
+/// mustn't allocate.
+private let stripTemps = (UnsafeMutablePointer<CChar>.allocate(capacity: Int(PATH_MAX) + 1),
+                          UnsafeMutablePointer<CChar>.allocate(capacity: Int(PATH_MAX) + 1))
+stripTemps.0[0] = 0
+stripTemps.1[0] = 0
+
+/// The first byte is written last, so a handler that runs halfway sees an empty name rather than half of one.
+func noteStripTemp(_ a: String?, _ b: String?) {
+    for (slot, path) in [(stripTemps.0, a), (stripTemps.1, b)] {
+        slot[0] = 0
+        guard let path, !path.isEmpty, path.utf8.count < Int(PATH_MAX) else { continue }
+        let bytes = Array(path.utf8)
+        for k in 1..<bytes.count { slot[k] = CChar(bitPattern: bytes[k]) }
+        slot[bytes.count] = 0
+        slot[0] = CChar(bitPattern: bytes[0])
+    }
+}
+
+/// Safe inside a signal handler.
+func removeStripTemp() {
+    if stripTemps.0[0] != 0 { unlink(stripTemps.0) }
+    if stripTemps.1[0] != 0 { unlink(stripTemps.1) }
+}
 
 signal(SIGPIPE, SIG_IGN)
 prepareChildTracking()
 signal(SIGTERM) { _ in
     stopChildren()
+    removeStripTemp()
     _exit(143)
 }
 
 let args = Array(CommandLine.arguments.dropFirst())
-if args.first == "scan" { watchForClosedOutput() }
+if args.first == "scan" || args.first == "strip" { watchForClosedOutput() }
 switch args.first {
 case "version", "--version":
     print(engineVersion)
 case "scan":
     scan(parseOptions(Array(args.dropFirst())))
+case "strip":
+    runStrip(Array(args.dropFirst()))
+case "reveal":
+    runReveal(Array(args.dropFirst()))
 case "debug":
     runDebug(Array(args.dropFirst()))
 default:

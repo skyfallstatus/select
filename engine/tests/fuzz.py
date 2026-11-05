@@ -2,12 +2,14 @@
 """Damages tiny generated clips in moov and in sample data, scans them, and checks the engine survives.
 
 Every clip must end up as a clip line or an error line, every line must be JSON, and the engine must
-exit 0. It runs once with ffmpeg and once as if ffmpeg weren't there. Everything lives in a temp folder
-that goes away afterwards, capped at 64 MB. Without ffmpeg there are no clips to make, so it skips.
+exit 0. It runs once with ffmpeg and once as if ffmpeg weren't there. Then it answers the same list from the
+cache alone, and makes a strip of some of the damaged clips: one JSON line each, exit 0. Everything lives in a
+temp folder that goes away afterwards, capped at 64 MB. Without ffmpeg there are no clips to make, so it skips.
 
     engine/tests/fuzz.py [--engine path] [--count 300]
 """
 import argparse, json, os, random, re, shutil, struct, subprocess, sys, tempfile
+from concurrent.futures import ThreadPoolExecutor
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import rtmd_clip
@@ -176,6 +178,58 @@ def check(listing, label, env, cache):
         print('FAIL', p)
     return not problems
 
+def check_cached_only(listing, cache):
+    """The same list from the cache the first check filled: every clip accounted for, and nothing but JSON."""
+    paths = '\n'.join(listing) + '\n'
+    run = subprocess.run([args.engine, 'scan', '--paths-file', '-', '--cache', cache, '--cached-only'], input=paths.encode(),
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+    problems = [] if run.returncode == 0 else [f'exit {run.returncode}']
+    seen, kinds, done = set(), {}, None
+    for line in run.stdout.decode('utf8', 'replace').splitlines():
+        try:
+            m = json.loads(line)
+        except ValueError:
+            problems.append('a line that is not JSON: ' + line[:120])
+            continue
+        kinds[m['type']] = kinds.get(m['type'], 0) + 1
+        if m['type'] in ('clip', 'error', 'uncached'):
+            seen.add(m['path'])
+        if m['type'] == 'done':
+            done = m
+    if done is None:
+        problems.append('no done line')
+    if set(listing) - seen:
+        problems.append(f'{len(set(listing) - seen)} clips never reported')
+    print(f'cached only: {len(listing)} clips, lines {dict(sorted(kinds.items()))}')
+    for p in problems:
+        print('FAIL', p)
+    return not problems
+
+def check_strips(listing, cache, env):
+    """A strip of every fourth damaged clip, six at a time: one JSON line, exit 0, and a picture when it says so."""
+    def one(path):
+        run = subprocess.run([args.engine, 'strip', '--path', path, '--cache', cache], stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, env=env, timeout=30)
+        lines = run.stdout.decode('utf8', 'replace').splitlines()
+        if run.returncode != 0:
+            return f'{os.path.basename(path)}: exit {run.returncode}'
+        if len(lines) != 1:
+            return f'{os.path.basename(path)}: {len(lines)} lines'
+        try:
+            m = json.loads(lines[0])
+        except ValueError:
+            return f'{os.path.basename(path)}: not JSON: {lines[0][:120]}'
+        if m['type'] == 'strip' and not os.path.getsize(m['file']):
+            return f'{os.path.basename(path)}: an empty picture'
+        return m['type']
+    with ThreadPoolExecutor(6) as pool:
+        results = list(pool.map(one, listing[::4]))
+    problems = [r for r in results if r not in ('strip', 'error')]
+    print(f'strips: {len(results)} clips, {results.count("strip")} strips, {results.count("error")} errors')
+    for p in problems:
+        print('FAIL', p)
+    return not problems
+
 tmp = args.keep or tempfile.mkdtemp(prefix='engine-fuzz.')
 try:
     sources_dir = os.path.join(tmp, 'src')
@@ -186,6 +240,8 @@ try:
     listing = damage(sources, out, args.count) + hostile_rtmd(sources, out, 90)
     good = check(listing, 'with ffmpeg', dict(os.environ), os.path.join(tmp, 'c1'))
     good = check(listing, 'without ffmpeg', dict(os.environ, ENGINE_TEST_NO_FFMPEG='1'), os.path.join(tmp, 'c2')) and good
+    good = check_cached_only(listing, os.path.join(tmp, 'c1')) and good
+    good = check_strips(listing, os.path.join(tmp, 'c1'), dict(os.environ)) and good
 finally:
     if not args.keep:
         shutil.rmtree(tmp, ignore_errors=True)

@@ -1,5 +1,7 @@
 /* Select. The tokens are Ingest's, light and dark, and follow Premiere's brightness.
-   Greys everywhere. Cobalt on the primary action only. Green only on something proved. */
+   Greys everywhere. Cobalt on the primary action only. Green only on something proved: --safe-ink, fitted to
+   Premiere's grey by core.skinTokens as the other greys are, and amber (--warn) and red (--bad) on the icons of what
+   went partly or wholly wrong. */
 :root {
   --ink: #1D1D1F;
   --ink2: #5F6063;
@@ -12,16 +14,21 @@
   --ring: #C9C9CE;
   --track: #E9E9EE;
   --meter: #6E6E73;
-  --focus-ring: #8A8A90;
+  --focus-ring: #2563EB;
   --cobalt: #2563EB;
   --bad: #C9281C;
   --safe: #15803D;
+  --safe-ink: #0F6E31;
+  --band: #F3F3F5;
+  --edge: #A9A9AE;
+  --sel: #E4E4E9;
+  --warn: #B25B00;
   --shadow: 0 1px 2px rgba(0, 0, 0, .10), 0 12px 32px rgba(0, 0, 0, .18);
   --scrim: rgba(0, 0, 0, .22);
   --plate: rgba(0, 0, 0, .04);
   --plate-sel: rgba(0, 0, 0, .075);
   --row: 40px;
-  --side: 16px;
+  --side: 14px;
 }
 :root[data-theme="dark"] {
   --ink: #EDEDEE;
@@ -35,9 +42,14 @@
   --ring: #55555C;
   --track: #3A3A40;
   --meter: #A0A0A6;
-  --focus-ring: #9A9AA0;
+  --focus-ring: #4A82EB;
   --cobalt: #2F6FE6;
   --bad: #FF6A5F;
+  --safe-ink: #34C759;
+  --band: #313135;
+  --edge: #606066;
+  --sel: #434349;
+  --warn: #F5A524;
   --shadow: 0 1px 2px rgba(0, 0, 0, .40), 0 12px 32px rgba(0, 0, 0, .50);
   --scrim: rgba(0, 0, 0, .38);
   --plate: rgba(255, 255, 255, .05);
@@ -47,29 +59,43 @@
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
 html, body { margin: 0; height: 100%; overflow: hidden; background: var(--surface); color: var(--ink); }
+/* Premiere's own font, Adobe Clean at 12 px, loaded from Premiere's folder as SelectUI (app.js); the Mac's own where it
+   isn't there. One size for nearly everything, as Premiere has. */
 body, button, input {
-  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Helvetica, Arial, sans-serif;
-  font-size: 13px; line-height: 16px; letter-spacing: -.08px; font-variant-numeric: tabular-nums;
+  font-family: SelectUI, -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  font-size: 12px; line-height: 16px; letter-spacing: 0; font-variant-numeric: tabular-nums;
   -webkit-font-smoothing: antialiased;
 }
 h1, h2, p { margin: 0; font: inherit; }
+b { font-weight: 700; }
 #app { display: flex; flex-direction: column; height: 100%; min-width: 0; position: relative; }
 
 button {
   appearance: none; -webkit-appearance: none; margin: 0; padding: 0; border: 0; background: none; color: inherit; outline: none; cursor: default;
 }
-button:focus-visible, input:focus-visible, #grid:focus-visible { outline: 1.5px solid var(--focus-ring); outline-offset: 1px; }
-#grid:focus-visible { outline-offset: -2px; }
+/* Focus is Premiere's one accent: a 1 px blue line, fitted to read at 3:1 on every grey (core.skinTokens). */
+button:focus-visible, input:focus-visible, #grid:focus-visible { outline: 1px solid var(--focus-ring); outline-offset: 1px; }
+#grid:focus-visible { outline-offset: -1px; }
 
-/* The one button. Primary is Cobalt, on-safe is white on the green foot, so two colours never meet. */
+/* The icons: one set from core.ICONS, inline where they change colour with their button, as masks where a row or a menu
+   item draws one before its words. */
+.ic { display: block; flex: none; width: 16px; height: 16px; }
+[data-icon] { color: inherit; }
+
+/* The one button, a pill: an outline, or Cobalt for the one main action. Nothing grows or shrinks: a press is a plate.
+   Off, either kind is a grey plate with quiet words, so the bar never shows a second, dim blue. */
 .action {
-  height: 26px; padding: 0 11px; border-radius: 7px; font-weight: 600; white-space: nowrap; flex: none;
-  background: var(--track); color: var(--ink); transition: transform .08s ease-out;
+  display: inline-flex; align-items: center; justify-content: center; height: 24px; padding: 0 12px 1px; border-radius: 12px; border: 1px solid var(--edge);
+  font-weight: 700; white-space: nowrap; flex: none; color: var(--ink); background: transparent;
+  transition: background-color .12s ease-out, border-color .12s ease-out, color .12s ease-out;
 }
-.action.primary { background: var(--cobalt); color: #fff; }
-.action.on-safe { background: #fff; color: var(--safe); }
-.action:active:not(:disabled) { transform: scale(.97); }
-.action:disabled { opacity: .36; }
+.action:hover:not(:disabled) { background: var(--plate); }
+.action:active:not(:disabled) { background: var(--plate-sel); }
+.action.primary { background: var(--cobalt); border-color: var(--cobalt); color: #fff; }
+.action.primary:hover:not(:disabled) { background: var(--cobalt); filter: brightness(1.08); }
+.action.primary:active:not(:disabled) { background: var(--cobalt); filter: brightness(.92); }
+.action:disabled, .action.primary:disabled { background: var(--plate); border-color: transparent; color: var(--ink3); }
+.action:focus-visible { outline-offset: 2px; }
 
 /* Quiet words that do something. */
 .link {
@@ -78,109 +104,203 @@ button:focus-visible, input:focus-visible, #grid:focus-visible { outline: 1.5px 
 }
 .link:active { opacity: .6; }
 
-/* Words in a row: the active one in ink and semibold, the rest in ink2. The hidden copy holds the width. */
+/* Words in a row: the active one in ink and bold, the rest in ink2. The hidden copy holds the width. */
 .word { display: inline-flex; flex-direction: column; text-align: left; color: var(--ink2); white-space: nowrap; flex: none; }
-.word::after { content: attr(data-label); height: 0; overflow: hidden; visibility: hidden; font-weight: 600; }
-.word.on { color: var(--ink); font-weight: 600; }
+.word::after { content: attr(data-label); height: 0; overflow: hidden; visibility: hidden; font-weight: 700; }
+.word.on { color: var(--ink); font-weight: 700; }
 .word:active:not(.on) { opacity: .6; }
 
-.icon { width: 22px; height: 20px; display: inline-flex; align-items: center; justify-content: center; color: var(--ink2); flex: none; border-radius: 5px; }
-.icon svg { fill: currentColor; display: block; }
-.icon:active { opacity: .5; }
+/* A square button holding one icon. */
+/* One hover plate everywhere, --plate on 4 px corners; --foot is the open search field's alone. */
+.icon { width: 24px; height: 24px; display: inline-flex; align-items: center; justify-content: center; color: var(--ink2); flex: none; border-radius: 4px; }
+.icon:hover { color: var(--ink); background: var(--plate); }
+.icon:active { background: var(--plate-sel); }
 
-/* ---- the top: one row of questions (From, Show, Sort, colour), then the status under it. Nothing stays at the foot. */
+/* ---- the top: one row of questions (Show, Sort, colour), search and ···, then the band when there is news. */
 #top { flex: none; position: relative; z-index: 3; background: var(--surface); }
-#toolbar { display: flex; align-items: center; gap: 2px; height: 42px; padding: 0 10px 0 calc(var(--side) - 7px); min-width: 0; }
-#toolbar .rule { flex: none; width: .5px; height: 16px; margin: 0 6px; background: var(--ring); }
+/* The first word sits on the panel's one margin (--side), and so does the last dot of ···. */
+#toolbar { display: flex; align-items: center; gap: 0; height: 40px; padding: 0 8px 0 calc(var(--side) - 8px); min-width: 0; }
 #project-name { display: none; }
 /* Search is a glass until it's wanted: a click, Cmd-F or typing over the clips opens it, and a query keeps it open. */
-#search-box { display: flex; align-items: center; gap: 6px; flex: none; width: 26px; height: 26px; margin-left: auto; padding: 0 0 0 6.5px; border-radius: 7px; cursor: default; overflow: hidden;
-  transition: width .26s cubic-bezier(.2, .8, .2, 1), background-color .2s ease-out, box-shadow .2s ease-out; }
-#search-box svg { flex: none; fill: none; stroke: var(--ink2); stroke-width: 1.3; stroke-linecap: round; }
-#search-box:hover { background: var(--foot); }
-#search-box.open { width: 220px; flex: 0 1 220px; min-width: 140px; background: var(--foot); box-shadow: inset 0 0 0 .5px var(--line); cursor: text; padding-right: 7px; }
+#search-box { position: relative; display: flex; align-items: center; gap: 4px; flex: none; width: 24px; height: 24px; margin-left: auto; padding: 0 0 0 4px; border-radius: 4px; cursor: default; overflow: hidden;
+  color: var(--ink2); transition: width .26s cubic-bezier(.2, .8, .2, 1), background-color .2s ease-out, box-shadow .2s ease-out; }
+#search-box .glass { display: flex; align-items: center; flex: none; width: 16px; height: 24px; }
+#search-box:not(.open):hover { background: var(--plate); color: var(--ink); }
+/* Open, the box takes the room Show and Sort leave, up to 260 px, and gives way before their words do: first its count,
+   whole or not at all (it wraps onto a second line the box hides), then the field, down to room for a short word. The ×
+   keeps its place at the end. */
+#search-box.open { width: 260px; flex: 1 1 0; max-width: 260px; min-width: 104px; flex-wrap: wrap; align-content: flex-start; background: var(--foot); box-shadow: inset 0 0 0 1px var(--line); cursor: text; padding-right: 26px; color: var(--ink2); }
 #search-box.open:focus-within { box-shadow: inset 0 0 0 1px var(--focus-ring); }
-#search { flex: 1 1 auto; min-width: 0; height: 22px; padding: 0; border: 0; background: none; color: var(--ink); font-size: 12px; outline: none; user-select: text; opacity: 0; transition: opacity .16s ease-out; }
-#search-box.open #search { opacity: 1; }
+#search { flex: 1 1 auto; min-width: 0; height: 24px; padding: 0; border: 0; background: none; color: var(--ink); font-size: 12px; outline: none; user-select: text; opacity: 0; transition: opacity .16s ease-out; }
+#search-box.open #search { flex: 1 1 0; min-width: 48px; opacity: 1; }
 #search::placeholder { color: var(--ink3); }
-#search-count { flex: none; font-size: 12px; color: var(--ink2); white-space: nowrap; }
-#search-clear { flex: none; width: 14px; height: 14px; display: inline-flex; align-items: center; justify-content: center; }
-#search-clear svg, #foot-close svg { fill: none; stroke: var(--ink2); stroke-width: 1.3; stroke-linecap: round; }
-#modes { display: flex; gap: 0; flex: none; margin-left: 6px; padding: 2px; border-radius: 7px; background: var(--foot); }
-#modes .icon { width: 26px; height: 22px; color: var(--ink2); border-radius: 5px; transition: background-color .16s ease-out, color .16s ease-out; }
-#modes .icon.on { color: var(--ink); background: var(--disc); }
-#more { width: 26px; height: 26px; margin-left: 4px; }
-#more:hover, #more[aria-expanded="true"] { background: var(--foot); }
-
-#folder-box { display: flex; align-items: center; gap: 8px; height: 30px; margin: 0 10px 6px; padding: 0 8px 0 9px; border-radius: 7px; background: var(--foot); flex: none; animation: open .22s ease-out; }
-#folder-box svg { flex: none; fill: var(--ink3); }
-#folder { flex: 1 1 auto; min-width: 0; height: 20px; padding: 0; border: 0; background: none; color: var(--ink2); font-size: 12px; user-select: text; outline: none; text-overflow: ellipsis; }
-#folder::placeholder { color: var(--ink3); }
-#folder:focus { color: var(--ink); }
-@keyframes open { from { opacity: 0; transform: translateY(-4px); } }
+#search-count { flex: none; height: 24px; line-height: 24px; font-size: 12px; color: var(--ink2); white-space: nowrap; }
+#search-clear { position: absolute; right: 4px; top: 4px; width: 16px; height: 16px; display: inline-flex; align-items: center; justify-content: center; color: var(--ink2); border-radius: 8px; }
+#search-clear:hover { color: var(--ink); }
+#more { margin-left: 4px; }
+#more[aria-expanded="true"], #more:active { background: var(--plate); color: var(--ink); }
 
 /* Questions read as words; the menu hangs under the word. */
-.pick { display: inline-flex; align-items: baseline; gap: 5px; height: 26px; padding: 5px 8px 0; border-radius: 7px; white-space: nowrap; flex: 0 1 auto; min-width: 0; color: var(--ink2); }
+.pick { display: inline-flex; align-items: center; gap: 4px; height: 24px; padding: 0 4px 0 8px; border-radius: 4px; white-space: nowrap; flex: 0 1 auto; min-width: 0; color: var(--ink2); }
 /* While a search is open, the questions drop their small words to make room for it. */
 #toolbar.searching .pick .k { display: none; }
-.pick .k { font-size: 12px; color: var(--ink2); flex: none; }
-.pick .v { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
-.pick.on .v { color: var(--ink); font-weight: 600; }
-.pick .chev { flex: none; align-self: center; margin-top: -4px; fill: none; stroke: var(--ink3); stroke-width: 1.3; stroke-linecap: round; stroke-linejoin: round; }
-.pick:hover, .pick[aria-expanded="true"] { background: var(--foot); }
-.pick:active { opacity: .7; }
-#flip { width: 24px; height: 26px; margin-left: -2px; }
-#flip svg { fill: none; stroke: var(--ink2); stroke-width: 1.2; stroke-linecap: round; stroke-linejoin: round; }
-#flip:hover { background: var(--foot); }
+/* Short of room, a question's chevron goes before its word is cut: it wraps onto a second line, which the button hides.
+   Only while the small word is hidden (here, and under 760 px), so the word itself is never the one to go. */
+#toolbar.searching .pick { flex-wrap: wrap; overflow: hidden; }
+.pick .k { color: var(--ink2); flex: none; line-height: 24px; }
+/* A question keeps at least three letters before its ellipsis; the open search field gives way first. */
+.pick .v { overflow: hidden; text-overflow: ellipsis; min-width: 3.5ch; line-height: 24px; }
+.pick.on .v { color: var(--ink); font-weight: 700; }
+.pick .chev { display: block; flex: none; width: 16px; height: 24px; margin-left: -2px; color: var(--ink2); }
+.pick .chev .ic { margin-top: 4px; }
+/* No pressed shade: the menu opens on the press, and its plate holds from hover to open to closed, with no pulse. */
+.pick:hover, .pick[aria-expanded="true"] { background: var(--plate); }
+.pick:hover .chev, .pick[aria-expanded="true"] .chev { color: var(--ink); }
+#flip { margin-left: 0; }
 /* Colour is data, so it is the one row of colour outside the pictures. A colour not found yet stays faint, and fills in
    as the scan finds it. */
-#families { display: flex; align-items: center; gap: 2px; margin: 0 8px; flex: none; }
-#families button { width: 16px; height: 22px; display: flex; align-items: center; justify-content: center; flex: none; border-radius: 5px; }
-#families i { display: block; width: 9px; height: 9px; border-radius: 50%; transition: transform .14s ease-out, opacity .4s ease-out; }
-#families button:hover i { transform: scale(1.2); }
+#families { display: flex; align-items: center; gap: 0; margin: 0 8px; flex: none; }
+/* Nothing grows: a dot under the pointer gets a thin ring, the one on a bolder one, a press dims it. One tab stop for
+   the nine, the arrow keys move between them (app.js). */
+#families button { width: 16px; height: 24px; display: flex; align-items: center; justify-content: center; flex: none; border-radius: 4px; }
+#families i { display: block; width: 9px; height: 9px; border-radius: 50%; transition: opacity .14s ease-out, box-shadow .14s ease-out; }
 #families button.empty i { opacity: .24; }
-#families button.on i { transform: scale(1.15); box-shadow: 0 0 0 1.5px var(--surface), 0 0 0 2.6px var(--ink2); }
 #families.chosen button:not(.on) i { opacity: .35; }
-#families button:active i { transform: scale(.85); }
-/* Narrow: the small words, the rule and some air go, so From Selection, the longest show and the longest sort, with
-   its flip, still read whole in one row at the panel's 620 px. */
+#families button:hover i { opacity: 1; box-shadow: 0 0 0 1px var(--surface), 0 0 0 2px var(--ink3); }
+#families button.on i { box-shadow: 0 0 0 1.5px var(--surface), 0 0 0 2.5px var(--ink2); }
+#families button:active i { opacity: .6; }
+/* Narrow: the small words and some air go, so the longest show and the longest sort, with its flip, still read whole
+   in one row at the panel's 620 px. */
 @media (max-width: 760px) {
   .pick .k { display: none; }
-  .pick { padding: 5px 6px 0; }
-  #toolbar { padding-right: 6px; }
-  #toolbar .rule { display: none; }
-  #flip { width: 22px; }
+  .pick { padding: 0 2px 0 6px; flex-wrap: wrap; overflow: hidden; }
+  #toolbar { padding-left: calc(var(--side) - 6px); }
+  #flip { width: 20px; }
   #families { gap: 0; margin: 0 4px; }
   #families button { width: 12px; }
   #families i { width: 8px; height: 8px; }
+  /* Two colours or more on: a thinner ring, so dots side by side keep apart in their 12 px. */
+  #families.several button.on i { box-shadow: 0 0 0 1px var(--surface), 0 0 0 2px var(--ink2); }
   #search-box.open { width: 160px; }
-  #modes, #more { margin-left: 2px; }
+  #more { margin-left: 2px; }
 }
 @media (max-width: 560px) {
-  #toolbar .rule, #modes { display: none; }
+  /* While a search is open and no colour is on, the colour dots step aside, and the field takes all the room left. */
+  #toolbar.searching #families:not(.chosen) { display: none; }
+  #toolbar.searching #search-box.open { width: auto; max-width: none; }
+}
+/* Under 400 px the dots come closer (a 10 px pitch) and the flip narrows, so Show and Sort keep a word's worth; while
+   searching with a colour on, only the colours on stay, and the field gives way before the words. */
+@media (max-width: 400px) {
+  #toolbar.searching #families.chosen button:not(.on) { display: none; }
+  #toolbar.searching .pick { min-width: calc(3.5ch + 8px); }
+  /* 4 + 16 glass + 4 + 24 of text + 26 for the clear: the text stays on the field's one line. */
+  #toolbar.searching #search-box.open { flex: 1 1 104px; min-width: 74px; }
+  #toolbar.searching #search-box.open #search { min-width: 24px; }
+  #families button { width: 10px; }
+  #families i { width: 8px; height: 8px; }
+  #families button.on i, #families.several button.on i { box-shadow: 0 0 0 1px var(--surface), 0 0 0 2px var(--ink2); }
+  #flip { width: 18px; }
+}
+/* Ways to finish the word typed, under the open search box, in the menus' look: the word, and its count of clips. */
+#suggest { position: absolute; z-index: 8; padding: 4px; border-radius: 8px; background: var(--surface); box-shadow: var(--shadow), 0 0 0 .5px var(--line); }
+#suggest button { display: flex; align-items: center; width: 100%; height: 24px; padding: 0 8px; border-radius: 4px; text-align: left; white-space: nowrap; color: var(--ink); }
+#suggest .w { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+#suggest .n { flex: none; margin-left: auto; padding-left: 16px; color: var(--ink2); }
+#suggest button:hover, #suggest button.hot { background: var(--disc); }
+
+/* ---- the band: under the toolbar, a shade lighter than the panel, only while there is news. Its first row is the
+   status (an icon, the words, and Stop, Details, Undo or Scan); the rows under it are notes: the clips a scan skipped,
+   a refusal, the update. It opens and closes over 150 ms (app.js sets its height), and the grid under it keeps its top
+   clip. While the clips scroll, a calm band tucks away, and comes back on the way up or when anything happens. */
+#foot { position: relative; flex: none; height: 0; overflow: hidden; background: var(--band); color: var(--ink); opacity: 0; visibility: hidden; }
+#foot[data-open="true"] { opacity: 1; visibility: visible; }
+#app.settled #foot { transition: height .15s ease-out, opacity .15s ease-out, visibility 0s linear .15s; }
+#app.settled #foot[data-open="true"] { transition: height .15s ease-out, opacity .15s ease-out, visibility 0s; }
+#band-in { padding: 2px 0; }
+#foot .row { display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 var(--side) 0 calc(var(--side) - 1px); min-width: 0; }
+/* The icon: the status icons span 1 to 15 of their 16 px, so its ink starts on the margin. */
+#foot-mark { position: relative; flex: none; width: 16px; height: 16px; color: var(--ink2); }
+#foot-mark .ic { position: absolute; left: 0; top: 0; }
+#foot-mark[data-tone="safe"] { color: var(--safe-ink); }
+#foot-mark[data-tone="warn"] { color: var(--warn); }
+#foot-mark[data-tone="bad"] { color: var(--bad); }
+#foot-mark[data-kind="spinner"] .ic { animation: turn 1s linear infinite; }
+@keyframes turn { to { transform: rotate(360deg); } }
+
+/* The verdict and its sentence share one line. The sentence gives way first, and goes when under 48 px (app.js); the
+   verdict gives way last, and its tooltip holds the whole. Nothing wraps. */
+#foot-words { flex: 1 1 auto; min-width: 0; display: flex; align-items: baseline; white-space: nowrap; }
+#foot-verdict { flex: 0 0 auto; max-width: 100%; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-weight: 400; color: var(--ink); }
+#foot-sentence { flex: 0 1000 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--ink2); }
+#foot-sentence:not(:empty)::before { content: "\00A0\00B7\00A0"; }
+#foot-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; padding-left: 4px; flex: none; }
+/* The update line is update.js's own; here it takes the band's look: an icon, its words, and Restart as a pill. It
+   shows only when the status row has nothing to say (app.js fitBand). */
+#foot[data-row="status"] #update-line { display: none !important; }
+#foot #update-line { display: flex; margin: 0; min-height: 0; height: 32px; padding: 0 var(--side) 0 calc(var(--side) + 23px); font-size: 12px; line-height: 16px; color: var(--ink); position: relative; gap: 8px; }
+#foot #update-line[hidden] { display: none; }
+#foot #update-line::before { content: ""; position: absolute; left: calc(var(--side) - 1px); top: 8px; width: 16px; height: 16px; background: var(--ink2); -webkit-mask: var(--icon-info) center / 16px 16px no-repeat; }
+#foot #update-line .u-words { flex: 1 1 auto; }
+html #foot #update-line .u-restart, html #foot.green #update-line .u-restart { height: 24px; padding: 0 12px 1px; border-radius: 12px; border: 1px solid var(--edge); background: transparent; color: var(--ink); font-size: 12px; font-weight: 700; margin-left: auto; }
+html #foot #update-line .link { height: 24px; padding: 0 12px 1px; border-radius: 12px; border: 1px solid var(--edge); color: var(--ink); text-decoration: none; font-weight: 700; }
+html #foot.green #update-line { color: var(--ink); }
+
+/* ---- the bar at the bottom, once there are results: the view switch and the count on the left, the writes on the
+   right with the one blue, on the panel's own grey with no line, as Premiere's Project panel has. Short of room the
+   count goes first, whole; under 560 px the buttons take their short words. */
+#bottom { flex: none; display: flex; align-items: center; height: 40px; padding: 0 var(--side) 0 calc(var(--side) - 6px); gap: 8px; background: var(--surface); min-width: 0; }
+#modes { display: flex; gap: 4px; flex: none; }
+#modes .icon { transition: background-color .16s ease-out, color .16s ease-out; }
+#modes .icon.on, #modes .icon.on:hover { color: var(--ink); background: var(--sel); }
+/* The count, whole or not at all: too long for its room, it wraps onto a second line the box hides. */
+#count-box { flex: 1 1 0; min-width: 0; height: 16px; overflow: hidden; display: flex; flex-wrap: wrap; padding-left: 4px; }
+#count-box::before { content: ""; width: 0; height: 16px; }
+#count { flex: none; white-space: nowrap; color: var(--ink2); }
+#bottom-actions { display: flex; align-items: center; gap: 8px; flex: none; }
+.action .short { display: none; }
+@media (max-width: 560px) {
+  #bottom-actions .action .long { display: none; }
+  #bottom-actions .action .short { display: inline; }
 }
 
 /* ---- table */
-#grid { position: relative; flex: 1 1 auto; overflow: auto; background: var(--surface); outline: none; min-height: 0; }
-#grid.tiled { overflow-x: hidden; overflow-y: scroll; }
+/* The panel places every row and tile itself, and keeps the clip at the top through a change of size (app.js), so the
+   browser's own scroll anchoring stays out of it. */
+/* The bar is always there, in the list as in the grid, so the right margin stays 14 px: the 11 px bar sits inside it. */
+#grid { position: relative; flex: 1 1 auto; overflow-x: auto; overflow-y: scroll; overflow-anchor: none; background: var(--surface); outline: none; min-height: 0; user-select: none; }
+#grid.tiled { overflow-x: hidden; }
+/* Drag select (app.js): the rectangle over the clips, drawn by one element's background, a 1 px line in the accent and a
+   fill of it at 12 %, so a move repaints it and lays nothing out. Square corners. While it runs the tiles and rows
+   hear nothing: no hover plate, no tooltip, no scrub. */
+#grid.marqueeing .t, #grid.marqueeing .r { pointer-events: none; }
+#marquee { position: absolute; z-index: 2; pointer-events: none; background-repeat: no-repeat; will-change: transform; }
 #head { position: sticky; top: 0; z-index: 2; display: flex; height: 24px; align-items: flex-end; background: var(--surface); border-bottom: .5px solid var(--line); }
-.h { flex: 0 0 auto; padding: 0 0 6px 10px; font-size: 10.5px; line-height: 13px; letter-spacing: 0; color: var(--ink2); white-space: nowrap; overflow: hidden; user-select: none; }
+.h { flex: 0 0 auto; display: flex; align-items: center; height: 24px; padding: 0 0 0 10px; font-size: 11px; line-height: 14px; letter-spacing: 0; color: var(--ink2); white-space: nowrap; overflow: hidden; user-select: none; }
+.h.num { justify-content: flex-end; }
 .h:first-child, .c:first-child { padding-left: var(--side); }
-.h:last-child, .c:last-child { padding-right: var(--side); }
+.h:last-child, .c:last-child { padding-right: 3px; }
 .h.grow, .c.grow { flex: 1 0 auto; }
-.h.num { text-align: right; }
 .h.sorted { color: var(--ink); }
-.h .mark { display: inline-block; margin-left: 3px; font-size: 9px; color: var(--ink2); }
-.h.num .mark { margin: 0 3px 0 0; }
-.h .mark::before { content: ""; display: inline-block; vertical-align: 1px; border-left: 3px solid transparent; border-right: 3px solid transparent; }
-.h .mark.asc::before { border-bottom: 4px solid var(--ink2); }
-.h .mark.desc::before { border-top: 4px solid var(--ink2); }
+/* The sort's mark: the set's chevron, up or down, close to the words. */
+.h .mark { display: inline-flex; align-items: center; flex: none; height: 16px; margin: 0 -4px 0 -2px; font-size: 9px; color: var(--ink2); }
+.h.num .mark { margin: 0 -2px 0 -4px; }
+.h .mark::before { content: ""; display: block; width: 16px; height: 16px; background: currentColor; -webkit-mask: var(--icon-chevron) center / 16px 16px no-repeat; }
+.h .mark.asc::before { -webkit-mask-image: var(--icon-chevron-up); }
+/* A header dragged to another place: it lifts as a pill, its cell goes blank, its column steps back, and a line marks
+   where it lands. */
+.h.from { color: transparent !important; }
+.h.from .mark { visibility: hidden; }
+.c.moving { opacity: .3; }
+.lifted { position: absolute; z-index: 5; height: 20px; padding: 3px 8px 0; border-radius: 4px; background: var(--disc); color: var(--ink); font-size: 11px; line-height: 14px; letter-spacing: 0; white-space: nowrap;
+  opacity: .92; box-shadow: var(--shadow), 0 0 0 .5px var(--line); pointer-events: none; }
+.drop { position: absolute; z-index: 4; width: 2px; height: 16px; margin-left: -1px; border-radius: 1px; background: var(--ink); pointer-events: none; }
 
 #body { position: relative; }
 .r { position: absolute; left: 0; top: 0; display: flex; width: 100%; height: var(--row); will-change: transform; contain: strict; user-select: none; cursor: default; color: var(--ink); }
 .r.pending { color: var(--ink2); }
 /* The fill sits inside the row, rounded like everything else, so a selection never touches the panel's edge. */
-.r::before { content: ""; position: absolute; left: 8px; right: 8px; top: 1px; bottom: 1px; border-radius: 7px; z-index: -1; }
+.r::before { content: ""; position: absolute; left: 8px; right: 0; top: 1px; bottom: 1px; border-radius: 4px; z-index: -1; }
 .r:hover::before { background: var(--plate); }
 .r.sel::before { background: var(--plate-sel); }
 .c { flex: 0 0 auto; padding: 0 0 0 10px; line-height: var(--row); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 12px; }
@@ -191,15 +311,16 @@ button:focus-visible, input:focus-visible, #grid:focus-visible { outline: 1.5px 
 .c.pal i:first-child, .t .p i:first-child { border-radius: 3px 0 0 3px; }
 .c.pal i:nth-child(5), .t .p i:nth-child(5) { border-radius: 0 3px 3px 0; }
 .r .c-name .hit, .t .f.hit { color: var(--ink); }
-.c-createdAt, .h[data-key="createdAt"] { padding-left: 20px; }     /* words after a right-aligned figure need more air */
+/* Words after a right-aligned figure need more air, whatever order the columns were dragged into. */
+.c.air, .h.air { padding-left: 20px; }
 /* One place for the eye: while a sort is on, its column keeps ink and the other figures step back. */
 #body.sorting .c.num { color: var(--ink2); }
-#body.sorting .c.num.by { color: var(--ink); font-weight: 600; }
-.c-name { font-size: 13px; }
+#body.sorting .c.num.by { color: var(--ink); font-weight: 700; }
+.c-name { font-size: 12px; }
 .c-name .why { display: none; }
-.r.two .c-name { display: flex; flex-direction: column; justify-content: center; line-height: 15px; }
+.r.two .c-name { display: flex; flex-direction: column; justify-content: center; line-height: 16px; }
 .r.two .c-name .n, .r.two .c-name .why { overflow: hidden; text-overflow: ellipsis; }
-.r.two .c-name .why { display: block; font-size: 12px; color: var(--ink2); }
+.r.two .c-name .why { display: block; color: var(--ink2); }
 .c-thumb { display: flex; align-items: center; }
 .c-thumb img { display: block; width: 56px; height: 32px; object-fit: cover; border-radius: 4px; outline: .5px solid var(--line); outline-offset: -.5px; }  /* a pale picture keeps its edge */
 .c-thumb::before { content: ""; position: absolute; left: var(--side); top: 4px; width: 56px; height: 32px; border-radius: 4px; background: var(--track); }
@@ -207,124 +328,108 @@ button:focus-visible, input:focus-visible, #grid:focus-visible { outline: 1.5px 
 /* A picture fades in the first time it arrives during a scan. Scrolled back into view, it is simply there. */
 img.arrive { animation: arrive .45s ease-out; }
 @keyframes arrive { from { opacity: 0; } }
-#empty { position: absolute; left: 0; right: 0; top: 72px; text-align: center; color: var(--ink2); font-size: 12px; padding: 0 20px; }
+#empty { position: absolute; left: 0; right: 0; top: 72px; display: flex; flex-direction: column; align-items: center; gap: 12px; text-align: center; color: var(--ink2); padding: 0 20px; }
 
 /* ---- grid: a contact sheet. The pictures do the talking, and everything else stays out of their way. */
-#tiles { position: relative; }
+/* Every tile takes its size from two variables the grid sets (app.js sizeTiles): a new size is one change of style. The
+   20 px under the picture is TILE_CAPTION in app.js. */
+#tiles { position: relative; --tw: 130px; --ph: 73px; }
 /* A tile is picked up, not outlined: a soft plate under the picture and its name, nothing more. */
-.t { position: absolute; left: 0; top: 0; will-change: transform; contain: layout size style; user-select: none; cursor: default; }
-.t::before { content: ""; position: absolute; left: -5px; right: -5px; top: -5px; bottom: -4px; border-radius: 10px; z-index: -1; transition: background-color .14s ease-out; }
+.t { position: absolute; left: 0; top: 0; width: var(--tw); height: calc(var(--ph) + 20px); will-change: transform; contain: layout size style; user-select: none; cursor: default; }
+.t::before { content: ""; position: absolute; left: -4px; right: -4px; top: -4px; bottom: -4px; border-radius: 8px; z-index: -1; transition: background-color .14s ease-out; }
 .t:hover::before { background: var(--plate); }
 .t.sel::before { background: var(--plate-sel); }
-.t.sel .n { font-weight: 600; }
-.t .pic { position: relative; width: 100%; border-radius: 5px; overflow: hidden; background: var(--track); box-shadow: 0 0 0 .5px var(--line); }
+.t .pic { position: relative; width: 100%; height: var(--ph); border-radius: 4px; overflow: hidden; background: var(--track); box-shadow: 0 0 0 .5px var(--line); }
 .t .pic img { display: block; width: 100%; height: 100%; object-fit: cover; }
-.t .cap { display: flex; align-items: center; gap: 6px; height: 16px; margin-top: 5px; font-size: 12px; white-space: nowrap; color: var(--ink); }
+.t .cap { display: flex; align-items: center; gap: 8px; height: 16px; margin-top: 4px; font-size: 12px; white-space: nowrap; color: var(--ink); }
 .t .n { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .t .f { flex: 0 0 auto; max-width: 62%; margin-left: auto; overflow: hidden; text-overflow: ellipsis; color: var(--ink2); }   /* the name gives way first */
 .t .p { flex: 0 0 auto; display: flex; gap: 1px; width: 44px; margin-left: auto; }
 .t.pending .n { color: var(--ink2); }
-.gh { position: absolute; left: var(--side); right: var(--side); height: 24px; text-overflow: ellipsis; padding-top: 8px; font-size: 10.5px; line-height: 14px; letter-spacing: 0; color: var(--ink2); white-space: nowrap; overflow: hidden; }
+/* Hover scrub: the clip's frames over its picture, same crop, and a thin line under it, filled to the pointer. */
+.t .scrub { position: absolute; left: 0; top: 0; width: 100%; height: 100%; background-repeat: no-repeat; }
+.t .pos { position: absolute; left: 0; right: 0; top: calc(var(--ph) + 2px); height: 2px; border-radius: 1px; background: var(--ring); overflow: hidden; pointer-events: none; }
+.t .pos i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 1px; background: var(--ink); }
+.gh { position: absolute; left: var(--side); right: var(--side); height: 24px; text-overflow: ellipsis; padding-top: 8px; font-size: 11px; line-height: 14px; letter-spacing: 0; color: var(--ink2); white-space: nowrap; overflow: hidden; }
 
 ::-webkit-scrollbar { width: 11px; height: 11px; }
 ::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--ring); background-clip: padding-box; border: 3px solid transparent; border-radius: 6px; }
 
-/* ---- the status: Ingest's foot, moved under the questions. One line in every state, its words change in place, and only
-   something proved fills it green. It tucks away while the clips scroll and comes back on the way up or when anything
-   happens. */
-#foot { position: relative; flex: none; margin: 0 10px 8px; padding: 6px 6px 6px 10px; border-radius: 9px; background: var(--surface); color: var(--ink); box-shadow: inset 0 0 0 1px var(--line);
-  max-height: 320px; overflow: hidden; transition: background-color .24s ease-in-out, max-height .28s cubic-bezier(.2, .8, .2, 1), margin .28s cubic-bezier(.2, .8, .2, 1), padding .28s cubic-bezier(.2, .8, .2, 1), opacity .2s ease-out; }
-#foot.tucked { max-height: 0; margin-bottom: 0; padding-top: 0; padding-bottom: 0; opacity: 0; }
-#foot.green { background: var(--safe); color: #fff; box-shadow: none; }
-#foot-top { display: flex; align-items: center; min-height: 26px; gap: 8px; }
-#foot-mark { position: relative; flex: none; width: 14px; height: 14px; }
-#foot-mark svg { position: absolute; left: 0; top: 0; width: 14px; height: 14px; display: none; overflow: visible; }
-#foot-mark[data-kind="waiting"] .m-ring,
-#foot-mark[data-kind="running"] .m-ring { display: block; }
-#foot-mark[data-kind="running"] .m-arc { display: block; animation: turn .8s linear infinite; }
-#foot-mark[data-kind="done"] .m-disc { display: block; }
-#foot-mark[data-kind="seal"] .m-seal { display: block; left: -1px; top: -1px; width: 16px; height: 16px; }
-#foot-mark[data-kind="look"] .m-look { display: block; }
-#foot-mark[data-kind="skipped"] .m-skip { display: block; }
-#foot-mark[data-kind="failed"] .m-fail { display: block; }
-.m-ring circle { fill: none; stroke: var(--ring); stroke-width: 1.4; }
-.m-arc circle { fill: none; stroke: var(--ink); stroke-width: 1.4; stroke-linecap: round; stroke-dasharray: 11 40; }
-.m-arc { transform-origin: 50% 50%; }
-.m-disc circle { fill: var(--disc); }
-.m-disc path { fill: none; stroke: var(--tick); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
-.m-seal path { fill: #fff; }
-.m-seal .tick { fill: none; stroke: var(--safe); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
-.m-look path { fill: var(--ink); stroke: var(--ink); stroke-width: 1; stroke-linejoin: round; }
-.m-look .stroke { fill: none; stroke: var(--surface); stroke-width: 1.4; stroke-linecap: round; }
-.m-skip circle, .m-skip path { fill: none; stroke: var(--ink2); stroke-width: 1.4; stroke-linecap: round; }
-.m-fail path { fill: var(--bad); stroke: none; }
-.m-fail .stroke { fill: none; stroke: var(--surface); stroke-width: 1.6; stroke-linecap: round; }
-@keyframes turn { to { transform: rotate(360deg); } }
-
-/* The verdict and its sentence share one line; the sentence gives way first. */
-/* A short sentence shares the verdict's line; a long one (a failure, a partial write) wraps under it, never cut. */
-#foot-words { flex: 1 1 auto; min-width: 0; display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 7px; }
-#foot-verdict { flex: 0 0 auto; max-width: 100%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 600; letter-spacing: -.12px; }
-#foot-sentence { flex: 0 1 auto; min-width: 0; font-size: 12px; line-height: 16px; color: var(--ink2); }
-#foot.green #foot-sentence { color: rgba(255, 255, 255, .86); }
-#foot-actions { display: flex; align-items: center; gap: 5px; margin-left: auto; padding-left: 8px; flex: none; }
-#foot-actions .action { height: 24px; padding: 0 10px; font-size: 12px; border-radius: 6px; }
-#foot-close { width: 22px; height: 22px; margin-left: 2px; }
-#foot.green #foot-close svg { stroke: #fff; }
-#status-unread, #status-note { font-size: 12px; line-height: 16px; padding: 2px 0 2px 22px; color: var(--ink2); }
-#status-note.warn { color: var(--ink); }
-#status-note.bad { color: var(--bad); }
-#foot.green #status-note, #foot.green #status-unread { color: #fff; }
-
-/* ---- the menu hanging from its button */
-#picker { position: absolute; z-index: 8; min-width: 236px; max-height: calc(100% - 60px); overflow: auto; padding: 5px; border-radius: 10px; background: var(--surface); box-shadow: var(--shadow), 0 0 0 .5px var(--line); animation: drop .14s cubic-bezier(.2, .8, .2, 1); transform-origin: top left; }
-#picker .title { padding: 5px 9px 4px 22px; font-size: 11px; line-height: 14px; color: var(--ink2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 320px; }
-#picker button { display: flex; align-items: center; justify-content: space-between; gap: 18px; width: 100%; height: 24px; padding: 0 9px 0 22px; text-align: left; border-radius: 5px; color: var(--ink); white-space: nowrap; position: relative; }
-#picker button.on { font-weight: 600; }
-#picker button.on::before { content: ""; position: absolute; left: 8px; top: 8px; width: 7px; height: 4px; border-left: 1.5px solid var(--ink); border-bottom: 1.5px solid var(--ink); transform: rotate(-45deg); }
-#picker button span { color: var(--ink2); font-weight: 400; font-size: 12px; }
+/* ---- the menus: the ··· menu, Show and Sort, the right-click menu and the suggestions share one look: 4 px padding,
+   24 px items on a 4 px plate, 8 px corners, the shadow and a hairline, an 11 px quiet title. */
+#picker { position: absolute; z-index: 8; min-width: 236px; max-height: calc(100% - 60px); overflow: auto; padding: 4px; border-radius: 8px; background: var(--surface); box-shadow: var(--shadow), 0 0 0 .5px var(--line); }
+#picker .title { padding: 4px 8px 4px 24px; font-size: 11px; line-height: 16px; color: var(--ink2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 320px; }
+#picker button { display: flex; align-items: center; justify-content: space-between; gap: 16px; width: 100%; height: 24px; padding: 0 8px 0 24px; text-align: left; border-radius: 4px; color: var(--ink); white-space: nowrap; position: relative; }
+#picker button.on { font-weight: 700; }
+/* The one that is on: the set's tick, in the gutter before the words. */
+#picker button.on::before { content: ""; position: absolute; left: 4px; top: 4px; width: 16px; height: 16px; background: var(--ink); -webkit-mask: var(--icon-check) center / 16px 16px no-repeat; }
+#picker button span { color: var(--ink2); font-weight: 400; }
 #picker button:hover, #picker button:focus-visible { background: var(--disc); outline: none; }
-#picker hr { margin: 4px 9px; border: 0; border-top: .5px solid var(--line); }
-@keyframes drop { from { opacity: 0; transform: translateY(-4px) scale(.98); } }
-#menu { position: absolute; top: 38px; animation: drop .14s cubic-bezier(.2, .8, .2, 1); transform-origin: top right; right: var(--side); z-index: 8; min-width: 176px; padding: 5px; border-radius: 9px; background: var(--surface); box-shadow: var(--shadow), 0 0 0 .5px var(--line); }
-#menu button { display: block; width: 100%; height: 24px; padding: 0 9px; text-align: left; border-radius: 5px; color: var(--ink); white-space: nowrap; }
+#picker hr { margin: 4px 8px; border: 0; border-top: .5px solid var(--line); }
+/* Menus appear whole, in place and at full strength, on their first frame, and go at once, as Premiere's own do: a fade
+   from nothing gave a blank first frame, then the menu's words over the clips'. Nothing slides or grows. Sheets fade in
+   over 100 ms. */
+#menu { position: absolute; top: 36px; right: calc(var(--side) - 6px); z-index: 8; min-width: 176px; padding: 4px; border-radius: 8px; background: var(--surface); box-shadow: var(--shadow), 0 0 0 .5px var(--line); }
+#menu button { display: block; width: 100%; height: 24px; padding: 0 8px; text-align: left; border-radius: 4px; color: var(--ink); white-space: nowrap; }
 #menu button:hover:not(:disabled), #menu button:focus-visible { background: var(--disc); outline: none; }
 #menu button:disabled { color: var(--ink2); }
-#menu hr { margin: 5px 9px; border: 0; border-top: .5px solid var(--line); }
+#menu hr { margin: 4px 8px; border: 0; border-top: .5px solid var(--line); }
+/* The project's name on top, in the quiet title style the Show menu uses. */
+#menu .title { padding: 4px 8px; font-size: 11px; line-height: 16px; color: var(--ink2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 240px; }
+/* update.js's tick for Check Automatically, drawn as the set's tick. */
+html #menu button[data-update="auto"]::after { width: 16px; height: 16px; margin: 0 -4px 0 0; border: 0; transform: none; background: var(--ink); -webkit-mask: var(--icon-check) center / 16px 16px no-repeat; }
 
-/* ---- sheets */
-#modal { position: fixed; left: 0; right: 0; top: 0; bottom: 0; z-index: 10; background: var(--scrim); display: flex; align-items: center; justify-content: center; padding: 20px; animation: fade .16s ease-out; }
-#dialog { background: var(--surface); border-radius: 14px; width: 420px; max-width: 100%; max-height: 100%; display: flex; flex-direction: column; overflow: hidden; box-shadow: var(--shadow); animation: rise .2s ease-out; }
-#dialog-main { padding: 14px var(--side) 12px; overflow: auto; min-height: 0; }
-#dialog h1 { font-size: 15px; line-height: 20px; font-weight: 600; letter-spacing: -.18px; margin-bottom: 8px; }
-#dialog-body { line-height: 18px; }
+/* ---- right-click menu: the ··· menu's look, at the pointer; Label opens two columns of 8, Premiere's order down each. */
+.ctx { position: absolute; z-index: 9; min-width: 200px; max-width: 300px; max-height: calc(100% - 12px); overflow: auto; padding: 4px; border-radius: 8px;
+  background: var(--surface); box-shadow: var(--shadow), 0 0 0 .5px var(--line); }
+.ctx button { display: flex; align-items: center; gap: 8px; width: 100%; height: 24px; padding: 0 4px 0 8px; border-radius: 4px; text-align: left; color: var(--ink); white-space: nowrap; }
+.ctx button:hover:not(:disabled), .ctx button:focus-visible, .ctx button.hot, .ctx button[aria-expanded="true"] { background: var(--disc); outline: none; }
+.ctx button:disabled { color: var(--ink2); }
+.ctx button .sub { margin-left: auto; flex: none; width: 16px; height: 16px; color: var(--ink2); }
+.ctx hr { margin: 4px 8px; border: 0; border-top: .5px solid var(--line); }
+.ctx .sw { flex: none; width: 10px; height: 10px; border-radius: 50%; box-shadow: inset 0 0 0 .5px rgba(0, 0, 0, .28); }
+.ctx.labels { min-width: 0; }
+.ctx.labels.two { display: grid; grid-template-columns: auto auto; grid-template-rows: repeat(8, 24px); grid-auto-flow: column; column-gap: 4px; }
+.ctx.labels.two button { padding-right: 16px; }
+
+/* ---- sheets: a question, the name, and its buttons, the same pills as everywhere: an outline, and one blue. */
+#modal { position: fixed; left: 0; right: 0; top: 0; bottom: 0; z-index: 10; background: var(--scrim); display: flex; align-items: center; justify-content: center; padding: 20px; animation: fade .1s ease-out; }
+#dialog { background: var(--surface); border-radius: 8px; width: 420px; max-width: 100%; max-height: 100%; display: flex; flex-direction: column; overflow: hidden; box-shadow: var(--shadow), 0 0 0 .5px var(--line); animation: fade .1s ease-out; }
+#dialog-main { padding: 16px var(--side) 12px; overflow: auto; min-height: 0; }
+#dialog h1 { font-size: 14px; line-height: 20px; font-weight: 700; margin-bottom: 8px; }
+#dialog-body { line-height: 16px; }
 #dialog-body p { margin: 0 0 8px; }
 #dialog-body p:last-child { margin-bottom: 0; }
-#dialog-body b { font-weight: 600; }
-#dialog-body .quiet { color: var(--ink2); font-size: 12px; line-height: 16px; }
-#dialog-body .warn { color: var(--ink); font-size: 12px; line-height: 16px; }
+#dialog-body .quiet { color: var(--ink2); }
+#dialog-body .warn { color: var(--ink); }
 #dialog-body ul { list-style: none; margin: 0 0 8px; padding: 0; }
-#dialog-body li { display: flex; justify-content: space-between; gap: 12px; height: 22px; line-height: 22px; font-size: 13px; }
+#dialog-body li { display: flex; justify-content: space-between; gap: 12px; height: 24px; line-height: 24px; }
 #dialog-body li span:last-child { color: var(--ink2); }
-#dialog-body ul.fails li { display: block; height: auto; line-height: 16px; font-size: 12px; margin-bottom: 3px; color: var(--ink2); }
-#dialog-buttons { display: flex; justify-content: flex-end; gap: 6px; padding: 12px var(--side); background: var(--foot); border-top: .5px solid var(--line); flex: none; }
-.swatches { display: grid; grid-template-columns: repeat(8, 22px); gap: 6px 8px; margin: 2px 0 10px; }
-.swatches button { width: 22px; height: 22px; border-radius: 50%; display: flex; align-items: center; justify-content: center; }
+#dialog-body ul.fails li { display: block; height: auto; line-height: 16px; margin-bottom: 4px; color: var(--ink2); }
+#dialog-buttons { display: flex; justify-content: flex-end; gap: 8px; padding: 4px var(--side) 16px; flex: none; }
+.swatches { display: grid; grid-template-columns: repeat(8, 24px); gap: 4px 8px; margin: 0 0 12px; }
+.swatches button { width: 24px; height: 24px; border-radius: 50%; display: flex; align-items: center; justify-content: center; }
 .swatches button i { display: block; width: 14px; height: 14px; border-radius: 50%; }
-.swatches button.on { box-shadow: 0 0 0 1.4px var(--ink2); }
+.swatches button.on { box-shadow: 0 0 0 1.5px var(--ink2); }
+/* A choice drawn with the set: a ring, and the ring with a tick when on. */
 .col-list { display: grid; grid-template-columns: 1fr 1fr; gap: 0 16px; margin: 0; }
-.col-list button { display: flex; align-items: center; gap: 8px; height: 26px; text-align: left; }
-.col-list button::before { content: ""; width: 14px; height: 14px; border-radius: 50%; border: 1.4px solid var(--ring); flex: none; }
-.col-list button.on::before { border: 0; background-color: var(--disc); background-size: 14px 14px; background-image: var(--tick-image); }
-:root { --tick-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 14 14'%3E%3Cpath d='M4.1 7.3l2 2 3.8-4.4' fill='none' stroke='%233A3A3C' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"); }
-:root[data-theme="dark"] { --tick-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 14 14'%3E%3Cpath d='M4.1 7.3l2 2 3.8-4.4' fill='none' stroke='%23EDEDEE' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"); }
+.col-list button, .choice button { display: flex; align-items: center; gap: 8px; height: 24px; text-align: left; color: var(--ink); }
+.col-list button::before, .choice button::before { content: ""; width: 16px; height: 16px; flex: none; background: var(--ring); -webkit-mask: var(--icon-ring) center / 16px 16px no-repeat; }
+.col-list button.on::before, .choice button.on::before { background: var(--ink); -webkit-mask-image: var(--icon-check-circle); }
+/* A name to keep or change, selected so typing replaces it. */
+.field { display: flex; align-items: center; height: 24px; margin: 0 0 8px; padding: 0 8px; border-radius: 4px; background: var(--foot); box-shadow: inset 0 0 0 1px var(--line); }
+.field:focus-within { box-shadow: inset 0 0 0 1px var(--focus-ring); }
+.field input { flex: 1 1 auto; min-width: 0; height: 16px; line-height: 16px; padding: 0; border: 0; background: none; color: var(--ink); font: inherit; font-weight: 700; outline: none; user-select: text; }
+.field input::selection { background: rgba(47, 111, 230, .42); }
+/* One choice in a sheet, as the Columns sheet draws it. Its count on the right. */
+.choice { margin: 0 0 4px; }
+.choice button { width: 100%; }
+.choice button span { margin-left: auto; color: var(--ink2); }
 @keyframes fade { from { opacity: 0; } }
-@keyframes rise { from { transform: translateY(6px) scale(.985); opacity: 0; } }
 
 /* Marks stay legible and still; nothing slides. */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
-  .action:active:not(:disabled) { transform: none; }
-  #foot-mark[data-kind="running"] .m-arc { transform: rotate(-90deg); }
+  #foot-mark[data-kind="spinner"] .ic { transform: rotate(-90deg); }
 }

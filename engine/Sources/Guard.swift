@@ -8,6 +8,10 @@ import Foundation
 let tier0Deadline = testDeadline ?? 20
 let tier1Deadline = testDeadline ?? 30
 let tier2Deadline = testDeadline ?? 45
+/// A strip is for a person hovering over a picture: past this, from the process starting, it's given up on.
+let stripDeadline = testDeadline ?? 1.5
+/// Revealing files waits on the Finder: past this, from the process starting, the answer is that it took too long.
+let revealDeadline = testDeadline ?? 3
 private let testDeadline = ProcessInfo.processInfo.environment["ENGINE_TEST_DEADLINE"].flatMap(Double.init)
 
 /// Set only by engine/tests/contract.sh: a clip whose path contains "hang" stops at the named stage, as a stuck framework would.
@@ -24,7 +28,8 @@ func runGuarded(_ threads: Int, items: Int, stack: Int, deadline: Double,
                 body: @escaping (_ item: Int, _ slot: Int, _ claim: () -> Bool) -> Void,
                 late: @escaping (_ item: Int) -> Void,
                 skipped: @escaping (_ item: Int) -> Void,
-                cancel: @escaping (_ slot: Int) -> Void = { _ in }) {
+                cancel: @escaping (_ slot: Int) -> Void = { _ in },
+                qos: QualityOfService = .userInitiated) {
     guard items > 0 else { return }
     let spares = 64
     let lock = NSCondition()
@@ -74,7 +79,7 @@ func runGuarded(_ threads: Int, items: Int, stack: Int, deadline: Double,
                 lock.unlock()
             }
         }
-        t.qualityOfService = .userInitiated
+        t.qualityOfService = qos
         t.stackSize = stack
         t.start()
     }

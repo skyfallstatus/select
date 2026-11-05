@@ -66,7 +66,13 @@ struct Tier0Result {
     let plan: ClipPlan
     let size: Int64
     let mtime: Double
+    /// How a Tier 0 reading of revision 1, which knew only the XML beside the clip, decided the colour. When it differs from
+    /// `plan.color`, the cached Tier 1 and Tier 2 were worked out on another picture.
+    var colorBefore: ColorPlan?
 }
+
+/// What Tiers 1 and 2 take from a Tier 0 reading: a result worked out with another of these is worked out again.
+func samePicture(_ a: ColorPlan, _ b: ColorPlan) -> Bool { a.convert == b.convert && a.sLog3 == b.sLog3 }
 
 /// A larger keyframe than this means a corrupt table: 8K ProRes 4444 XQ is about 30 MB.
 let maxSampleBytes = 1 << 28
@@ -76,7 +82,7 @@ let audioWindowCount = 15
 let audioWindowSeconds = 0.2
 
 /// Reads rotation from the signs, so a matrix that also scales still counts.
-private func rotationOf(_ m: (Int32, Int32, Int32, Int32)) -> Int {
+func rotationOf(_ m: (Int32, Int32, Int32, Int32)) -> Int {
     let (a, b, c, d) = m
     if a == 0, d == 0 {
         if b > 0, c < 0 { return 90 }
@@ -253,6 +259,12 @@ private let soundBudgetBytes = 32 << 20
 /// Some cameras store a packet or two per chunk, and each chunk is its own read.
 private let soundMaxReads = 48
 
+/// Video between two runs of AAC packets shorter than this is read through rather than skipped with a second read.
+let levelReadGap: Int64 = 64 << 10
+/// The most reads a track's level windows take, as the sound plan caps its own. Without a cap, a camera that puts a video frame
+/// between every two packets takes 90, and the worst case is 180.
+let levelMaxReads = 48
+
 /// From the sample description, because the track's timescale isn't always the sample rate.
 private func sampleRate(_ t: Track) -> Double {
     let fixed = Double(t.stsdEntry.u32(24)) / 65536
@@ -379,22 +391,65 @@ private func audioPlan(_ t: Track) -> AudioPlan? {
 
     if t.format == fourCC("mp4a"), let esds = findESDS(t) {
         let channels = channelCount(t) ?? 1
-        var windows: [AudioWindow] = []
-        for time in windowTimes(0.2) {
+        var chosen: [(run: Int, packets: [(offset: Int64, size: Int)])] = []
+        for (run, time) in windowTimes(0.2).enumerated() {
             let sample = t.sampleAt(mediaTime: UInt64(time * Double(t.timescale)))
-            // Web muxers put one or two packets in a chunk, so walk samples rather than chunks.
-            // The read spans any video interleaved between them, capped so a window stays cheap.
-            guard let off = t.sampleOffset(sample) else { continue }
-            var packets: [(at: Int, size: Int)] = []
-            var end = 0
+            // Web muxers put one or two packets in a chunk, so walk samples rather than chunks: up to 12 packets, all within
+            // 2 MB of the first.
+            guard let first = t.sampleOffset(sample) else { continue }
+            var packets: [(offset: Int64, size: Int)] = []
             for s in sample..<min(sample + 12, t.sampleCount) {
                 guard let o = t.sampleOffset(s) else { break }
-                let at = Int(o - off), size = t.sampleSize(s)
+                let at = Int(o - first), size = t.sampleSize(s)
                 guard at >= 0, at + size <= 1 << 21 else { break }
-                packets.append((at, size))
-                end = at + size
+                packets.append((o, size))
             }
-            if packets.count >= 4 { windows.append(AudioWindow(offset: off, bytes: end, packets: packets)) }
+            if packets.count >= 4 { chosen.append((run, packets)) }
+        }
+        // Cameras put video between the packets, so each run of packets is read on its own and the video is skipped. A small
+        // gap costs less to read through than a second read. A track takes at most `levelMaxReads` reads, so past that the
+        // smallest stretches of video are read through. The pieces of one window are joined again before decoding, so the
+        // decoder sees exactly what one long read gave it, and the level is the same whichever way it was read.
+        func gap(_ w: Int, _ k: Int) -> Int64? {
+            let a = chosen[w].packets[k - 1], b = chosen[w].packets[k]
+            let end = a.offset + Int64(a.size)
+            return b.offset >= end ? b.offset - end : nil
+        }
+        var split = chosen.map { w in [Bool](repeating: false, count: w.packets.count) }
+        var throughable: [(w: Int, k: Int, bytes: Int64)] = []
+        for w in chosen.indices {
+            for k in 1..<chosen[w].packets.count {
+                guard let g = gap(w, k) else {
+                    split[w][k] = true                  // packets out of order: always a read of their own
+                    continue
+                }
+                if g > levelReadGap {
+                    split[w][k] = true
+                    throughable.append((w, k, g))
+                }
+            }
+        }
+        var reads = chosen.count + split.reduce(0) { $0 + $1.filter { $0 }.count }
+        for g in throughable.sorted(by: { $0.bytes < $1.bytes }) where reads > levelMaxReads {
+            split[g.w][g.k] = false
+            reads -= 1
+        }
+        var windows: [AudioWindow] = []
+        for (w, window) in chosen.enumerated() {
+            var i = 0
+            while i < window.packets.count {
+                let start = window.packets[i].offset
+                var end = start + Int64(window.packets[i].size)
+                var packets = [(at: 0, size: window.packets[i].size)]
+                var j = i + 1
+                while j < window.packets.count, !split[w][j] {
+                    packets.append((Int(window.packets[j].offset - start), window.packets[j].size))
+                    end = window.packets[j].offset + Int64(window.packets[j].size)
+                    j += 1
+                }
+                windows.append(AudioWindow(offset: start, bytes: Int(end - start), packets: packets, run: window.run))
+                i = j
+            }
         }
         return windows.isEmpty ? nil : AudioPlan(kind: .aac(esds: esds, channels: channels), windows: windows, rate: sampleRate(t))
     }
@@ -434,13 +489,13 @@ func tier0(path: String) throws -> Tier0Result {
     let channels = audios.compactMap(channelCount).reduce(0, +)
 
     var meta = embeddedMetadata(m)
-    let side = readSidecar(clipPath: path)
+    // Sony's XML beside the clip, or, for a clip copied without it, the copy Sony keeps inside the file.
+    let beside = readSidecar(clipPath: path)
+    let side = beside ?? m.outerMeta.flatMap(embeddedSidecar)
     meta.timecode = side?.timecode ?? trackTimecode(m, f)
     meta.gamma = side?.gamma ?? transferGamma(v)
-    meta.lens = side?.lens ?? meta.lens
-    meta.make = side?.make ?? meta.make
-    meta.model = side?.model ?? meta.model
-    meta.created = side?.created.flatMap(isoDate) ?? meta.created
+    applySidecar(side, to: &meta)
+    preferNameDate(&meta, name: (path as NSString).lastPathComponent)
 
     var plan = ClipPlan()
     plan.durationS = duration
@@ -470,14 +525,16 @@ func tier0(path: String) throws -> Tier0Result {
     plan.audio = heard.compactMap(audioPlan)
     plan.sound = heard.compactMap(soundPlan)
     plan.rtmd = rtmdPlan(m)
-    plan.color = colorPlan(gamma: meta.gamma, primaries: side?.primaries, rtmd: plan.rtmd.flatMap { rtmdColor($0, file: f) })
+    let rtmdColour = plan.rtmd.flatMap { rtmdColor($0, file: f) }
+    plan.color = colorPlan(gamma: meta.gamma, primaries: side?.primaries, rtmd: rtmdColour)
+    let before = colorPlan(gamma: beside?.gamma ?? transferGamma(v), primaries: beside?.primaries, rtmd: rtmdColour)
 
     let mbps = duration > 0 ? Double(f.size) * 8 / duration / 1e6 : nil
     let fields = tier0Fields(path: path, size: f.size, duration: duration, fps: fps, w: w, h: h, rotation: rotation,
                              info: info, allIntra: allIntra, mbps: mbps, hasAudio: !audios.isEmpty,
                              channels: channels > 0 ? channels : nil, meta: meta, keyframe: keyframe, motion: motion,
                              colorNote: plan.color.note)
-    return Tier0Result(fields: fields, plan: plan, size: f.size, mtime: f.mtime)
+    return Tier0Result(fields: fields, plan: plan, size: f.size, mtime: f.mtime, colorBefore: before)
 }
 
 func tier0Fields(path: String, size: Int64, duration: Double, fps: Double?, w: Int, h: Int, rotation: Int, info: CodecInfo,
@@ -499,9 +556,11 @@ func tier0Fields(path: String, size: Int64, duration: Double, fps: Double?, w: I
     out.add("hasAudio", hasAudio)
     out.add("audioChannels", channels)
     out.add("createdAt", meta.created)
+    out.add("dateSource", meta.created == nil ? nil : meta.createdSource?.rawValue)
+    out.add("dateOnly", meta.dateOnly)
+    out.add("containerDate", meta.containerDate)
     out.add("timecode", meta.timecode)
-    let camera = [meta.make, meta.model].compactMap { $0 }.joined(separator: " ")
-    out.add("camera", camera.isEmpty ? nil : camera)
+    out.add("camera", cameraName(make: meta.make, model: meta.model))
     out.add("lens", meta.lens)
     out.add("gamma", meta.gamma)
     out.add("isLog", meta.gamma.map { $0.lowercased().contains("log") })

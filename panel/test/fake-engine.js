@@ -8,6 +8,11 @@
 //   FAKE_REPLAY    a real engine's JSON Lines file: replayed as they are, paced by FAKE_DELAY_MS
 //   FAKE_TIER2     off: stop after Tier 1, as an older engine would   fail: every 40th clip fails Tier 2, one way or the other
 //                  crash: exit 4 half way through Tier 2   nogroups: no groups line
+//   --cached-only  every clip comes from the cache, except those whose path contains "uncached" (an uncached line, tier 0),
+//                  "changed" (the same, changed: true) or "partial" (tiers 0 and 1, then an uncached line for tier 2)
+//   strip          one strip line; FAKE_STRIP=fail gives an error line instead, and a path containing "slowstrip" waits 2 s
+//                  first. The strip's file is FAKE_THUMBS/<index>.png when FAKE_THUMBS is set, or FAKE_STRIPS/<fixture
+//                  index>.jpg when FAKE_STRIPS is
 'use strict';
 const fs = require('fs');
 const path = require('path');
@@ -15,9 +20,27 @@ const crypto = require('crypto');
 
 const args = process.argv.slice(2);
 if (args[0] === 'version') { console.log('0.0.0-fake'); process.exit(0); }
+if (args[0] === 'strip') {
+  const at = k => (args.includes(k) ? args[args.indexOf(k) + 1] : null);
+  const p = at('--path'), frames = Number(at('--frames') || 14), width = Number(at('--width') || 384);
+  if (!p) { console.error('usage: strip --path <clip>'); process.exit(2); }
+  const out = o => { process.stdout.write(JSON.stringify(o) + '\n', () => process.exit(0)); };
+  const go = () => {
+    if (process.env.FAKE_STRIP === 'fail') { return out({ type: 'error', path: p, message: 'Making this strip took too long.', ms: 1500 }); }
+    const n = crypto.createHash('sha1').update(p).digest().readUInt32LE(0) % 20;
+    const times = Array.from({ length: frames }, (_, i) => Math.round((i + 0.5) / frames * 30 * 1000) / 1000);
+    const strips = process.env.FAKE_STRIPS, own = strips && fs.readFileSync(path.join(__dirname, 'fixtures/clips.jsonl'), 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l)).find(r => r.path === p);
+    const file = strips ? path.join(strips, (own ? own.index : n) + '.jpg') : process.env.FAKE_THUMBS ? path.join(process.env.FAKE_THUMBS, n + '.png') : '/nonexistent/strip.jpg';
+    out({ type: 'strip', path: p, file, frames, frameWidth: width, frameHeight: Math.round(width * 9 / 32) * 2, times, distinct: frames, cached: false, ms: 120 });
+  };
+  process.on('SIGTERM', () => process.exit(143));
+  setTimeout(go, p.includes('slowstrip') ? 2000 : 0);
+  return;
+}
 if (args[0] !== 'scan' || !args.includes('--paths-file')) { console.error('usage: scan --paths-file <file|->'); process.exit(2); }
 const file = args[args.indexOf('--paths-file') + 1];
 const tierArg = args.includes('--tier') ? Number(args[args.indexOf('--tier') + 1]) : 2;
+const cachedOnly = args.includes('--cached-only');
 const env = process.env;
 const delay = Number(env.FAKE_DELAY_MS || 0), mode = env.FAKE_MODE || '', every = Number(env.FAKE_ERRORS || 0);
 const thumbs = env.FAKE_THUMBS || '';
@@ -92,8 +115,9 @@ async function main() {
   const paths = text.split('\n').filter(Boolean);
   const t0 = Date.now();
   const n = paths.length;
-  await emit({ type: 'start', total: n, schema: 1, engineVersion: '0.0.0-fake' });
+  await emit({ type: 'start', total: n, schema: 1, engineVersion: '0.0.0-fake', ...(cachedOnly ? { cachedOnly: true } : {}) });
   const rec = p => fixture.get(p) || synth(p);
+  if (cachedOnly) { return answerFromCache(paths, rec, t0); }
   const failed = new Set(every ? paths.filter((_, i) => i % every === every - 1) : []);
   for (const p of paths) { if (rec(p).error) { failed.add(p); } }
   for (const p of shuffled(paths, 7)) {
@@ -138,6 +162,36 @@ async function main() {
   }
   if (mode === 'noend') { return; }
   await emit({ type: 'done', clips: n, failed: failed.size, cached: 0, wallMs: Date.now() - t0, degraded: paths.filter(p => !failed.has(p) && rec(p).tier1 && rec(p).tier1.reason).length });
+}
+
+// --cached-only: tiers in order, every line cached, uncached lines for what the cache wouldn't hold, then groups and done.
+async function answerFromCache(paths, rec, t0) {
+  const gone = p => /uncached|changed/.test(p);
+  const partial = p => p.includes('partial');
+  let failed = 0, uncached = 0, clips = 0;
+  for (const p of paths) {
+    if (rec(p).error) { failed++; await emit({ type: 'error', path: p, message: rec(p).error }); continue; }
+    if (gone(p)) { uncached++; await emit({ type: 'uncached', path: p, tier: 0, changed: p.includes('changed') }); continue; }
+    clips++;
+    await emit({ type: 'clip', tier: 0, path: p, cached: true, ms: 0, ...rec(p).tier0 });
+  }
+  const live = paths.filter(p => !rec(p).error && !gone(p));
+  if (tierArg > 0) {
+    for (const p of live) {
+      const t1 = { ...rec(p).tier1 };
+      if (thumbs && !t1.reason) { t1.thumb = path.join(thumbs, (rec(p).index === undefined ? fixtureThumb(p) : rec(p).index) + '.png'); }
+      await emit({ type: 'clip', tier: 1, path: p, cached: true, ms: 0, ...t1 });
+    }
+  }
+  if (tierArg > 1) {
+    for (const p of live) {
+      if (partial(p)) { uncached++; await emit({ type: 'uncached', path: p, tier: 2, changed: false }); continue; }
+      await emit({ type: 'clip', tier: 2, path: p, cached: true, ms: 0, ...rec(p).tier2 });
+    }
+    await emit({ type: 'groups', groups: [] });
+  }
+  const answered = live.filter(p => tierArg < 2 || !partial(p)).length;
+  await emit({ type: 'done', clips, failed, cached: answered, wallMs: Date.now() - t0, degraded: 0, uncached });
 }
 
 main().then(() => process.stdout.write('', () => process.exit(0)));

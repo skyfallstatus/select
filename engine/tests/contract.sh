@@ -20,7 +20,8 @@ ok() { if [[ $2 == "$3" ]]; then pass=$((pass+1)); echo "ok   $1"; else failn=$(
 at_most() { if (( $2 <= $3 )); then pass=$((pass+1)); echo "ok   $1 ($2)"; else failn=$((failn+1)); echo "FAIL $1: got $2, limit $3"; fi }
 limit() { perl -e 'alarm shift; exec @ARGV' "$@" }     # kills a command that hangs
 scan() { limit 60 $B scan "$@" }
-field() { python3 -c 'import json,sys; [print(json.dumps(eval(sys.argv[1], {"m": json.loads(l)}))) for l in sys.stdin if eval(sys.argv[2], {"m": json.loads(l)})]' "$1" "$2" }
+# A third argument, if any, is sys.argv[3] inside the expressions.
+field() { python3 -c 'import json,sys; [print(json.dumps(eval(sys.argv[1], {"m": json.loads(l), "sys": sys}))) for l in sys.stdin if eval(sys.argv[2], {"m": json.loads(l), "sys": sys})]' "$@" }
 
 ok "version" "$($B version)" "$VERSION"
 ok "--version" "$($B --version)" "$VERSION"
@@ -29,6 +30,20 @@ $B scan >/dev/null 2>&1; ok "no paths exit 2" $? 2
 $B scan --paths-file x --tier 5 >/dev/null 2>&1; ok "bad tier exit 2" $? 2
 $B scan --paths-file x --bogus >/dev/null 2>&1; ok "bad flag exit 2" $? 2
 $B scan --paths-file /nonexistent/list >/dev/null 2>&1; ok "unreadable list exit 2" $? 2
+
+# ---- reveal: files in the Finder, every one selected. ENGINE_TEST_NO_FINDER keeps the Finder out of every check here.
+rv() { ENGINE_TEST_NO_FINDER=1 limit 10 $B reveal "$@" 2>/dev/null }
+ok "usage lists reveal" "$($B --help 2>&1 | grep -c " reveal <path> \[<path> \.\.\.\]$")" 1
+$B reveal >/dev/null 2>&1; ok "reveal without a path exits 2" $? 2
+$B reveal --path $T/x >/dev/null 2>&1; ok "  a flag exits 2" $? 2
+touch $T/r1.txt $T/r2.txt "$T/r 3.txt" $T/r-hang.txt
+out=$(rv $T/r1.txt $T/gone.txt "$T/r 3.txt" $T/r2.txt); ok "reveal exits 0" $? 0
+ok "  one line: the files on disk handed to the Finder, a missing one left out" "$(echo "$out" | field '[m["type"], m["shown"], m["missing"], m["ms"] >= 0]' 'True')" '["reveal", 3, 1, true]'
+ok "  none on disk: one line that says so" "$(rv $T/gone.txt $T/gone2.txt | field '[m["type"], m["shown"], m["missing"]]' 'True')" '["reveal", 0, 2]'
+out=$(ENGINE_TEST_HANG=reveal ENGINE_TEST_DEADLINE=1 rv $T/r1.txt $T/r-hang.txt); ok "  a Finder that doesn't answer: exit 0" $? 0
+ok "  and an error line at the deadline" "$(echo "$out" | field '[m["type"], m["message"], 1000 <= m["ms"] < 1500]' 'True')" '["error", "The Finder took too long.", true]'
+ENGINE_TEST_NO_FINDER=1 ENGINE_TEST_HANG=reveal $B reveal $T/r-hang.txt >/dev/null 2>&1 &
+pid=$!; sleep 0.2; kill -TERM $pid; wait $pid; ok "  SIGTERM stops it" $? 143
 
 if ! command -v ffmpeg >/dev/null || ! command -v ffprobe >/dev/null; then
   echo "SKIP the rest: ffmpeg and ffprobe make the test clips and aren't installed. brew install ffmpeg"
@@ -472,6 +487,11 @@ ok "  and still gives every result" "$(echo "$out" | grep -c '"tier":2')" 9
 ok "  and still groups" "$(echo "$out" | field 'any(sum(p.endswith(("take1.mp4","take2.mp4")) for p in g["paths"])==2 for g in m["groups"])' 'm["type"]=="groups"')" true
 ok "  and done arrives" "$(echo "$out" | ends)" True
 ok "  and writes nothing to the cache" "$(cat $T/lk/index-v4.tsv $T/lk/prints-v4.bin 2>/dev/null | shasum; ls $T/lk/thumbs | wc -l)" "$before"
+out=$(scan --paths-file $T/lockA.txt --cache $T/lk --cached-only 2>/dev/null)
+ok "cached only, beside a scan holding the cache: answers without waiting for it" "$(echo "$out" | tail -1 | field 'm["wallMs"] < 1000' 'True')" true
+ok "  with what the scan has written so far" "$(echo "$out" | field '[m["type"], m.get("tier")]' 'm["type"] in ("clip","uncached")' | tr '\n' ' ')" '["clip", 0] ["clip", 1] ["uncached", 2] '
+out=$(limit 10 $B strip --path $T/u/gop.mp4 --cache $T/lk 2>/dev/null)
+ok "a strip beside a scan holding the cache is made" "$(echo "$out" | field '[m["type"], m["cached"], m["ms"] < 1500]' 'True')" '["strip", false, true]'
 kill $lockA 2>/dev/null; wait $lockA 2>/dev/null
 out=$(scan --paths-file $T/t2.txt --cache $T/lk 2>$T/lockC.err)
 ok "once the first has gone, the cache is written again" "$(grep -c 'another scan' $T/lockC.err):$(scan --paths-file $T/t2.txt --cache $T/lk 2>/dev/null | grep '"tier":2' | grep -c '"cached":true')" 0:9
@@ -490,6 +510,181 @@ ok "a scan never drops what it just used" "$(ls $T/kcap/thumbs | wc -l | tr -d '
 scan --paths-file $T/kb.txt --cache $T/kcap --cache-limit-mb 1 >/dev/null 2>&1
 ok "over the cap, the oldest clips go first" "$(scan --paths-file $T/ka.txt --cache $T/kcap2 --tier 0 2>/dev/null | tail -1 | grep -c '"cached":0'):$(scan --paths-file $T/kb.txt --cache $T/kcap --tier 0 2>/dev/null | tail -1 | grep -c '"cached":40')" 1:1
 ok "  their thumbnails go with them" "$(ls $T/kcap/thumbs | wc -l | tr -d ' ')" 40
+
+# ---- a copied or moved cache keeps its thumbnails: an entry's thumbnail is the file of that name in the cache it's read from
+cp -R $T/t2c $T/t2copy
+n0=$(ls $T/t2c/thumbs | wc -l | tr -d ' ')
+out=$(scan --paths-file $T/t2.txt --cache $T/t2copy --no-thumbs 2>/dev/null)
+ok "a copied cache keeps every thumbnail" "$(ls $T/t2copy/thumbs | wc -l | tr -d ' ')" $n0
+ok "  and its lines point at its own" "$(echo "$out" | field 'm["thumb"].startswith(sys.argv[3])' "m.get('tier')==1" ${T:a}/t2copy/thumbs/ | sort -u)" true
+ok "  and the original is untouched" "$(ls $T/t2c/thumbs | wc -l | tr -d ' ')" $n0
+ln -s $T/t2copy $T/t2link
+scan --paths-file $T/t2.txt --cache $T/t2link >/dev/null 2>&1
+ok "a cache opened through another name for its folder keeps every thumbnail" "$(ls $T/t2copy/thumbs | wc -l | tr -d ' ')" $n0
+
+# ---- scan --cached-only: what the cache holds, never reading a clip, never writing
+mkdir $T/co; cp $T/u/gop.mp4 $T/co/fresh.mp4; cp $T/u/gop.mp4 $T/co/later.mp4
+{ cat $T/t2.txt; print $T/co/later.mp4 } > $T/co1.txt
+scan --paths-file $T/co1.txt --cache $T/coc >/dev/null 2>&1
+full=$(scan --paths-file $T/co1.txt --cache $T/coc 2>/dev/null)
+{ cat $T/co1.txt; print $T/co/fresh.mp4; print $T/co/gone.mp4 } > $T/co2.txt
+touch -t 202001010101 $T/co/later.mp4
+before=$(cat $T/coc/index-v4.tsv $T/coc/prints-v4.bin | shasum; ls $T/coc/thumbs | shasum)
+out=$(scan --paths-file $T/co2.txt --cache $T/coc --cached-only 2>/dev/null); ok "cached only exits 0" $? 0
+ok "  says so in its start line" "$(echo "$out" | head -1 | field 'm["cachedOnly"]' 'True')" true
+ok "  every line is JSON" "$(echo "$out" | python3 -c 'import sys,json; print(all(json.loads(l) for l in sys.stdin))')" True
+ok "  three cached lines for each of the nine clips" "$(echo "$out" | grep '"type":"clip"' | grep -c '"cached":true')" 27
+ok "  the same fields a cached scan gives" "$(echo "$out" | grep '"type":"clip"' | grep -v later.mp4 | sed 's/"ms":[0-9.]*,//' | sort | shasum)" "$(echo "$full" | grep '"type":"clip"' | grep -v later.mp4 | sed 's/"ms":[0-9.]*,//' | sort | shasum)"
+ok "  the same groups" "$(echo "$out" | grep '"type":"groups"')" "$(echo "$full" | grep '"type":"groups"')"
+ok "  a clip never scanned: one line" "$(echo "$out" | grep fresh.mp4)" "{\"type\":\"uncached\",\"path\":\"$T/co/fresh.mp4\",\"tier\":0,\"changed\":false}"
+ok "  a clip changed since: one line, saying so" "$(echo "$out" | grep later.mp4)" "{\"type\":\"uncached\",\"path\":\"$T/co/later.mp4\",\"tier\":0,\"changed\":true}"
+ok "  a missing file: the usual error" "$(echo "$out" | field '[m["type"], m["message"]]' "m.get('path','').endswith('gone.mp4')")" '["error", "No such file or directory"]'
+ok "  done counts them" "$(echo "$out" | tail -1 | field '[m["clips"], m["cached"], m["uncached"], m["failed"]]' 'True')" '[9, 9, 2, 1]'
+ok "  nothing in the cache changes" "$(cat $T/coc/index-v4.tsv $T/coc/prints-v4.bin | shasum; ls $T/coc/thumbs | shasum)" "$before"
+rm $(echo "$full" | field 'm["thumb"]' "m.get('tier')==1 and m['path'].endswith('red.mp4')" | tr -d '"')
+ok "  a thumbnail that's gone is null" "$(scan --paths-file $T/t2.txt --cache $T/coc --cached-only 2>/dev/null | field 'm["thumb"]' "m.get('tier')==1 and m['path'].endswith('red.mp4')")" null
+scan --paths-file $T/t2.txt --cache $T/co1c --tier 1 >/dev/null 2>&1
+out=$(scan --paths-file $T/t2.txt --cache $T/co1c --cached-only 2>/dev/null)
+ok "a scan stopped after tier 1: tiers 0 and 1, then one line for tier 2" "$(echo "$out" | field '[m["type"], m.get("tier")]' "m.get('path','').endswith('s1.mp4')" | tr '\n' ' ')" '["clip", 0] ["clip", 1] ["uncached", 2] '
+ok "  and an empty groups line" "$(echo "$out" | field 'm["groups"]' 'm["type"]=="groups"')" '[]'
+ok "  --tier 1 asks for no more" "$(scan --paths-file $T/t2.txt --cache $T/co1c --cached-only --tier 1 2>/dev/null | grep -cE '"type":"(uncached|groups)"')" 0
+out=$(scan --paths-file $T/t2.txt --cache $T/nocache --cached-only 2>/dev/null)
+ok "no cache at all: every clip uncached" "$(echo "$out" | grep -c '"type":"uncached"')" 9
+ok "  and no folder made" "$(test -e $T/nocache && echo made || echo none)" none
+print $T/u/hang.mp4 > $T/cohang.txt
+out=$(ENGINE_TEST_HANG=tier0 limit 10 $B scan --paths-file $T/cohang.txt --cache $T/coc --cached-only 2>/dev/null)
+ok "never reads a clip: a clip that would hang answers at once" "$(echo "$out" | tail -1 | field '[m["uncached"], m["wallMs"] < 1000]' 'True')" '[1, true]'
+
+# ---- strip: frames through one clip for hover scrub, from sync samples only, cached by the clip's details
+st() { limit 20 $B strip "$@" 2>/dev/null }
+out=$(st --path $T/u/gop.mp4 --cache $T/stc); ok "strip exits 0" $? 0
+ok "  one line" "$(echo "$out" | wc -l | tr -d ' ')" 1
+ok "  the contract fields" "$(echo "$out" | field 'sorted(m)' 'True')" '["cached", "distinct", "file", "frameHeight", "frameWidth", "frames", "ms", "path", "times", "type"]'
+ok "  14 frames of 384 by 216 by default" "$(echo "$out" | field '[m["type"], m["frames"], m["frameWidth"], m["frameHeight"], len(m["times"]), m["cached"]]' 'True')" '["strip", 14, 384, 216, 14, false]'
+file=$(echo "$out" | field 'm["file"]' 'True' | tr -d '"')
+ok "  a JPEG with the frames side by side, in the cache" "$(sips -g pixelWidth -g pixelHeight $file 2>/dev/null | awk '/pixel/ {print $2}' | tr '\n' ' '):${file:h}" "5376 216 :${T:a}/stc/strips"
+ok "  times are keyframes, in order: gop.mp4 has one every 0.2 s" "$(echo "$out" | field 'all(abs(t*5-round(t*5))<1e-6 for t in m["times"]) and m["times"]==sorted(m["times"]) and m["distinct"]==len(set(m["times"]))' 'True')" true
+again=$(st --path $T/u/gop.mp4 --cache $T/stc)
+ok "  asked again, it comes from the cache" "$(echo "$again" | field '[m["cached"], m["file"]==sys.argv[3], m["times"]]' 'True' $file)" "$(echo "$out" | field '[True, True, m["times"]]' 'True')"
+out=$(st --path $T/u/gop.mp4 --cache $T/stc --frames 12 --width 320)
+ok "--frames 12 --width 320" "$(echo "$out" | field '[m["frames"], m["frameWidth"], m["frameHeight"], m["cached"]]' 'True'):$(sips -g pixelWidth $(echo "$out" | field 'm["file"]' 'True' | tr -d '"') 2>/dev/null | awk '/pixel/ {print $2}')" '[12, 320, 180, false]:3840'
+out=$(st --path $T/s1.mp4 --cache $T/stc)
+ok "one keyframe in the clip: 14 frames, one of them different" "$(echo "$out" | field '[m["frames"], m["distinct"], set(m["times"])=={0.0}]' 'True')" '[14, 1, true]'
+limit 60 ffmpeg -v error -nostdin -y -display_rotation 90 -i $T/s1.mp4 -c copy $T/u/turned.mp4
+ok "a turned clip is cropped to the strip's shape after turning" "$(st --path $T/u/turned.mp4 --cache $T/stc | field '[m["type"], m["frameWidth"], m["frameHeight"]]' 'True')" '["strip", 384, 216]'
+out=$(st --path $T/clip.mxf --cache $T/stc)
+ok "MXF through ffmpeg" "$(echo "$out" | field '[m["type"], m["frames"], m["frameHeight"]]' 'True'):$(sips -g pixelWidth $(echo "$out" | field 'm["file"]' 'True' | tr -d '"') 2>/dev/null | awk '/pixel/ {print $2}')" '["strip", 14, 216]:5376'
+ok "  without ffmpeg it says so" "$(ENGINE_TEST_NO_FFMPEG=1 limit 20 $B strip --path $T/clip.mxf --cache $T/stc2 2>/dev/null | field 'm["type"]=="error" and "ffmpeg not found" in m["message"]' 'True')" true
+out=$(st --path $T/nothere.mp4 --cache $T/stc); rc=$?
+ok "a missing file: an error line, exit 0" "$(echo "$out" | field '[m["type"], m["message"]]' 'True'):$rc" '["error", "No such file or directory"]:0'
+ok "a broken file: an error line" "$(st --path $T/bad.mp4 --cache $T/stc | field 'm["type"]' 'True')" '"error"'
+$B strip --cache $T/stc >/dev/null 2>&1; ok "strip without --path exits 2" $? 2
+$B strip --path $T/s1.mp4 --frames 1 >/dev/null 2>&1; ok "  --frames 1 exits 2" $? 2
+$B strip --path $T/s1.mp4 --width 5000 >/dev/null 2>&1; ok "  --width 5000 exits 2" $? 2
+t0=$(python3 -c 'import time;print(time.time())')
+out=$(ENGINE_TEST_HANG=strip ENGINE_TEST_DEADLINE=1 limit 20 $B strip --path $T/u/hang.mp4 --cache $T/sth 2>/dev/null)
+ok "a strip past its deadline: an error line" "$(echo "$out" | field '[m["type"], "took too long" in m["message"]]' 'True')" '["error", true]'
+at_most "  seconds" "$(python3 -c "import time;print(int(time.time()-$t0))")" 3
+ok "  and nothing kept" "$(ls $T/sth/strips 2>/dev/null | wc -l | tr -d ' ')" 0
+out=$(ENGINE_TEST_STRIP_COMMIT_WAIT=1.3 ENGINE_TEST_DEADLINE=1 limit 20 $B strip --path $T/u/gop.mp4 --cache $T/stw 2>/dev/null)
+ok "a strip that finishes as its deadline passes is answered as kept" "$(echo "$out" | field 'm["type"]' 'True')" '"strip"'
+ok "  and is whole on disk" "$(ls $T/stw/strips | sed 's/.*\.//' | sort | tr '\n' ' ')" 'jpg json '
+# Log footage is graded as its thumbnail is: S-Log3 with S-Gamut3.Cine is converted, S-Log2 isn't.
+pic() { st --path $T/lg/$1/C0001.MP4 --cache $T/stl | field 'm["file"]' 'True' | tr -d '"' | xargs shasum | cut -c1-40 }
+ok "a strip of S-Log3 with S-Gamut3.Cine is graded, one of S-Log2 isn't" "$([[ $(pic cine) != $(pic base) ]] && echo graded):$([[ $(pic slog2) == $(pic base) ]] && echo same)" graded:same
+# Upkeep: a scan keeps the strips of clips in its cache, and drops those of clips that changed or that it doesn't know.
+mkdir $T/sk; for i in 1 2 3; do cp $T/u/gop.mp4 $T/sk/k$i.mp4; done; print -l $T/sk/k{1,2,3}.mp4 > $T/sk.txt
+scan --paths-file $T/sk.txt --cache $T/skc --tier 1 >/dev/null 2>&1
+for i in 1 2 3; do st --path $T/sk/k$i.mp4 --cache $T/skc >/dev/null; done
+st --path $T/u/gop.mp4 --cache $T/skc >/dev/null
+ok "four strips made" "$(ls $T/skc/strips/*.jpg | wc -l | tr -d ' ')" 4
+touch -t 202001010101 $T/sk/k3.mp4
+scan --paths-file $T/sk.txt --cache $T/skc --tier 1 >/dev/null 2>&1
+ok "  a scan keeps the strips of clips it knows, and drops the changed clip's and the unknown one's" "$(ls $T/skc/strips/*.jpg | wc -l | tr -d ' '):$(ls $T/skc/strips/*.json | wc -l | tr -d ' ')" 2:2
+ok "  asked again after the scan, they come from the cache" "$(st --path $T/sk/k1.mp4 --cache $T/skc | field 'm["cached"]' 'True')" true
+
+# ---- the camera's own record: Canon's maker block, Sony's XML inside the file, MXF writers and dates in file names
+mk=$tests/maker_clip.py
+mkdir $T/mk
+limit 60 ffmpeg -v error -nostdin -y -f lavfi -i testsrc2=s=320x180:r=25:d=1 -c:v libx264 -pix_fmt yuv420p -metadata creation_time=2025-09-01T14:45:34Z $T/mk/plain.mp4 || exit 1
+python3 $mk canon $T/mk/plain.mp4 $T/mk/1O5A9147.MP4
+python3 $mk sony-mp4 $T/mk/plain.mp4 $T/mk/C0001.MP4
+limit 60 ffmpeg -v error -nostdin -y -f lavfi -i testsrc2=s=320x180:r=25:d=1 -c:v mpeg2video -pix_fmt yuv422p -metadata creation_time=2023-11-02T15:45:07Z \
+    -metadata company_name=Sony -metadata product_name="Mem " $T/mk/mem.mxf || exit 1
+python3 $mk sony-mxf $T/mk/mem.mxf $T/mk/sony.mxf
+limit 60 ffmpeg -v error -nostdin -y -f lavfi -i testsrc2=s=320x180:r=25:d=1 -c:v mpeg2video -pix_fmt yuv422p -metadata creation_time=2024-01-01T10:00:00Z \
+    -metadata company_name="Adobe Inc." -metadata product_name="Adobe Media Encoder" $T/mk/export.mxf || exit 1
+for w in "resolve:DaVinci Resolve" "ursa:URSA Mini Pro 12K"; do
+  limit 60 ffmpeg -v error -nostdin -y -f lavfi -i testsrc2=s=320x180:r=25:d=1 -c:v mpeg2video -pix_fmt yuv422p -metadata creation_time=2024-01-01T10:00:00Z \
+      -metadata company_name="Blackmagic Design" -metadata product_name="${w#*:}" $T/mk/${w%%:*}.mxf || exit 1
+done
+N=(ffmpeg -v error -nostdin -y -f lavfi -i testsrc2=s=320x180:r=25:d=1 -c:v libx264 -pix_fmt yuv420p)
+limit 60 $N -metadata creation_time=2026-08-05T12:26:41Z $T/mk/DJI_20250906021200_0013_D.MP4 || exit 1
+limit 60 $N -metadata creation_time=2025-09-06T00:12:01Z $T/mk/DJI_20250906021200_0014_D.MP4 || exit 1
+limit 60 $N -metadata creation_time=2026-08-05T12:26:41Z $T/mk/PXL_20250906_021200123.mp4 || exit 1
+limit 60 $N -metadata creation_time=2026-08-05T12:26:41Z $T/mk/VID_20250906_021200.mp4 || exit 1
+limit 60 $N -metadata creation_time=2026-08-05T12:26:41Z $T/mk/A001C001_250906_R1AB.mov || exit 1
+limit 60 $N -movflags use_metadata_tags -metadata com.apple.quicktime.creationdate=2023-11-02T16:45:07+0100 $T/mk/DJI_20250906021200_0015_D.MOV || exit 1
+print -l $T/mk/*.(mp4|MP4|mxf|mov|MOV) | grep -v plain.mp4 > $T/mk.txt
+out=$(TZ=Europe/Paris scan --paths-file $T/mk.txt --cache $T/mkc --tier 0 2>/dev/null)
+meta() { echo "$out" | field "[m[k] for k in sys.argv[3].split(',')]" "m.get('tier')==0 and m['path'].endswith('$1')" $2 }
+ok "Canon's maker block: camera, lens, and the time with its zone" "$(meta 1O5A9147.MP4 camera,lens,createdAt,dateSource)" '["Canon EOS R6", "RF24-70mm F2.8 L IS USM", "2025-09-01T15:45:33+01:00", "camera"]'
+ok "Sony's XML inside an MP4 copied without its sidecar" "$(meta C0001.MP4 camera,lens,createdAt,dateSource)" '["Sony ILME-FX6V", "FE 24-70mm F2.8 GM II", "2025-12-12T19:03:06+01:00", "camera"]'
+ok "Sony's XML inside an MXF" "$(meta sony.mxf camera,lens,createdAt,dateSource)" '["Sony ILME-FX6V", "FE 24-70mm F2.8 GM II", "2025-12-12T19:03:06+01:00", "camera"]'
+ok "an MXF without it: the maker, not \"Sony Mem\", and the date it was written" "$(meta mem.mxf camera,createdAt,dateSource)" '["Sony", "2023-11-02T15:45:07Z", "container"]'
+ok "an MXF from an editing program names no camera" "$(meta export.mxf camera,createdAt)" '[null, "2024-01-01T10:00:00Z"]'
+ok "  nor one from DaVinci Resolve" "$(meta resolve.mxf camera)" '[null]'
+ok "  but a Blackmagic camera keeps its name" "$(meta ursa.mxf camera)" '["Blackmagic Design URSA Mini Pro 12K"]'
+ok "a DJI copy: the name's date, with the container's kept" "$(meta DJI_20250906021200_0013_D.MP4 createdAt,dateSource,containerDate,dateOnly)" '["2025-09-06T02:12:00+02:00", "fileName", "2026-08-05T12:26:41Z", false]'
+ok "  within a day of the container's, the container's stands" "$(meta DJI_20250906021200_0014_D.MP4 createdAt,dateSource,containerDate)" '["2025-09-06T00:12:01Z", "container", null]'
+ok "  a camera's own date always stands" "$(meta DJI_20250906021200_0015_D.MOV createdAt,dateSource)" '["2023-11-02T16:45:07+01:00", "camera"]'
+ok "a Pixel name is UTC" "$(meta PXL_20250906_021200123.mp4 createdAt,dateSource)" '["2025-09-06T02:12:00Z", "fileName"]'
+ok "a VID_ name is the phone's time" "$(meta VID_20250906_021200.mp4 createdAt,dateSource)" '["2025-09-06T02:12:00+02:00", "fileName"]'
+ok "an ARRI reel name gives the day only, at noon" "$(meta A001C001_250906_R1AB.mov createdAt,dateSource,dateOnly)" '["2025-09-06T12:00:00+02:00", "fileName", true]'
+ok "every date still has a zone" "$(echo "$out" | python3 -c '
+import sys,json,re
+d=[m.get("createdAt") for m in map(json.loads,sys.stdin) if m.get("tier")==0]
+print(len(d), all(re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(Z|[+-]\d\d:\d\d)", x) for x in d))')" '13 True'
+# Results from before these were read are read again: Tier 0 only, the rest still from the cache.
+print -r -- "0	$(stat -f %z $T/mk/1O5A9147.MP4)	$(python3 -c "import os;print('%.6f'%os.stat('$T/mk/1O5A9147.MP4').st_mtime)")	-	\"$T/mk/1O5A9147.MP4\"	\"name\":\"old\"" > $T/old.tsv
+mkdir $T/oldc; cp $T/old.tsv $T/oldc/index-v4.tsv; print $T/mk/1O5A9147.MP4 > $T/old.txt
+ok "a Tier 0 result from an older reading is read again" "$(scan --paths-file $T/old.txt --cache $T/oldc --tier 0 2>/dev/null | field '[m["cached"], m["camera"]]' "m.get('tier')==0")" '[false, "Canon EOS R6"]'
+ok "  and then remembered" "$(scan --paths-file $T/old.txt --cache $T/oldc --tier 0 2>/dev/null | field 'm["cached"]' "m.get('tier')==0")" true
+
+# ---- AAC loudness reads the sound, not the video between its packets
+limit 60 ffmpeg -v error -nostdin -y -f lavfi -i testsrc2=s=1920x1080:r=25:d=8 -f lavfi -i sine=f=440:r=48000:d=8 -c:v libx264 -b:v 40M -g 25 -pix_fmt yuv420p -c:a aac -shortest $T/u/aac.mp4 || exit 1
+limit 60 ffmpeg -v error -nostdin -y -i $T/u/aac.mp4 -c:v copy -c:a pcm_s16le $T/u/aacpcm.mov || exit 1
+print $T/u/aac.mp4 > $T/aac.txt; print $T/u/aacpcm.mov > $T/aacpcm.txt
+ENGINE_TRACE=$T/aac.trace limit 60 $B scan --paths-file $T/aac.txt --cache $T/aacc --tier 1 --no-thumbs > $T/aac.out 2> $T/aac.err
+at_most "AAC level, reads for an 8 s 40 Mb/s clip with a video frame between every two packets, of 101 uncapped" "$(grep -o 'levelReads=[0-9]*' $T/aac.err | cut -d= -f2)" 48
+at_most "  bytes read (all of it between the windows would be 10.9 MB)" "$(grep -o 'levelBytes=[0-9]*' $T/aac.err | cut -d= -f2)" 8000000
+pcm=$(scan --paths-file $T/aacpcm.txt --cache $T/aacp --tier 1 --no-thumbs 2>/dev/null | field 'm["audioDb"]' "m.get('tier')==1")
+ok "  the level of the same sound as PCM, within 0.2 dB" "$(field 'abs(m["audioDb"] - float(sys.argv[3])) <= 0.2' "m.get('tier')==1" $pcm < $T/aac.out)" true
+
+# ---- a frame that can't be read leaves what it could have shown unknown, and isn't remembered
+cp $T/u/gop.mp4 $T/u/rfail-gop.mp4; print $T/u/rfail-gop.mp4 > $T/rf.txt
+out=$(ENGINE_TEST_READ_FAIL=1 scan --paths-file $T/rf.txt --cache $T/rfc 2>/dev/null)
+ok "a moment that can't be read: people, faces, shot size, labels and words are null" "$(want rfail-gop.mp4 '[m["moments"], m["people"], m["faces"], m["shotSize"], m["labels"], m["text"]]')" '[2, null, null, null, null, null]'
+ok "  and the next scan looks again" "$(scan --paths-file $T/rf.txt --cache $T/rfc 2>/dev/null | field '[m["cached"], m["moments"]]' "m.get('tier')==2")" '[false, 3]'
+
+# ---- a moment the decoder refuses, as a damaged GOP is, leaves the clip judged on the others, and that's kept
+cp $T/u/gop.mp4 $T/u/dfail-gop.mp4; print $T/u/dfail-gop.mp4 > $T/df.txt
+out=$(ENGINE_TEST_DECODE_FAIL=1 scan --paths-file $T/df.txt --cache $T/dfc 2>/dev/null)
+ok "a moment the decoder refuses: the other two stand" "$(want dfail-gop.mp4 '[m["moments"], type(m["people"]) is int, type(m["faces"]) is int, type(m["labels"]) is list, type(m["text"]) is list]')" '[2, true, true, true, true]'
+ok "  and the next scan doesn't decode it again" "$(ENGINE_TEST_DECODE_FAIL=1 scan --paths-file $T/df.txt --cache $T/dfc 2>/dev/null | field '[m["cached"], m["moments"]]' "m.get('tier')==2")" '[true, 2]'
+
+# ---- a new Tier 0 reading that changes the picture, here S-Log3 found in the XML inside the file, works Tiers 1 and 2 out again
+mkdir $T/pc; python3 $mk sony-mp4 $T/u/gop.mp4 $T/pc/C0001.MP4; cp $T/u/gop.mp4 $T/pc/plain.mp4
+print -l $T/pc/C0001.MP4 $T/pc/plain.mp4 > $T/pc.txt
+scan --paths-file $T/pc.txt --cache $T/pcc >/dev/null 2>&1
+# As an engine before the XML inside the file was read would have left it: the same lines, marked as the older reading.
+sed -i '' $'s/^0r2\t/0\t/' $T/pcc/index-v4.tsv
+out=$(scan --paths-file $T/pc.txt --cache $T/pcc 2>/dev/null)
+tiers() { echo "$out" | field '[m["tier"], m["cached"]]' "m['type']=='clip' and m['path'].endswith('$1')" | tr '\n' ' ' }
+ok "the picture changed: Tiers 1 and 2 are worked out again" "$(tiers C0001.MP4)" '[0, false] [1, false] [2, false] '
+ok "  the picture didn't: they come from the cache" "$(tiers plain.mp4)" '[0, false] [1, true] [2, true] '
+out=$(scan --paths-file $T/pc.txt --cache $T/pcc 2>/dev/null)
+ok "  and then everything comes from the cache" "$(tiers C0001.MP4)" '[0, true] [1, true] [2, true] '
 
 echo "$pass passed, $failn failed"
 (( failn == 0 ))

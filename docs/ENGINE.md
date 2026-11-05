@@ -7,12 +7,17 @@ It's a universal binary, for Apple silicon and Intel, and runs on macOS 13 or la
 ## Command line
 
 ```
-select-engine scan --paths-file <file|-> [--tier 0|1|2] [--cache <dir>] [--workers <n>] [--no-thumbs] [--cache-limit-mb <n>]
+select-engine scan --paths-file <file|-> [--tier 0|1|2] [--cache <dir>] [--workers <n>] [--no-thumbs] [--cache-limit-mb <n>] [--cached-only]
+select-engine strip --path <clip> [--frames 2-32] [--width 64-1024] [--cache <dir>]
+select-engine reveal <path> [<path> ...]
 select-engine version
 select-engine --version
 ```
 
 - `--tier` defaults to 2, which emits all three. `--tier 0` and `--tier 1` stop early.
+- `--cached-only` answers from the cache alone and never reads a clip. See [Answering from the cache](#answering-from-the-cache).
+- `strip` makes the hover-scrub frames for one clip. See [Strips](#strips).
+- `reveal` shows files in the Finder, every one selected. See [Revealing in the Finder](#revealing-in-the-finder).
 - `--cache` defaults to `~/Library/Caches/com.skyfallstatus.select`, and `--cache-limit-mb` to 2048.
 - `--paths-file` holds one absolute path per line. `-` reads stdin.
 - Output on stdout is JSON Lines, flushed per line, in completion order, so the panel can update live.
@@ -30,6 +35,12 @@ select-engine --version
 {"type":"error","path":"/abs/clip.mp4","message":"..."}
 {"type":"groups","groups":[{"id":1,"paths":["/abs/a.mp4","/abs/b.mp4"]}]}
 {"type":"done","clips":400,"failed":0,"cached":0,"wallMs":7300,"degraded":0}
+```
+
+With `--cached-only` there is one more kind of line, `start` says `"cachedOnly":true` and `done` adds `uncached`:
+
+```json
+{"type":"uncached","path":"/abs/clip.mp4","tier":0,"changed":false}
 ```
 
 `schema` is the cache schema, 4 since sidecars became part of the key. A line carries only its own tier's fields, and the panel merges lines by `path`. All Tier 1 lines come before any Tier 2 line. `groups` comes once, after the last Tier 2 line and before `done`, and only clips in a group of two or more appear in it. A field the engine can't get is `null`, never a guess. New fields may be added, so ignore ones you don't know.
@@ -54,9 +65,12 @@ In the `done` line, `clips` counts everything with Tier 0 data, `failed` counts 
 | `hasAudio` | bool | |
 | `audioChannels` | int or null | all tracks together |
 | `createdAt` | string or null | always with its zone: `2023-11-02T16:45:07Z` or `2025-12-12T19:03:06+01:00`, whole seconds. See below |
+| `dateSource` | string or null | where `createdAt` came from: `camera` (the camera's own clock, with its zone), `container` (the file's own date, UTC, which may be when it was written or copied) or `fileName`. null when there's no date |
+| `containerDate` | string or null | only when `dateSource` is `fileName` and the file had a date of its own: that date, for a tooltip |
+| `dateOnly` | bool | the date came from a file name that gives the day but not the time, so `createdAt` is put at noon |
 | `timecode` | string or null | start timecode |
-| `camera` | string or null | maker and model |
-| `lens` | string or null | from embedded metadata or a Sony sidecar `*M01.XML` |
+| `camera` | string or null | maker and model, said once: `Canon EOS R6`, `Sony ILME-FX6V`. An MXF names the program that wrote it, so only a maker and model that name a camera are kept: never `Sony Mem`, never `Adobe Media Encoder`. Programs are matched as whole words, so a Blackmagic camera keeps its name and DaVinci Resolve names none |
+| `lens` | string or null | from embedded metadata, Canon's maker block, or Sony's XML beside the clip (`*M01.XML`) or inside it |
 | `gamma` | string or null | e.g. `s-log3-cine`, `hlg`, `pq` |
 | `isLog` | bool or null | gamma says log |
 | `colorNote` | string or null | only when the file names a curve or gamut the engine doesn't convert, such as S-Log2, S-Log3 with S-Gamut3, HLG or PQ: why the thumbnail and colours are as recorded. See Log footage below |
@@ -75,7 +89,7 @@ In the `done` line, `clips` counts everything with Tier 0 data, `failed` counts 
 | `saturation` | float 0..1 or null | |
 | `warmth` | float -1..1 or null | red against blue balance |
 | `dhash` | string or null | 64-bit perceptual hash, hex. The panel doesn't use it now: Similar shots groups by feature prints |
-| `audioDb` | float or null | mean level of the loudest channel of any audio track, from sampled windows, never a full read |
+| `audioDb` | float or null | mean level of the loudest channel of any audio track, from sampled windows, never a full read. For AAC only the runs of sound packets are read, skipping the video between them, in at most 48 reads a track: past that, the shortest stretches of video are read through |
 | `silent` | bool or null | below -50 dBFS. True only when every audio track was heard. null when a track couldn't be read and the others are quiet |
 | `thumb` | string or null | absolute path to a JPEG in the cache, 480 px on the long side, from the middle moment. Log footage is graded so it looks like the shot |
 | `reason` | string | only when there are no picture scores: why, in plain English |
@@ -114,11 +128,15 @@ All of this is worked out on the Mac, with models that ship with macOS. It runs 
 | `colorName` | string or null | `red orange yellow green teal blue purple pink neutral` |
 | `palette` | array of up to 5 `#rrggbb` or null | dominant colours, strongest first |
 
-With no picture, `moments` is 0 and every picture field is null, while sound and camera values stay. A picture field is also null, never 0 or empty, when Vision's request for it failed at any moment looked at: `labels` for the classifier, `faces` for faces, `people` and `shotSize` for people, faces or the classifier, and `text` for finding or reading words. A missed moment could have held the face or the word. Vision cancels the rest of a frame's requests when one fails, so one failure often nulls several fields. Such a result isn't remembered, so the next scan tries again.
+With no picture, `moments` is 0 and every picture field is null, while sound and camera values stay. A moment that couldn't be read, as when a cable is pulled, leaves `people`, `faces`, `shotSize`, `labels` and `text` null too, never 0 or empty: it could have held the face or the word, and it may read next time, so the result isn't remembered. A moment the decoder refuses stays refused, as a damaged GOP does, so the clip is judged on the moments that decoded and the result is remembered. Only a clip with no moment decoded goes through ffmpeg. `moments` counts the moments actually seen. A picture field is also null when Vision's request for it failed at any moment looked at: `labels` for the classifier, `faces` for faces, `people` and `shotSize` for people, faces or the classifier, and `text` for finding or reading words. A missed moment could have held the face or the word. Vision cancels the rest of a frame's requests when one fails, so one failure often nulls several fields. Such a result isn't remembered, so the next scan tries again.
 
 ### Dates
 
-`createdAt` is the camera's time when the file or its sidecar gives one with a zone: the Sony sidecar first, then the QuickTime creation date, then the date atom. Offsets are written `+01:00`, whatever the file used (`+0100`, `+01`). A time with no zone could be in any zone, so it's passed over. The container's own creation time is UTC and comes last, written with `Z`. On 973 real Sony clips, 360 had the sidecar's local time with its offset and 613 the container's UTC. The panel can hand the string straight to `new Date()`.
+`createdAt` is the camera's time when the file or its sidecar gives one with a zone: Sony's XML first, beside the clip or, for a clip copied without it, inside the file (a top-level `meta` box in MP4, the header of an MXF), then the QuickTime creation date, then the date atom, then Canon's maker block (the time it was shot with its offset). These say `"dateSource":"camera"`. Offsets are written `+01:00`, whatever the file used (`+0100`, `+01`). A time with no zone could be in any zone, so it's passed over. The container's own time is UTC and comes last, written with `Z`, with `"dateSource":"container"`: the creation time in MP4 and MOV, and in MXF the time the file was written, `modification_date`, which on a Sony camera is when it was shot. The panel can hand the string straight to `new Date()`.
+
+A copied or re-rendered file often carries the copy's date in its container. When the file name holds a date more than a day away from the container's, or the file has none, the name's date is used, with `"dateSource":"fileName"` and the container's date in `containerDate`. A camera's own date always stands. The names read: `DJI_20250906021200_0013_D.MP4` (the camera's time), `VID_20250906_021200.mp4` (the phone's time), `PXL_20250906_021200123.mp4` (UTC, as Google's camera names them) and reel names such as ARRI's `A001C001_250906_R1AB.mov`, which give the day only: then `dateOnly` is true and the time is noon. A wall-clock time is read in this Mac's zone as it was on that date.
+
+On the 1,062 real clips of the two test projects, 838 Sony clips copied without their sidecar now get camera, lens, timecode and log curve from the XML inside the file, and each of their 838 dates is the same instant as before, now with the camera's offset. 176 Sony FX6 MXF clips are unchanged, and 6 FX6 MXF clips without a sidecar went from `Sony Mem` and no date to `Sony ILME-FX6V` with the camera's date. Of 49 DJI clips, the 2 copied ones take the date in their name.
 
 ### How Tier 2 works
 
@@ -148,7 +166,9 @@ With no picture, `moments` is 0 and every picture field is null, while sound and
 
 **Deadlines.** Every clip has a deadline in each tier: 20 s for Tier 0, 30 s for Tier 1, 45 s for Tier 2. Past it the clip gets its line with blanks and a `reason`, Vision is cancelled and ffmpeg stopped where they're running, and the scan moves on, so `groups` and `done` always arrive. A thread that's truly stuck is left behind and replaced, up to 64 times a tier. Past that something is stuck for good, so every clip of that tier not yet started gets its line at once, with a reason that says so. When every thread looking at middle frames is stuck, the frames still queued are dropped and Tier 2 decodes them itself. The engine also notices a closed stdout within a quarter of a second, without waiting to write.
 
-**Memory.** Only what grouping needs stays in memory: where each print sits in the cache file, not the print itself. The middle frames looked at beside Tier 1 are capped at 1,024, and past 4,096 clips plans are read again rather than kept. `engine/tests/scale.sh` runs 50,000 generated clips, with a stand-in for Vision's models and everything else real: 32 s and a peak of 469 MB cold, 3.0 s and 662 MB cached. The cached peak is mostly the cache's own index.
+**Memory.** Only what grouping needs stays in memory: where each print sits in the cache file, not the print itself. A middle frame looked at beside Tier 1 keeps its colour samples as bytes, about 15 KB a clip rather than 60 KB, so 6,144 are kept (3,072 on a Mac with less than 16 GB), and past 4,096 clips plans are read again rather than kept. `engine/tests/scale.sh` runs 50,000 generated clips, with a stand-in for Vision's models and everything else real. Cold, 0.4 took 34.5 s at a peak of 550 MB, against 35.1 s and 534 MB for 0.3 on the same run: 5,120 more middle frames are reused, for 16 MB. Cached, 2.4 s and 499 MB against 3.6 s and 713 MB, because the index is now read in parallel and no longer rewritten on every scan.
+
+**Threads.** Fitted to the Mac: Tier 0 gets a thread a core up to 12, Tier 1 two thirds of the cores up to 12, Tier 2 two fewer than the cores up to 16, and neither more than the Mac has gigabytes; 6 threads look at middle frames, or a third of the cores. On 18 cores and 128 GB that's 12, 12, 16 and 6, as before. On the 1,062 real clips of the two test projects, with an empty cache, a scan took 18.2 to 18.4 s, against 18.3 to 18.5 s for 0.3, and its peak memory went from 1,216 MB to 1,042 MB, mostly the colour samples.
 
 ### Speed
 
@@ -161,6 +181,8 @@ M5 Max, 973 Sony clips, 510 GB, on a USB SSD, with an empty cache.
 | Rerun, cached | 1 s | 0.07 s |
 | Grouping | | 11 ms |
 | Peak memory, cold | | 1.1 GB, Vision's models included |
+
+These are 0.3's.
 
 ### How right it is
 
@@ -203,7 +225,82 @@ The key is the absolute path, file size, modification time and schema version, a
 
 One scan at a time writes a cache. Each scan takes an exclusive lock on the `lock` file in the cache folder, which the system lets go of however the scan ends. A second scan on the same folder waits up to 2 s for it, then runs reading the cache but writing nothing: no results, no prints, no thumbnails, so a thumbnail is `null` unless one is already there. It says so on stderr. Its Tier 2 is worked out again rather than read, because it doesn't read prints another scan may be writing. Files left by older schemas are deleted when a scan takes the lock.
 
-It's kept under 2 GB, about 50,000 clips, or what `--cache-limit-mb` says. At the end of every scan the clips used longest ago go first, with their thumbnails, until it's under 80% of the limit. Clips the scan just used are never dropped. Thumbnails nothing points to any more are deleted, and the prints file is rewritten once superseded records outnumber live ones by half. When each clip was last used is written at most every six hours, so rescans cost nothing extra.
+It's kept under 2 GB, about 50,000 clips, or what `--cache-limit-mb` says, strips included. At the end of every scan the clips used longest ago go first, with their thumbnails and strips, until it's under 80% of the limit. Clips the scan just used are never dropped. Thumbnails and strips nothing points to any more are deleted, and the prints file is rewritten once superseded records outnumber live ones by half. The index is rewritten only once lines nothing reads any more, replaced by a later line or left by an older version of a file, outnumber the lines in use (and number over 256). Until 0.4 it was rewritten on every scan of a cache with a few results per clip, while removing nothing. When each clip was last used is written at most every six hours, so rescans cost nothing extra.
+
+An entry's thumbnail is the file of that name in the `thumbs` folder of the cache being read. The index holds absolute paths, and until 0.4 a cache that was copied or moved, or opened through another name for the same folder, such as a symlink, lost every thumbnail at the end of its next scan, because none of them was the path the index named. The panel always uses the same folder, so this only happened to a cache that was copied, moved or restored, never to the one in use.
+
+What Tier 0 reads grows more often than the cache's layout changes, so a Tier 0 line carries a revision of its own: `0r2` since 0.4, which added Canon's maker block, Sony's XML inside the file, MXF dates and dates in file names. A Tier 0 result from an older revision is read again on the next scan, a small read or two per clip, while its Tier 1 and Tier 2 results still come from the cache, unless the new reading changes the picture: when it finds S-Log3 the old one didn't, as in Sony's XML inside the file, a `p` line drops the clip's Tier 1 and Tier 2 results and they're worked out again with the right grade. On the 1,062 real clips that was none of them, because Sony's data track had already said the same; on 3 Sony FX6 MXF clips with no sidecar, first scanned by 0.3, it was all three. Older engines skip a kind of line they don't know and read Tier 0 again, so going back to an older version costs the same and nothing more. The schema stays 4.
+
+## Answering from the cache
+
+```
+select-engine scan --paths-file <file|-> --cached-only [--tier 0|1|2] [--cache <dir>]
+```
+
+For bringing back a project's last results when the panel opens. Every clip is looked up by its path, size and modification time and its sidecar's, which costs a stat or two, and the clip is never opened: nothing is decoded, no sound is read, Vision doesn't run and ffmpeg isn't started. Nothing is written either: the cache's lock isn't taken, nothing is marked as used and nothing is tidied, so it answers at once even beside a scan that's writing the same cache, from what that scan has written so far. `--no-thumbs` and `--workers` change nothing here.
+
+- The lines are a scan's, from the cache, in a scan's order: every `clip` line of Tier 0 (and `error` lines), then Tier 1, then Tier 2, then `groups`, then `done`. Clip lines say `"cached":true` and `"ms":0.0`. A clip line is exactly what a cached scan would give for that clip, except that a thumbnail whose file has gone is `null`.
+- A clip the cache can't answer for gets clip lines for the tiers it can, then one `uncached` line naming the first tier it can't: `"tier":0` for a clip never scanned, or whose size, date or sidecar changed since, with `"changed":true` in that last case. A scan stopped after Tier 1 gives Tier 0 and Tier 1 lines, then `"tier":2`. As in a scan, a Tier 2 result counts only with its feature print, from the revision this Mac makes.
+- A file that isn't there gets the usual `error` line, `"message":"No such file or directory"`. A clip the cache remembers as unreadable gets its remembered `error` line.
+- `groups` is worked out from the cached prints of the clips that got a Tier 2 line, exactly as a scan does.
+- In `done`, `clips` counts clips with a Tier 0 line, `cached` those answered at every tier asked for, `uncached` the `uncached` lines and `failed` the `error` lines.
+
+Measured on this Mac, process start included: the 1,062 real clips in 70 ms, with the same lines and the same 43 groups as a cached scan with 0.3.0. 20,000 generated clips from a cache of 20,000 in 0.6 s at a peak of 230 MB: 0.08 s reading the index, 0.08 s checking the files, 0.17 s writing the lines and 0.23 s grouping. From a cache of 50,000, 20,000 clips take 0.7 s and all 50,000 take 1.6 s, at a peak of 500 MB.
+
+## Strips
+
+```
+select-engine strip --path <clip> [--frames 14] [--width 384] [--cache <dir>]
+```
+
+The frames the panel slides through when someone hovers over a grid picture. One line on stdout, then exit 0:
+
+```json
+{"type":"strip","path":"/abs/C0412.MP4","file":"/abs/cache/strips/3f9a1c07e5b2d468-14x384.jpg","frames":14,"frameWidth":384,"frameHeight":216,"times":[0.520,1.580,…],"distinct":14,"cached":false,"ms":212.4}
+```
+
+or `{"type":"error","path":"…","message":"…","ms":…}`, also exit 0. Bad arguments exit 2.
+
+- `frames` frames, 2 to 32, at the middle of as many equal slices of the clip. Each is the sync sample at or before that time, decoded on its own, so a frame costs one read and one decode whatever the GOP. `times` are the times of the frames used, in seconds. Two slices can land on the same keyframe in a long GOP: the frame is then repeated in the picture, the time repeats, and `distinct` says how many different frames there are.
+- One JPEG, quality 0.8, the frames side by side left to right, each `frameWidth` by `frameHeight`, which is 16:9. Each is cropped from the centre as the grid's pictures are, after the clip is turned upright, and log footage is graded as its thumbnail is (S-Log3 with S-Gamut3.Cine only).
+- MXF and anything VideoToolbox won't take go through ffmpeg, one process a frame, a few at a time, each landing on the keyframe at or before its time. Without ffmpeg that's an `error` line that says `ffmpeg not found`.
+- It's cached in `strips/` in the cache folder, named by a hash of the clip's path, size and dates and its sidecar's, then `-<frames>x<width>`. The picture and a small `.json` with its fields are each written to a temporary name and renamed, the JSON last, so a strip is only ever whole. Asked again, the answer is `"cached":true` from those two files, without opening the clip. A changed clip gets a new name.
+- It never takes the cache's lock and writes only in `strips/`, so it's safe beside a scan of the same cache. A scan's upkeep counts strips in the cache's size, drops them with their clip, and drops those of clips that changed or that the cache doesn't hold.
+- The whole run has a deadline of 1.5 s from the process starting. Past it, the answer is an `error` line that says `took too long`, any ffmpeg it started is stopped and nothing is kept. A strip whose files are being put in place as the deadline passes is finished, and answered as kept: the renames and the deadline take the same lock, so what the answer says is what's on disk. SIGTERM stops it at once, with its ffmpeg, and removes what it was writing.
+
+Measured on this Mac, from an external SSD over USB, each clip read for the first time, 14 frames of 384 by 216:
+
+| Clips | Each strip |
+|---|---|
+| Sony XAVC-I 4K H.264 10-bit 4:2:2, 5 clips | 215 to 228 ms |
+| Sony 4K H.264 8-bit long GOP, 5 clips (5 to 9 different keyframes) | 147 to 185 ms |
+| iPhone HEVC 4K, 10-bit and 8-bit, 4 clips | 95 to 107 ms |
+| DJI Osmo Pocket 3 HEVC 10-bit 3K, 5 clips | 89 to 121 ms |
+| Sony FX6 MXF 4K XAVC-I through ffmpeg, 4 clips | 745 to 815 ms |
+| Any of these from the cache | 6 ms |
+
+Starting the engine costs about 6 ms. A Mac with fewer cores runs fewer ffmpeg processes at once, so MXF there may pass the deadline and get no strip.
+
+## Revealing in the Finder
+
+```
+select-engine reveal <path> [<path> ...]
+```
+
+The panel's Reveal in Finder. `open -R` with several files selects only the last one, so the engine asks the Finder itself, through NSWorkspace, and every file comes up selected. One line on stdout, then exit 0:
+
+```json
+{"type":"reveal","shown":3,"missing":1,"ms":6.9}
+```
+
+or `{"type":"error","message":"The Finder took too long.","ms":3000.4}`, also exit 0. No path, or an argument that starts with `-`, exits 2.
+
+- Files that aren't on disk are left out, and `missing` counts them. When none is on disk the answer is `"shown":0`, and the Finder isn't asked.
+- It needs no permission to control the Finder, so there's no Automation prompt. Files in several folders may open several Finder windows.
+- The whole run has a deadline of 3 s from the process starting. Past it, the answer is the error line. SIGTERM stops it at once.
+- The panel sends the first 20 files that are on disk. If the engine is missing or fails, the panel runs `open -R` on the first file instead, so Reveal in Finder always shows something.
+
+Checked on this Mac: 3 files in one folder came up in one Finder window, all 3 selected, in 7 ms, with no prompt.
 
 ## Nothing leaves the Mac
 
@@ -218,8 +315,12 @@ These are set only by `engine/tests/contract.sh`, and the panel never sets them.
 | `ENGINE_TEST_DECODER=open` | VideoToolbox sessions refuse to open |
 | `ENGINE_TEST_DECODER=frame` | Sessions open and every frame fails |
 | `ENGINE_TEST_NO_FFMPEG=1` | ffmpeg is treated as missing |
-| `ENGINE_TEST_HANG=<stage>` | a clip whose path contains `hang` stops for good at `tier0`, `tier1`, `vision`, `sound` or `middle` |
-| `ENGINE_TEST_DEADLINE=<s>` | every deadline becomes this many seconds |
+| `ENGINE_TEST_HANG=<stage>` | a clip whose path contains `hang` stops for good at `tier0`, `tier1`, `vision`, `sound`, `middle` or `strip`. With `reveal`, a run given such a path stops before it asks the Finder |
+| `ENGINE_TEST_NO_FINDER=1` | `reveal` answers as usual without asking the Finder, so the tests never open a window |
+| `ENGINE_TEST_READ_FAIL=1` | for a clip whose path contains `rfail`, reading the last of its Tier 2 moments fails, as a pulled cable or a bad block would |
+| `ENGINE_TEST_DECODE_FAIL=1` | for a clip whose path contains `dfail`, the decoder refuses the last of its Tier 2 moments, as it would a damaged GOP |
+| `ENGINE_TEST_STRIP_COMMIT_WAIT=<s>` | a strip waits this long between putting its JSON and its picture in place, so it finishes past its deadline |
+| `ENGINE_TEST_DEADLINE=<s>` | every deadline becomes this many seconds, a strip's and a reveal's too |
 | `ENGINE_TEST_PRINT_REVISION=<n>` | asks Vision for another feature print revision |
 | `ENGINE_TEST_FAKE_VISION=1` | prints from the pixels instead of the models, for `scale.sh` |
 | `ENGINE_TEST_VISION_FAIL=<requests>` | for a clip whose path contains `vfail`, the named Vision requests, any of `classify`, `faces`, `people`, `print`, `boxes`, `text`, are asked for a revision no Mac has, so Vision fails them for real |

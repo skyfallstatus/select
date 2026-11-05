@@ -74,7 +74,16 @@ The picture, sound and colour fields work on anything that decodes. The camera's
 | Sony FX3, FX2, 100p | Yes | No | `rtmd` track with no gyro tags. 117 of the 973 clips in testing. `[TESTED]` |
 | DJI Osmo Pocket 3 | No | No | A `djmd` track that ExifTool reads ISO and shutter from. Select doesn't read it yet. `[TESTED]` |
 | iPhone 13 to 17 Pro | No | No | Timed metadata tracks, and the lens model. No per-frame exposure that ExifTool shows. `[TESTED]` |
+| Canon EOS R6 | No | No | Canon's own block in the file names the camera, the lens and when it was shot, with the camera's offset. `[TESTED]` 8 clips, matching ExifTool |
 | MXF | No | No | Through ffmpeg. Picture and sound work. `[TESTED]` |
+
+## Camera, lens and date without the sidecar
+
+`[TESTED]` A Sony clip copied without its `M01.XML` still has the same XML inside the file: in a box after the movie header in MP4, and in the header of an MXF. The engine reads it there, so camera, lens, timecode, log curve and the date with its zone survive the copy. On the 1,062 real clips of the two test projects, 838 Sony clips had no sidecar and got all of these from inside the file, each date the same instant as the container's. 6 Sony FX6 MXF clips with no sidecar went from `Sony Mem` and no date to `Sony ILME-FX6V` and the camera's date. In one of them the XML sat 445 KB into the file, so the first megabyte of an MXF is read for it.
+
+`[TESTED]` An MXF made by an editing program, such as Adobe Media Encoder, names that program as its maker, so it gets no camera. Its date is when it was written. 6 such exports on the test drive. Programs are matched as whole words, so a camera from a maker that also makes editing programs, such as Blackmagic, keeps its name: tested on generated clips only.
+
+`[TESTED]` A copied DJI, ARRI, Pixel or Android clip often carries the copy's date in its container. When the date in its name is more than a day away, the name's date is used, and the panel can show the container's date in a tooltip. 2 of 49 DJI clips on the test drive were copies, and 2 Sony clips re-wrapped months later took the day from their reel name. `[UNKNOWN]` No real ARRI, Pixel or `VID_` clip has been run; their names were tested on generated clips.
 
 `[TESTED]` On 24 real Sony clips, ISO, shutter and aperture all matched ExifTool's reading of the same track.
 

@@ -40,7 +40,7 @@ for i in range(n):
 open(f'{t}/list.txt', 'w').write('\n'.join(paths) + '\n')
 P
 run() {
-  ENGINE_TEST_FAKE_VISION=1 /usr/bin/time -l $B scan --paths-file $T/list.txt --cache $T/cache > $T/out.jsonl 2> $T/err.txt
+  ENGINE_TEST_FAKE_VISION=1 /usr/bin/time -l $B scan --paths-file $T/list.txt --cache $T/cache "$@" > $T/out.jsonl 2> $T/err.txt
   echo "exit $?"
   python3 -I - $T <<'P'
 import json, re, sys
@@ -61,10 +61,11 @@ print('lines', dict(sorted(types.items())))
 print('groups', len(groups), 'clips in them', sum(len(g['paths']) for g in groups), 'largest', max((len(g['paths']) for g in groups), default=0))
 print('wall', done['wallMs'], 'ms, cached', done['cached'], ', peak memory', rss // (1 << 20), 'MB')
 for l in err.splitlines():
-    if re.search(r'phase|groups done', l): print(' ', l.strip())
+    if re.search(r'phase|groups done|cached only', l): print(' ', l.strip())
 P
 }
 echo "--- $N clips, cold"; run
 echo "cache: $(du -sh $T/cache | cut -f1)"
 cp $T/out.jsonl $T/cold.jsonl; cp $T/cache/prints-v4.bin $T/coldprints.bin
 echo "--- $N clips, cached"; run
+echo "--- $N clips, from the cache alone"; run --cached-only

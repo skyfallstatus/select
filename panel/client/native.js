@@ -1,5 +1,5 @@
-// Everything in the panel that needs Node: the engine process, the optional write lock, the Undo records, the folder walk
-// and the manifest.
+// Everything in the panel that needs Node: the engine process, the optional write lock, the Undo records, the last
+// results, the folder walk, the Finder, the manifest and Premiere's font.
 (function (root, factory) {
   var req = root.cep_node ? root.cep_node.require : (typeof require === 'function' ? require : null);
   var core = root.SelectCore || (typeof module === 'object' && module && module.exports ? require('./core.js') : null);
@@ -83,6 +83,45 @@
     };
   }
 
+  // One clip's hover-scrub frames: `strip --path`, one line back. The engine gives up after 1.5 s by itself; past
+  // STRIP_KILL_MS it is stopped anyway, as Stop stops a scan. done(err, msg) once, msg the strip line; an error line, a
+  // crash or the deadline is err. stop() ends it without calling done.
+  var STRIP_KILL_MS = 3000;
+
+  function runStrip(binary, clip, done, killAfterMs) {
+    var called = false, timer = null, killer = null, out = '', decoder = new StringDecoder('utf8'), child;
+    function finish(err, msg) {
+      if (called) { return; }
+      called = true;
+      clearTimeout(timer);
+      done(err, msg || null);
+    }
+    function end() {
+      child.kill('SIGTERM');
+      killer = setTimeout(function () { child.kill('SIGKILL'); }, KILL_AFTER_MS);
+    }
+    try {
+      child = cp.spawn(binary, ['strip', '--path', clip], { stdio: ['pipe', 'pipe', 'ignore'] });
+    } catch (e) {
+      finish(e);
+      return { stop: function () {} };
+    }
+    child.stdout.on('data', function (chunk) { out += decoder.write(chunk); });
+    child.stdout.on('error', function () {});
+    child.stdin.on('error', function () {});
+    child.on('error', function (e) { finish(e); });
+    child.on('close', function (code, signal) {
+      if (killer) { clearTimeout(killer); }
+      var msg = null;
+      try { msg = JSON.parse((out + decoder.end()).split('\n')[0]); } catch (e) {}
+      if (msg && msg.type === 'strip' && msg.file) { finish(null, msg); return; }
+      finish(new Error(msg && msg.message ? String(msg.message) : 'The engine ended ' + (signal || 'with code ' + code) + '.'));
+    });
+    timer = setTimeout(function () { end(); finish(new Error('The engine took too long.')); }, killAfterMs || STRIP_KILL_MS);
+    if (child.pid) { child.stdin.end(); }
+    return { pid: child.pid, stop: function () { if (!called) { called = true; clearTimeout(timer); end(); } } };
+  }
+
   function pidAlive(pid) {
     try {
       process.kill(Number(pid), 0);
@@ -143,7 +182,7 @@
     }
   }
 
-  // What Undo Write reaches in a project: {ids, top}, every record id oldest first, and the newest record with something
+  // What Undo reaches in a project: {ids, top}, every record id oldest first, and the newest record with something
   // left to put back. A record of this format with nothing in it, from a write whose first batch never answered, is
   // removed on the way, except `filling`, the one a running write is filling. A record that doesn't read is skipped and
   // stays on disk: it may be damaged, or a newer Select's, and only the newest UNDO_KEEP are kept anyway.
@@ -283,11 +322,134 @@
     });
   }
 
+  // ---------------------------------------------------------------- the Finder
+
+  // Shows clips in the Finder, every one selected: the first 20 that are on disk, through the engine's `reveal`, since
+  // `open -R` with several files selects only the last. Should the engine be missing or fail, `open -R` shows the first
+  // one, so Reveal never does nothing. The engine gives up after 3 s by itself; past REVEAL_KILL_MS it is stopped.
+  // done(err, shown).
+  var MOST_REVEAL = 20, REVEAL_KILL_MS = 6000;
+
+  // The first `most` of these paths that are on disk.
+  function onDisk(paths, most) {
+    return (paths || []).slice(0, most || MOST_REVEAL).filter(function (p) {
+      try { return fs.existsSync(p); } catch (e) { return false; }
+    });
+  }
+
+  function revealInFinder(binary, paths, done, execFile) {
+    var list = onDisk(paths), exec = execFile || cp.execFile;
+    if (!list.length) { done(null, 0); return; }
+    function openFirst() {
+      exec('/usr/bin/open', ['-R', list[0]], { timeout: 10000 }, function (err) {
+        done(err ? new Error(err.killed ? 'the Finder took too long' : String(err.message || err)) : null, err ? 0 : 1);
+      });
+    }
+    if (!binary || engineProblem(binary)) { openFirst(); return; }
+    exec(binary, ['reveal'].concat(list), { timeout: REVEAL_KILL_MS }, function (err, stdout) {
+      var msg = null;
+      try { msg = JSON.parse(String(stdout || '').split('\n')[0]); } catch (e) {}
+      // shown 0: they went from the disk since the look above.
+      if (!err && msg && msg.type === 'reveal') { done(null, msg.shown || 0); return; }
+      openFirst();
+    });
+  }
+
+  // ---------------------------------------------------------------- last results
+
+  // What a project's last scan read, so a panel opened again shows it from the cache: last/<projectKey>.json, one per
+  // project, the newest LAST_KEEP kept. A record names its project, and one that names another, or is in another
+  // format, is ignored.
+  var LAST_FORMAT = 1, LAST_KEEP = 20, LAST_FILE = /^[0-9a-f]{16}\.json$/, lastSaved = 0;
+
+  function lastDir(home) {
+    return nodePath.join(supportDir(home), 'last');
+  }
+
+  function lastFile(project, home) {
+    return nodePath.join(lastDir(home), core.projectKey(project) + '.json');
+  }
+
+  function readLast(file, project) {
+    try {
+      var r = JSON.parse(fs.readFileSync(file, 'utf8'));
+      if (!r || typeof r !== 'object' || r.v !== LAST_FORMAT || typeof r.project !== 'string' || !Array.isArray(r.paths)) { return null; }
+      if (project !== undefined && core.pathKey(r.project) !== core.pathKey(project)) { return null; }
+      return r;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  // Written whole to a temporary file and renamed, so a crash leaves the old record or the new one. Then only the
+  // LAST_KEEP projects saved most recently stay. Returns {ok} or {ok: false, error}.
+  function saveLast(project, record, home) {
+    var dir = lastDir(home), file = lastFile(project, home), tmp = file + '.tmp';
+    record.v = LAST_FORMAT;
+    record.project = project;
+    // Strictly later than the save before, so the newest are known even within one millisecond.
+    lastSaved = record.saved = Math.max(Date.now(), lastSaved + 1);
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(tmp, JSON.stringify(record));
+      fs.renameSync(tmp, file);
+    } catch (e) {
+      try { fs.unlinkSync(tmp); } catch (x) {}
+      return { ok: false, error: e.code || String(e.message || e) };
+    }
+    keepNewest(dir, file.slice(dir.length + 1), record.saved);
+    return { ok: true };
+  }
+
+  // Which records are newest, from a small index (last/index.json: file name to when it was saved), so a save never
+  // reads the other records. A record the index doesn't know, as after the index was lost, counts as the oldest; one
+  // that has gone leaves it.
+  var LAST_INDEX = 'index.json';
+  function keepNewest(dir, name, saved) {
+    var index = {}, names = [], file = nodePath.join(dir, LAST_INDEX);
+    try {
+      var read = JSON.parse(fs.readFileSync(file, 'utf8'));
+      if (read && typeof read === 'object' && !Array.isArray(read)) { index = read; }
+    } catch (e) {}
+    try { names = fs.readdirSync(dir).filter(function (n) { return LAST_FILE.test(n); }); } catch (e) {}
+    var kept = {};
+    names.forEach(function (n) { kept[n] = typeof index[n] === 'number' ? index[n] : 0; });
+    kept[name] = saved;
+    var order = Object.keys(kept).sort(function (a, b) { return kept[b] - kept[a]; });
+    order.slice(LAST_KEEP).forEach(function (n) {
+      try { fs.unlinkSync(nodePath.join(dir, n)); } catch (e) {}
+      delete kept[n];
+    });
+    try {
+      fs.writeFileSync(file + '.tmp', JSON.stringify(kept));
+      fs.renameSync(file + '.tmp', file);
+    } catch (e) {
+      try { fs.unlinkSync(file + '.tmp'); } catch (x) {}
+    }
+  }
+
+  // The record, or null when there is none, it can't be read, it is in another format or names another project.
+  function loadLast(project, home) {
+    return project ? readLast(lastFile(project, home), project) : null;
+  }
+
+  // A file's bytes, for Premiere's own font (app.js loadHostFont). done(err, buffer).
+  function readFile(file, done) {
+    fs.readFile(file, done);
+  }
+
   return {
     available: true,
+    readFile: readFile,
+    revealInFinder: revealInFinder,
+    onDisk: onDisk,
+    MOST_REVEAL: MOST_REVEAL,
+    lastResults: { save: saveLast, load: loadLast, dir: lastDir, file: lastFile, KEEP: LAST_KEEP },
     pickFolder: pickFolder,
     engineProblem: engineProblem,
     runEngine: runEngine,
+    runStrip: runStrip,
+    STRIP_KILL_MS: STRIP_KILL_MS,
     configFile: configFile,
     readConfig: readConfig,
     undoDir: undoDir,

@@ -35,7 +35,7 @@ function inZone(tz, fn) {
 }
 
 // A view is two questions and a colour: what to show, and in what order.
-const V = over => ({ show: null, sort: [], family: null, ...over });
+const V = over => ({ show: null, sort: [], families: [], ...over });
 const by = (key, dir) => ({ key, dir });
 
 // The engine's similar-shot groups for fixture records, made the way the fake engine makes them.
@@ -194,7 +194,7 @@ test('sorts on the synthetic fixture: every Sort entry, both ways, keeps every c
       assert.ok(has.lastIndexOf(true) < (has.indexOf(false) === -1 ? Infinity : has.indexOf(false)), `${e.key} ${dir}: empty values last`);
       const vals = list.map(r => r[f]).filter(known);
       assert.ok(vals.length > 10, e.key + ' has values in the fixture');
-      const cmp = e.key === 'name' ? (a, b) => collator.compare(a, b) : (a, b) => a - b;
+      const cmp = typeof vals[0] === 'string' ? (a, b) => collator.compare(a, b) : (a, b) => a - b;
       assert.ok(vals.every((x, i) => !i || cmp(vals[i - 1], x) * dir <= 0), `${e.key} ${dir}: in order`);
     }
   }
@@ -217,13 +217,15 @@ test('shows on the synthetic fixture: each keeps exactly what it says, in the or
   assert.ok(silent.every(r => r.hasAudio === false || r.silent === true));
   assert.equal(silent.length, rows.filter(r => r.hasAudio === false || r.silent === true).length);
 
-  const interview = r => r.speech === true && r.faces > 0 && r.durationS >= C.INTERVIEW_MIN_S && (typeof r.shake !== 'number' || r.shake <= C.SHAKE_LIMIT);
+  const heard = r => (r.sounds || []).filter(x => x.name === 'speech').map(x => x.conf)[0] || 0;
+  const interview = r => heard(r) >= C.INTERVIEW_SPEECH && r.faces > 0 && r.shotSize === 'medium' && r.durationS >= C.INTERVIEW_MIN_S;
   const iv = view('interviews', [by('durationS', -1)]).list;
   assert.ok(iv.length > 0);
-  assert.ok(iv.every(interview), 'speech, a face, 15 s or longer, and steady when shake is known');
+  assert.ok(iv.every(interview), 'speech heard at 0.7 or more, a face, a medium shot, 15 s or longer');
   assert.equal(iv.length, rows.filter(interview).length, 'and nothing that qualifies is lost');
-  assert.ok(iv.some(r => r.shake === null), 'an unknown shake does not rule a clip out');
+  assert.ok(iv.some(r => r.shake === null) && iv.some(r => typeof r.shake === 'number'), 'shake plays no part');
   assert.ok(rows.some(r => r.speech === true && r.faces > 0 && r.durationS < C.INTERVIEW_MIN_S && !iv.includes(r)), 'short talking clips are left out');
+  assert.ok(rows.some(r => r.speech === true && r.faces > 0 && r.durationS >= C.INTERVIEW_MIN_S && r.shotSize === 'wide' && !iv.includes(r)), 'a wide shot is left out');
   assert.ok(descending(iv, 'durationS'));
 
   for (const sh of C.SHOWS.filter(x => !x.group)) {
@@ -307,28 +309,6 @@ test('bins: fifths of a number sort, words follow direction, no value kept apart
   assert.equal(C.sortWords(by('luma', 1)), 'Darkest first');
   assert.equal(C.sortWords(by('sharpness', 1)), 'Softest first');
   assert.equal(C.sortWords(by('camera', 1)), 'Camera A to Z');
-});
-
-test('column values: text order equals number order, and null stays empty', () => {
-  const s = storeFromFixture(fixture);
-  const checks = { SelectLuma: 'luma', SelectSharpness: 'sharpness', SelectClipHigh: 'clipHighPct', SelectMotion: 'motionProxy', SelectAudio: 'audioDb' };
-  for (const [field, key] of Object.entries(checks)) {
-    // Loudness says the real level after its sort key: 077.6 (-22.4 dB). The key is what Premiere sorts on.
-    const sortKey = v => (field === 'SelectAudio' ? v.slice(0, 5) : v);
-    const pairs = s.rows.filter(r => r[key] !== null && r[key] !== undefined).map((r, i) => [r[key], sortKey(C.columnValues(r, i + 1, 4)[field])]);
-    assert.ok(pairs.length > 10, field);
-    assert.equal(new Set(pairs.map(p => p[1].length)).size, 1, field + ' has one width');
-    const lexical = pairs.slice().sort((a, b) => (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0)).map(p => p[0]);
-    assert.ok(lexical.every((v, i) => !i || lexical[i - 1] <= v + 1e-3), field + ' sorts as a number');
-  }
-  const v = C.columnValues({ sharpness: null, luma: null, clipHighPct: null, motionProxy: null, audioDb: null }, 7, 4);
-  assert.deepStrictEqual(v, { SelectRank: '0007', SelectSharpness: '', SelectLuma: '', SelectClipHigh: '', SelectMotion: '', SelectAudio: '', SelectPeople: '', SelectFaces: '', SelectShot: '', SelectColour: '', SelectSound: '', SelectLabels: '', SelectText: '' });
-  const full = C.columnValues({ people: 12, faces: 0, shotSize: 'medium', colorName: 'teal', sounds: [{ name: 'speech', conf: 1 }, { name: 'wind', conf: .5 }], labels: [{ name: 'oven', conf: .9 }], text: ['Fresh today'] }, 1, 4);
-  assert.deepStrictEqual([full.SelectPeople, full.SelectFaces, full.SelectShot, full.SelectColour, full.SelectSound, full.SelectLabels, full.SelectText], ['012', '000', 'Medium', 'Teal', 'speech, wind', 'oven', 'Fresh today']);
-  assert.equal(C.columnValues({ audioDb: -9 }, 1, 4).SelectAudio, '091.0 (-9.0 dB)');
-  assert.equal(C.columnValues({ audioDb: -30 }, 1, 4).SelectAudio, '070.0 (-30.0 dB)');
-  assert.ok(C.columnValues({ audioDb: -9 }, 1, 4).SelectAudio > C.columnValues({ audioDb: -30 }, 1, 4).SelectAudio, 'louder sorts higher as text');
-  assert.equal(C.columnValues({ clipHighPct: 12.5 }, 1, 4).SelectClipHigh, '012.50');
 });
 
 test('host call text is pure ASCII and survives quoting', () => {
@@ -589,22 +569,27 @@ test('sources: claims stay honest; .r3d and .braw list as rows without a claim t
 function facts(over) {
   const store = { total: 301, tier0: 301, tier1: 301, errors: 0, bad: 0 };
   return {
-    source: 'project', project: { name: 'x', path: '/x' }, connected: true, listing: false, busy: null, outcome: null, store, rows: 301, shown: 301, selected: 0, groupCount: 0,
+    project: { name: 'x', path: '/x' }, connected: true, title: 'x', listing: false, busy: null, outcome: null, store, rows: 301, shown: 301, selected: 0, groupCount: 0,
     view: V({ sort: [by('sharpness', 1)] }), scan: { state: 'Done', failure: null, seconds: 1.84, stopping: false }, ...over
   };
 }
 
-test('foot: before scanning', () => {
-  const f = C.footState(facts({ scan: null, rows: 0, shown: 0, view: V() }));
-  assert.equal(f.kind, 'empty');
+test('foot: before scanning, the status is what Scan would read', () => {
+  const target = { kind: 'project', sig: '', items: [{ path: '/v/a.mp4' }, { path: '/v/b.mov' }, { path: '/v/b.mov' }, { path: '/v/c.wav' }], places: [], more: 0 };
+  const f = C.footState(facts({ scan: null, rows: 0, shown: 0, view: V(), target }));
+  assert.equal(f.kind, 'target');
   assert.equal(f.mark, 'waiting');
-  assert.equal(f.verdict, 'Nothing scanned yet');
+  assert.equal(f.verdict, 'Whole project');
+  assert.equal(f.sentence, '2 clips', 'video only, one per file, as a scan makes rows');
   assert.deepStrictEqual(f.actions, ['scan']);
   assert.equal(f.primary, 'scan');
+  assert.equal(f.scanTip, 'Whole project \u00b7 2 clips');
+  assert.equal(f.tip, 'x', 'the project, in the tooltip');
   assert.ok(!f.green);
   assert.equal(C.footState(facts({ scan: null, rows: 0, project: null })).verdict, 'No project open');
+  assert.deepStrictEqual(C.footState(facts({ scan: null, rows: 0, project: null })).actions, [], 'nothing to scan');
   assert.equal(C.footState(facts({ scan: null, rows: 0, project: null, connected: false })).verdict, 'Waiting for Premiere');
-  assert.equal(C.footState(facts({ scan: null, rows: 0, source: 'folder', project: null })).verdict, 'Nothing scanned yet', 'a folder needs no project');
+  assert.equal(C.footState(facts({ scan: null, rows: 0, target: null })).verdict, 'Waiting for Premiere', 'before the first answer');
 });
 
 test('foot: scanning', () => {
@@ -623,13 +608,14 @@ test('foot: finished, with Scan gone from the foot', () => {
   assert.equal(f.mark, 'done');
   assert.equal(f.verdict, 'Softest first');
   assert.equal(f.sentence, '', 'a sort keeps every clip, so there is nothing to add');
-  assert.deepStrictEqual(f.actions, ['label', 'columns', 'bins']);
+  assert.deepStrictEqual(f.actions, ['sequence', 'bins'], 'Add Columns is gone since 0.4, Make Sequence is new, Label is in the right-click menu');
   assert.equal(f.primary, 'bins');
   assert.ok(!f.binsOff && !f.green);
   const unsorted = C.footState(facts({ view: V() }));
   assert.equal(unsorted.verdict, '301 clips read');
   assert.equal(unsorted.sentence, '');
-  assert.ok(unsorted.binsOff, 'bins need a show, a sort or a colour');
+  assert.ok(unsorted.binsOff, 'bins need a show, a sort, a colour, a search or picked clips');
+  assert.equal(unsorted.primary, 'bins', 'with no bins to make, Sort into Bins is off and there is no blue: it never hops to Make Sequence');
   assert.equal(C.footState(facts({ selected: 4 })).verdict, '4 of 301 clips selected');
   assert.equal(C.footState(facts({ selected: 4 })).sentence, '');
   const filtered = C.footState(facts({ shown: 12, view: V({ show: 'silent' }) }));
@@ -644,20 +630,23 @@ test('foot: finished, with Scan gone from the foot', () => {
   assert.equal(bright.sentence, '');
 });
 
-test('foot: a new source brings Scan back, and the old results stay', () => {
+test('foot: a new Premiere selection outside the results adds a grey Scan, and the words and the old results stay', () => {
   const was = C.footState(facts({ scan: { state: 'Done', seconds: 2, failure: null } }));
   assert.ok(!was.actions.includes('scan'));
-  const f = C.footState(facts({ scan: { state: 'Done', seconds: 2, failure: null }, source: 'folder', rescan: true }));
-  assert.deepStrictEqual(f.actions, ['scan']);
-  assert.equal(f.primary, 'scan');
-  assert.equal(f.verdict, 'Ready to scan');
-  assert.equal(f.sentence, '');
+  const target = { kind: 'clips', sig: '9:a:b', places: ['Day 3'], more: 0, items: [] };
+  const f = C.footState(facts({ scan: { state: 'Done', seconds: 2, failure: null }, target, others: 8 }));
+  assert.deepStrictEqual(f.actions, ['sequence', 'bins', 'scan'], 'Scan comes last');
+  assert.equal(f.primary, 'bins', 'the blue never moves when he clicks in Premiere');
+  assert.equal(f.verdict, was.verdict);
+  assert.equal(f.sentence, was.sentence);
+  assert.equal(f.scanWhat, 'target');
+  assert.equal(f.scanTip, '8 other clips selected \u00b7 Day 3');
 });
 
 test('foot: stopped, failed, and nothing readable', () => {
   const stopped = C.footState(facts({ store: { total: 301, tier0: 200, tier1: 120, errors: 0, bad: 0 }, scan: { state: 'Stopped', failure: null, seconds: 1, stopping: false } }));
   assert.equal(stopped.verdict, 'Stopped');
-  assert.equal(stopped.sentence, '120 of 301 clips read.');
+  assert.equal(stopped.sentence, '120 of 301 clips read', 'one line, no full stop');
   assert.equal(stopped.primary, 'scan');
   const failed = C.footState(facts({ scan: { state: 'Failed', failure: C.engineFailure({ errorCode: 'ENOENT' }, 0), seconds: 0, stopping: false } }));
   assert.equal(failed.mark, 'failed');
@@ -687,11 +676,6 @@ test('green: only when what was read back matches what was sent', () => {
   const label = C.writeOutcome('label', { items: pairs('1', '2') }, { ok: true, changed: 2, failed: [] }, 'Mango');
   assert.equal(label.green, true);
   assert.equal(label.verdict, 'Labelled 2 clips Mango');
-
-  const cols = { fields: C.FIELDS, rows: [{ items: pairs('1', '2'), values: {} }] };
-  const columns = C.writeOutcome('columns', cols, { ok: true, changed: 2, matched: 2, failed: [], columns: { shown: true } });
-  assert.equal(columns.green, true);
-  assert.equal(columns.verdict, 'Added 13 columns');
 });
 
 test('green: never on a partial or unconfirmed write, whatever the host calls it', () => {
@@ -699,7 +683,7 @@ test('green: never on a partial or unconfirmed write, whatever the host calls it
   // One clip stayed behind, and the host still said ok.
   let o = never(C.writeOutcome('bins', binsSent(), { ok: true, moved: 3, failed: [], placed: placedAll(), buckets: [{ name: '01 Softest', ids: ['1'] }, { name: '02 Softer', ids: ['3'] }] }));
   assert.equal(o.verdict, 'Moved 2 of 3 clips');
-  assert.equal(o.sentence, '1 clip did not land where it should.');
+  assert.equal(o.sentence, '1 clip didn\'t land.');
   // In the wrong bin.
   o = never(C.writeOutcome('bins', binsSent(), { ok: true, moved: 3, failed: [], placed: placedAll(), buckets: [{ name: '01 Softest', ids: ['1', '3'] }, { name: '02 Softer', ids: ['2'] }] }));
   assert.equal(o.verdict, 'Moved 1 of 3 clips');
@@ -716,14 +700,6 @@ test('green: never on a partial or unconfirmed write, whatever the host calls it
   assert.equal(o.verdict, 'Nothing moved');
   assert.equal(o.undo, false);
 
-  const cols = { fields: C.FIELDS, rows: [{ items: pairs('1'), values: {} }, { items: pairs('2', '3'), values: {} }] };
-  o = never(C.writeOutcome('columns', cols, { ok: true, changed: 3, matched: 2, failed: [], columns: { shown: true } }));
-  assert.equal(o.verdict, 'Wrote 2 of 3 clips');
-  o = never(C.writeOutcome('columns', cols, { ok: true, changed: 3, failed: [], columns: { shown: true } }));
-  assert.equal(o.verdict, 'Written, not confirmed');
-  o = never(C.writeOutcome('columns', cols, { ok: true, changed: 3, matched: 3, failed: [], columns: { shown: false } }));
-  assert.match(o.sentence, /Metadata Display/);
-
   o = never(C.writeOutcome('label', { items: pairs('1', '2') }, { ok: true, changed: 1, failed: [{ id: '2', error: 'label did not change' }] }, 'Mango'));
   assert.equal(o.verdict, 'Labelled 1 of 2 clips');
   assert.deepStrictEqual(C.footState(facts({ outcome: o })).actions, ['details', 'undo']);
@@ -732,9 +708,15 @@ test('green: never on a partial or unconfirmed write, whatever the host calls it
 test('undo words: never green, and honest about what stayed', () => {
   assert.equal(C.undoOutcome({ restored: 301, skipped: 0, failed: [] }).sentence, '');
   const some = C.undoOutcome({ restored: 5, skipped: 1, failed: [] });
-  assert.match(some.sentence, /1 changed since and left alone/);
+  assert.match(some.sentence, /1 changed since, left alone/);
   assert.ok(!some.green);
   assert.equal(C.footState(facts({ outcome: C.undoOutcome({ restored: 1, skipped: 0, failed: [] }) })).mark, 'done');
+  // An Undo's outcome never offers Undo on the status: a second click would take back an older write.
+  [{ restored: 1, skipped: 0, failed: [] }, { restored: 1, skipped: 0, failed: [{ id: '2', error: 'x' }] }, { restored: 0, skipped: 2, failed: [] }].forEach(res => {
+    const o = C.undoOutcome(res), shown = C.footState(facts({ outcome: o }));
+    assert.ok(['Undone', 'Partly undone', 'Nothing went back'].includes(o.verdict));
+    assert.ok(!shown.actions.includes('undo'), o.verdict + ': ' + shown.actions.join());
+  });
 });
 
 test('theme: follows Premiere\'s brightness', () => {
@@ -764,15 +746,23 @@ test('tokens: exactly Ingest\'s, and every text colour measures at least 4.5:1',
   const css = fs.readFileSync(path.join(__dirname, '../client/style.css'), 'utf8');
   const light = tokensOf(css.slice(css.indexOf(':root {'), css.indexOf(':root[data-theme="dark"] {')));
   const dark = { ...light, ...tokensOf(css.slice(css.indexOf(':root[data-theme="dark"] {'), css.indexOf('* { box-sizing'))) };
-  assert.deepStrictEqual(light, { ink: '#1D1D1F', ink2: '#5F6063', ink3: '#8E8E93', surface: '#FFFFFF', foot: '#F4F4F6', disc: '#E7E7EC', tick: '#3A3A3C', ring: '#C9C9CE', track: '#E9E9EE', meter: '#6E6E73', 'focus-ring': '#8A8A90', cobalt: '#2563EB', bad: '#C9281C', safe: '#15803D' });
-  assert.deepStrictEqual(dark, { ink: '#EDEDEE', ink2: '#ADADB1', ink3: '#7C7C82', surface: '#26262A', foot: '#1C1C1F', disc: '#3A3A40', tick: '#EDEDEE', ring: '#55555C', track: '#3A3A40', meter: '#A0A0A6', 'focus-ring': '#9A9AA0', cobalt: '#2F6FE6', bad: '#FF6A5F', safe: '#15803D' });
+  assert.deepStrictEqual(light, { ink: '#1D1D1F', ink2: '#5F6063', ink3: '#8E8E93', surface: '#FFFFFF', foot: '#F4F4F6', disc: '#E7E7EC', tick: '#3A3A3C', ring: '#C9C9CE', track: '#E9E9EE', meter: '#6E6E73', 'focus-ring': '#2563EB', cobalt: '#2563EB', bad: '#C9281C', safe: '#15803D', 'safe-ink': '#0F6E31',
+    band: '#F3F3F5', edge: '#A9A9AE', sel: '#E4E4E9', warn: '#B25B00' });
+  assert.deepStrictEqual(dark, { ink: '#EDEDEE', ink2: '#ADADB1', ink3: '#7C7C82', surface: '#26262A', foot: '#1C1C1F', disc: '#3A3A40', tick: '#EDEDEE', ring: '#55555C', track: '#3A3A40', meter: '#A0A0A6', 'focus-ring': '#4A82EB', cobalt: '#2F6FE6', bad: '#FF6A5F', safe: '#15803D', 'safe-ink': '#34C759',
+    band: '#313135', edge: '#606066', sel: '#434349', warn: '#F5A524' });
   for (const t of [light, dark]) {
-    for (const [fg, bg] of [[t.ink, t.surface], [t.ink2, t.surface], [t.ink, t.foot], [t.ink2, t.foot], [t.ink, t.disc], [t.ink2, t.disc], [t.ink, t.track], [t.bad, t.foot], ['#FFFFFF', t.cobalt], ['#FFFFFF', t.safe], [t.safe, '#FFFFFF']]) {
+    for (const [fg, bg] of [[t.ink, t.surface], [t.ink2, t.surface], [t.ink, t.foot], [t.ink2, t.foot], [t.ink, t.disc], [t.ink2, t.disc], [t.ink, t.track], [t.bad, t.foot], ['#FFFFFF', t.cobalt], ['#FFFFFF', t.safe], [t.safe, '#FFFFFF'], [t['safe-ink'], t.surface], [t['safe-ink'], t.foot],
+      [t.ink, t.band], [t.ink2, t.band], [t.ink, t.sel]]) {
       assert.ok(contrast(fg, bg) >= 4.5, `${fg} on ${bg}: ${contrast(fg, bg).toFixed(2)}`);
+    }
+    // The coloured icons of the band need 3:1, on it and on the ground.
+    for (const [fg, bg] of [[t.warn, t.band], [t.warn, t.surface], [t.bad, t.band], [t['safe-ink'], t.band], [t['focus-ring'], t.surface], [t['focus-ring'], t.foot], [t['focus-ring'], t.band]]) {
+      assert.ok(contrast(fg, bg) >= 3, `${fg} on ${bg}: ${contrast(fg, bg).toFixed(2)}`);
     }
   }
   assert.ok(contrast(light.ink3, light.surface) < 4.5, 'ink3 stays for placeholders only');
-  assert.ok(!/color:\s*var\(--ink3\)/.test(css.replace(/#(folder|search)::placeholder \{[^}]*\}/g, '')), 'ink3 is used by the placeholder and by nothing else');
+  // ink3 is for a placeholder and for the words of a button that is off: never for words that have to be read.
+  assert.ok(!/color:\s*var\(--ink3\)/.test(css.replace(/#(folder|search)::placeholder \{[^}]*\}/g, '').replace(/\.action:disabled, \.action\.primary:disabled \{[^}]*\}/, '')), 'ink3 is used by the placeholder and buttons that are off, and by nothing else');
 });
 
 test('the ground is Premiere\'s own grey at every brightness, and secondary text still reads at 4.5:1 on it', () => {
@@ -808,28 +798,77 @@ test('the ground is Premiere\'s own grey at every brightness, and secondary text
 });
 
 // A project in memory, shaped as the host script sees Premiere. `lose` drops one id's move, as a failed read-back would show.
+// Like Premiere 26.5.2: findItemsMatchingMediaPath matches any part of the path and can leave subclips out, treePath is
+// \Project.prproj\Bin\Clip, a copy of a project keeps its documentID, and sequences are made from clips in the order given.
 function hostWith(options) {
   const o = options || {}, vm = require('vm');
   let next = 100;
-  const bin = name => { const b = { type: 2, name, nodeId: next++, kids: [], createBin(n) { const c = bin(n); c.up = b; b.kids.push(c); sync(b); return c; }, deleteBin() { if (b.up) { b.up.kids = b.up.kids.filter(k => k !== b); sync(b.up); } return true; } }; sync(b); return b; };
+  const descendants = b => b.kids.flatMap(k => (k.type === 2 ? descendants(k) : [k]));
+  const treeOf = c => { const names = []; for (let x = c; x; x = x.up) { names.unshift(x === root ? 'p.prproj' : x.name); } return '\\' + names.join('\\'); };
+  const bin = name => {
+    const b = { type: 2, name, nodeId: next++, kids: [],
+      createBin(n) { const c = bin(n); c.up = b; b.kids.push(c); sync(b); return c; },
+      deleteBin() { if (b.up) { b.up.kids = b.up.kids.filter(k => k !== b); sync(b.up); } return true; },
+      findItemsMatchingMediaPath(text, noSub) { o.searches = (o.searches || 0) + 1; if (text === '/') { o.everything = (o.everything || 0) + 1; } return descendants(b).filter(c => !c.seq && c.getMediaPath().includes(text) && !(noSub && c.sub)); } };
+    Object.defineProperty(b, 'treePath', { get: () => treeOf(b) });
+    sync(b);
+    return b;
+  };
   function sync(b) { b.children = { numItems: b.kids.length }; b.kids.forEach((k, i) => { b.children[i] = k; }); }
   const root = bin('root');
-  const clip = (id, up) => {
+  const clip = (id, up, extra) => {
     let meta = '', label = 0;
     const c = { type: 1, name: 'C' + id + '.MP4', nodeId: id, up, isSequence: () => false, getMediaPath: () => '/v/C' + id + '.MP4',
       getColorLabel: () => label, setColorLabel(l) { if (!o.stuckLabel || o.stuckLabel.size === 0 || !o.stuckLabel.has(id)) { label = l; } }, getProjectMetadata: () => meta,
       setProjectMetadata(xmp) { meta = o.dropMetadata ? '' : xmp; return true; },
-      moveBin(to) { if (o.lose === id || (o.stuck && o.stuck.size && o.stuck.has(id))) { return 0; } c.up.kids = c.up.kids.filter(k => k !== c); sync(c.up); c.up = to; to.kids.push(c); sync(to); return true; } };
+      moveBin(to) { if (o.lose === id || (o.stuck && o.stuck.size && o.stuck.has(id))) { return 0; } c.up.kids = c.up.kids.filter(k => k !== c); sync(c.up); c.up = to; to.kids.push(c); sync(to); return true; },
+      ...extra };
+    Object.defineProperty(c, 'treePath', { get: () => treeOf(c) });
     up.kids.push(c); sync(up);
     return c;
   };
   [1, 2, 3].forEach(id => clip(id, root));
-  const sandbox = { app: { version: '26', enableQE() {}, project: { path: '/p.prproj', name: 'p.prproj', rootItem: root, activeSequence: null, addPropertyToProjectMetadataSchema() {} } },
-    qe: { getModalWindowID: () => '', project: { getActiveSequence: () => null }, source: { player: { isPlaying: false } } } };
+  const seqs = [];
+  const sequences = () => { const list = { numSequences: seqs.length }; seqs.forEach((q, i) => { list[i] = q; }); return list; };
+  // As 26.5.2 does: V1 in the order given, settings from the first clip, and the new sequence opens in the Timeline.
+  const list = arr => Object.assign({ numItems: arr.length }, arr);
+  const makeSeq = (name, items, into) => {
+    if (o.noSequence) { return null; }
+    const id = 'seq-' + next, item = clip(next++, into || root, { name, seq: true, isSequence: () => true, getMediaPath: () => '' });
+    const v1 = items.map(it => ({ projectItem: it }));
+    // Three video and three audio tracks, the clips on V1 and A1, as 26.5.2 makes them.
+    const track = clips => ({ clips: list(clips), transitions: { numItems: 0 } }), tracks = arr => Object.assign({ numTracks: arr.length }, arr);
+    const q = { sequenceID: id, name, projectItem: item, frameSizeHorizontal: 1920, frameSizeVertical: 1080, timebase: '10160640000', end: String(items.length * 254016000000), zeroPoint: '0',
+      videoTracks: tracks([track(v1), track([]), track([])]), audioTracks: tracks([track(v1.slice()), track([]), track([])]), markers: { numMarkers: 0 },
+      inPoint: '0', outPoint: String(items.length * 1), getInPoint() { return q.inPoint; }, getOutPoint() { return q.outPoint; }, v1 };
+    seqs.push(q);
+    project.activeSequence = q;
+    return q;
+  };
+  const project = { path: '/p.prproj', name: 'p.prproj', documentID: 'doc-1', rootItem: root, activeSequence: null, addPropertyToProjectMetadataSchema() {},
+    get sequences() { return sequences(); },
+    createNewSequenceFromClips: (name, items, into) => makeSeq(name, items, into),
+    openSequence(id) { const q = seqs.find(x => x.sequenceID === id); if (q) { project.activeSequence = q; } return !!q; },
+    deleteSequence(q) {
+      const at = seqs.indexOf(q);
+      if (at < 0 || o.keepSequences) { return false; }
+      seqs.splice(at, 1);
+      if (project.activeSequence === q) { project.activeSequence = null; }
+      q.projectItem.up.kids = q.projectItem.up.kids.filter(k => k !== q.projectItem);
+      sync(q.projectItem.up);
+      return true;
+    } };
+  let viewSel = [];
+  const sandbox = { app: { version: '26', enableQE() {}, project,
+    getProjectViewIDs: () => ['view0'], getProjectFromViewID: () => project, getCurrentProjectViewSelection: () => null,
+    getProjectViewSelection: () => viewSel, setProjectViewSelection(items) { viewSel = items.slice(); } },
+    qe: { getModalWindowID: () => '', project: { getActiveSequence: () => (project.activeSequence ? { player: { isPlaying: false } } : null), undoStackIndex: () => (o.undoAt === undefined ? 7 : o.undoAt) }, source: { player: { isPlaying: false } } } };
   vm.createContext(sandbox);
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../host/select.jsx'), 'utf8'), sandbox);
   if (o.noModalCheck) { delete sandbox.qe.getModalWindowID; }
-  return { call: (fn, args) => JSON.parse(sandbox.slCall(fn, JSON.stringify(args))), root, sandbox, clip: id => root.kids.concat(...root.kids.map(k => k.kids || [])).concat(...root.kids.flatMap(k => (k.kids || []).map(x => x.kids || []))).find(c => c.nodeId === id) };
+  const all = () => descendants(root).concat(root.kids.filter(k => k.type === 2)).concat(...root.kids.filter(k => k.type === 2).map(k => k.kids.filter(x => x.type === 2)));
+  return { call: (fn, args) => JSON.parse(sandbox.slCall(fn, JSON.stringify(args))), root, sandbox, seqs, options: o, addClip: (id, up, extra) => clip(id, up || root, extra),
+    clip: id => all().find(c => c.nodeId === id) };
 }
 
 const binsArgs = () => ({ project: '/p.prproj', root: 'SELECT x', buckets: [{ name: '01 Softest', items: pairs('1', '2') }, { name: '02 Softer', items: pairs('3') }] });
@@ -840,12 +879,10 @@ function viaHost(h, kind, sent, size) {
   const acc = C.writeAcc(kind), items = [];
   let list, head = null;
   if (kind === 'label') { list = sent.items; }
-  if (kind === 'columns') { list = sent.rows.flatMap(r => r.items.map(p => ({ items: [p], values: r.values }))); }
   if (kind === 'bins') { list = sent.buckets.flatMap(b => b.items.map(p => ({ name: b.name, pair: p }))); }
   for (const part of C.batches(list, size || C.BATCH)) {
     const args = kind === 'label' ? { project: '/p.prproj', items: part, color: sent.color }
-      : kind === 'columns' ? { project: '/p.prproj', fields: sent.fields, rows: part, show: sent.show !== false && !acc.columns }
-        : { project: '/p.prproj', root: sent.root, buckets: C.groupMoves(part), ...(acc.top ? { top: acc.top } : {}) };
+      : { project: '/p.prproj', root: sent.root, buckets: C.groupMoves(part), ...(acc.top ? { top: acc.top } : {}) };
     const res = h.call(kind, args);
     if (!res.ok) { acc.error = res.message; break; }
     C.addBatch(kind, acc, res);
@@ -873,11 +910,10 @@ test('undo: a move that said yes and did nothing is a failure, and it can be ret
   assert.equal(first.restored, 2);
   assert.equal(first.failed.length, 1);
   assert.equal(first.remaining.items.length, 1, 'only what is left is retried');
-  const o = C.undoOutcome(first, true);
+  const o = C.undoOutcome(first);
   assert.equal(o.verdict, 'Partly undone');
-  assert.equal(o.undo, true, 'Undo Write stays while a record is left');
+  assert.equal(o.undo, false, 'what is left goes back through the ··· menu, never a second click on the status');
   assert.equal(o.kind, 'partial');
-  assert.equal(C.undoOutcome(first, false).undo, false);
   stuck.clear();
   const second = h.call('restore', { project: '/p.prproj', restore: first.remaining });
   assert.equal(second.restored, 1);
@@ -903,14 +939,28 @@ test('undo: an id that now names another clip is left alone', () => {
   assert.equal(back.skipped, 1);
 });
 
-test('undo: column values with markup go back as they were', () => {
-  const h = hostWith(), c = h.root.kids[0], tag = 'premierePrivateProjectMetaData:SelectRank';
-  c.setProjectMetadata(`<${tag}>A&amp;B</${tag}>`);
-  const res = h.call('columns', { project: '/p.prproj', show: false, fields: [{ name: 'SelectRank', label: 'x' }], rows: [{ items: pairs('1'), values: { SelectRank: '0001' } }] });
-  const back = h.call('restore', { project: '/p.prproj', restore: res.restore });
+test('undo: an Add Columns record from 0.2 or 0.3 still goes back, markup and all, though 0.4 writes no columns', () => {
+  const h = hostWith(), [a, b] = h.root.kids, tag = f => 'premierePrivateProjectMetaData:' + f;
+  const wrote = (c, values) => c.setProjectMetadata(Object.entries(values).map(([f, v]) => `<${tag(f)}>${v}</${tag(f)}>`).join(''));
+  // As 0.3 left it: the clip holds what Add Columns wrote, and the record holds that and what was there before.
+  wrote(a, { SelectRank: '0001', SelectMotion: '0.412' });
+  wrote(b, { SelectRank: '0007', SelectMotion: '0.100' });
+  const fields = ['SelectRank', 'SelectMotion'];
+  const restore = { kind: 'columns', fields, items: [
+    { id: '1', path: '/v/C1.MP4', wrote: { SelectRank: '0001', SelectMotion: '0.412' }, was: { SelectRank: 'A&B', SelectMotion: '' } },
+    { id: '2', path: '/v/C2.MP4', wrote: { SelectRank: '0002', SelectMotion: '0.300' }, was: { SelectRank: '', SelectMotion: '' } }] };
+  const back = h.call('restore', { project: '/p.prproj', restore, final: true, write: 'undo-1' });
+  assert.ok(back.ok);
   assert.equal(back.restored, 1);
-  assert.ok(c.getProjectMetadata().includes('>A&amp;B<'));
-  assert.ok(!c.getProjectMetadata().includes('&amp;amp;'));
+  assert.equal(back.skipped, 1, 'a clip whose values changed since is left alone');
+  assert.ok(a.getProjectMetadata().includes('>A&amp;B<'));
+  assert.ok(!a.getProjectMetadata().includes('&amp;amp;'));
+  assert.ok(b.getProjectMetadata().includes('>0007<'));
+  assert.equal(C.undoWords({ kind: 'columns', restore }), 'Puts back what the Select columns held on 2 clips before this write.');
+  // Nothing in 0.4 writes columns any more.
+  assert.equal(h.call('columns', { project: '/p.prproj', fields: [], rows: [] }).code, 'unknown-call');
+  assert.equal(C.FIELDS, undefined);
+  assert.equal(C.columnValues, undefined);
 });
 
 test('bins: a failure part way through keeps what is needed to undo the clips that moved', () => {
@@ -944,7 +994,8 @@ test('bins: when nothing moved, no empty bins stay behind', () => {
 test('guard: a dialog state nobody can read is refused', () => {
   const res = hostWith({ noModalCheck: true }).call('label', { project: '/p.prproj', items: pairs('1'), color: 5 });
   assert.equal(res.ok, false);
-  assert.match(res.message, /no dialog is open/);
+  assert.equal(res.code, 'modal-unknown');
+  assert.equal(res.message, 'Premiere didn\'t answer. Nothing was written.');
 });
 
 test('host: bins report what each bin really holds, and the foot reads it', () => {
@@ -959,17 +1010,6 @@ test('host: bins report what each bin really holds, and the foot reads it', () =
   const o = C.writeOutcome('bins', sent, lost);
   assert.ok(!o.green);
   assert.equal(o.verdict, 'Moved 2 of 3 clips');
-});
-
-test('host: columns read each value back, and a value that did not stick is not counted', () => {
-  const values = { SelectRank: '0001', SelectMotion: '0.412' }, sent = { project: '/p.prproj', show: false, fields: [{ name: 'SelectRank', label: 'Select Rank' }, { name: 'SelectMotion', label: 'Select Motion' }], rows: [{ items: pairs('1', '2'), values }] };
-  const ok = viaHost(hostWith(), 'columns', sent);
-  assert.equal(ok.changed, 2);
-  assert.equal(ok.matched, 2);
-  const lost = viaHost(hostWith({ dropMetadata: true }), 'columns', sent);
-  assert.equal(lost.changed, 2, 'the set call said yes');
-  assert.equal(lost.matched, 0);
-  assert.ok(!C.writeOutcome('columns', sent, lost).green);
 });
 
 test('product: the panel agrees with product.conf', () => {
@@ -1011,13 +1051,13 @@ test('colour: rainbow order, red first, flat clips after vivid ones, neutral las
   const s = t2Store(list), names = order => order.map(i => s.rows[i].name.replace('.mp4', ''));
   const v = C.computeView(s.rows, V({ sort: [by('colorName', 1)] }));
   assert.deepStrictEqual(names(v.order), ['red', 'redhigh', 'orange', 'green', 'blue', 'pink', 'pinklow', 'logred', 'logblue', 'white', 'grey', 'dark', 'later']);
-  const fam = C.computeView(s.rows, V({ sort: [by('colorName', 1)], family: 'blue' }));
+  const fam = C.computeView(s.rows, V({ sort: [by('colorName', 1)], families: ['blue'] }));
   assert.deepStrictEqual(names(fam.order), ['blue', 'logblue'], 'a family filter keeps flat clips of that family');
   assert.deepStrictEqual(C.familyCounts(s.rows).neutral, 3);
   assert.equal(C.cellText(s.rows[s.rows.length - 1], C.COLUMN.colorName), '', 'unknown stays blank');
   assert.equal(C.nextSort([], 'colorName', false)[0].dir, 1, 'the natural way round is the rainbow');
   assert.equal(C.viewName(V({ sort: [by('colorName', 1)] })), 'Rainbow order');
-  assert.equal(C.viewName(V({ sort: [by('colorName', 1)], family: 'blue' })), 'Blue', 'a colour sorted by colour is just the colour');
+  assert.equal(C.viewName(V({ sort: [by('colorName', 1)], families: ['blue'] })), 'Blue', 'a colour sorted by colour is just the colour');
   const back = C.computeView(s.rows, V({ sort: [by('colorName', -1)] }));
   assert.deepStrictEqual(names(back.order), ['dark', 'grey', 'white', 'logblue', 'logred', 'pinklow', 'pink', 'blue', 'green', 'orange', 'redhigh', 'red', 'later'], 'reversed, unknown still last');
   assert.equal(C.viewName(V({ sort: [by('colorName', -1)] })), 'Rainbow reversed');
@@ -1058,7 +1098,7 @@ test('search: 1,000 clips, keystroke by keystroke, inside 16 ms, with sort and f
   const s = storeFromFixture(recs);
   let worst = 0;
   for (const word of ['b', 'br', 'bre', 'brea', 'bread', 'bread s', 'bread so', 'sony', 'water wind']) {
-    for (const view of [V(), V({ sort: [by('colorName', 1)] }), V({ show: 'people', sort: [by('people', -1)] }), V({ show: 'interviews', sort: [by('sharpness', -1)], family: 'red' })]) {
+    for (const view of [V(), V({ sort: [by('colorName', 1)] }), V({ show: 'people', sort: [by('people', -1)] }), V({ show: 'interviews', sort: [by('sharpness', -1)], families: ['red'] })]) {
       const t0 = performance.now();
       C.computeView(s.rows, view, null, { tokens: C.searchTokens(word) });
       worst = Math.max(worst, performance.now() - t0);
@@ -1138,17 +1178,17 @@ test('similar shots: groups stay whole in engine order, the sort orders inside e
   assert.deepStrictEqual(soft.names, ['s1', 's3', 's2', 's4', 's5', 's6', 's7'], 'flipping the sort flips inside groups, never the groups');
   assert.deepStrictEqual(run(V({ show: 'similar' })).names, ['s1', 's2', 's3', 's4', 's5', 's6', 's7'], 'no sort: listed order inside each');
 
-  const red = run(V({ show: 'similar', sort: [by('sharpness', -1)], family: 'red' }));
+  const red = run(V({ show: 'similar', sort: [by('sharpness', -1)], families: ['red'] }));
   assert.deepStrictEqual(red.names, ['s3', 's1', 's7', 's6'], 'the blue group is gone');
   assert.deepStrictEqual(red.groups, [1, 1, 2, 2], 'and the rest are numbered 1 to n');
   assert.equal(red.groupCount, 2);
   assert.deepStrictEqual(red.breaks.map(b => b.number), [1, 2]);
   assert.equal(s.rows[1].dupGroup, null, 'a clip filtered out has no group number');
-  assert.deepStrictEqual(C.bucketize(red.order.map(i => s.rows[i]), V({ show: 'similar', family: 'red' })).map(b => b.name), ['01 Similar, 2 clips', '02 Similar, 2 clips']);
-  const blue = run(V({ show: 'similar', family: 'blue' }));
+  assert.deepStrictEqual(C.bucketize(red.order.map(i => s.rows[i]), V({ show: 'similar', families: ['red'] })).map(b => b.name), ['01 Similar, 2 clips', '02 Similar, 2 clips']);
+  const blue = run(V({ show: 'similar', families: ['blue'] }));
   assert.deepStrictEqual(blue.names, ['s4', 's5'], 'a group filtered down to one clip is dropped');
   assert.deepStrictEqual(blue.groups, [1, 1]);
-  assert.equal(C.viewName(V({ show: 'similar', sort: [by('sharpness', -1)], family: 'red' })), 'Red, similar shots, sharpest first');
+  assert.equal(C.viewName(V({ show: 'similar', sort: [by('sharpness', -1)], families: ['red'] })), 'Red, similar shots, sharpest first');
   assert.equal(C.showCount(s.rows, 'similar'), 7, 'the menu counts every clip in a group, before any colour');
 });
 
@@ -1208,7 +1248,7 @@ test('three stages: rows usable from Tier 1, then the foot says the rest is stil
   assert.equal(u.mark, 'running');
   assert.equal(u.verdict, 'Looking closer 120 of 300');
   assert.equal(u.sentence, '');
-  assert.deepStrictEqual(u.actions, ['stop', 'label', 'columns', 'bins'], 'the writes work now, because Tier 1 is in');
+  assert.deepStrictEqual(u.actions, ['stop', 'sequence', 'bins'], 'the writes work now, because Tier 1 is in');
   assert.equal(u.primary, 'bins');
   assert.equal(C.footState(facts({ store: { ...store, tier1: 100 }, scan })).kind, 'scanning', 'stage two still says Reading');
   assert.equal(C.footState(facts({ store, scan: { ...scan, stopping: true } })).verdict, 'Stopping');
@@ -1242,7 +1282,7 @@ test('foot and tiles: a search says how many and why, and a tile keeps one fact'
   const q = C.footState(facts({ shown: 12, query: 'red' }));
   assert.equal(q.sentence, '', 'the search box already counts');
   assert.equal(C.footState(facts({ shown: 12, query: 'red', view: V({ show: 'speech' }) })).sentence, '');
-  assert.equal(C.footState(facts({ shown: 9, view: V({ sort: [by('colorName', 1)], family: 'teal' }) })).verdict, 'Teal');
+  assert.equal(C.footState(facts({ shown: 9, view: V({ sort: [by('colorName', 1)], families: ['teal'] }) })).verdict, 'Teal');
   const row = { path: '/v/a.mp4', name: 'a.mp4', durationS: 75, sharpness: .123, labels: [{ name: 'oven', conf: .9 }], nameFold: 'a mp4', error: null };
   assert.equal(C.tileFact(row, V()), '1:15.0', 'length, with nothing else to say');
   assert.equal(C.tileFact(row, V({ sort: [by('sharpness', 1)] })), '0.123', 'what the view is about');
@@ -1252,9 +1292,39 @@ test('foot and tiles: a search says how many and why, and a tile keeps one fact'
   assert.equal(C.tileFact({ ...row, path: '/v/a.r3d', error: 'x' }, V()), '.r3d isn\'t supported yet');
 });
 
+test('grid layout: tiles fill the row near 165 px, two columns at least, the count changing past the aim', () => {
+  const T = C.TILE, room = panel => panel - 11 - 32;    // the grid's scroll bar and its two 16 px sides
+  const at = panel => { const l = C.gridLayout(room(panel)); return l.cols + 'x' + l.tileW; };
+  // The usual widths keep 0.3's look; a wide panel no longer falls to the least.
+  assert.deepStrictEqual([300, 420, 559, 877, 1400].map(at), ['2x121', '2x181', '3x162', '5x155', '8x157']);
+  // 0.3's rule: at least 130 px, as many as fit. The tiles are never smaller than it made them.
+  const before = w => { const cols = Math.max(2, Math.floor((w + 14) / 144)); return Math.floor((w - (cols - 1) * 14) / cols); };
+  let was = null;
+  for (let w = 0; w <= 3000; w++) {
+    const l = C.gridLayout(w), used = l.cols * l.tileW + (l.cols - 1) * T.gap;
+    assert.ok(l.tileW >= before(w), w + ': never smaller than 0.3\'s tiles, ' + l.tileW + ' < ' + before(w));
+    assert.ok(l.cols >= 2, w + ': two columns at least');
+    assert.equal(l.gap, T.gap);
+    assert.equal(l.picH, Math.round(l.tileW * 9 / 16), w + ': 16:9');
+    assert.ok(l.tileW <= T.most, w + ': never past the most');
+    if (w >= 2 * T.min + T.gap) {
+      assert.ok(used <= w && used > w - l.cols, w + ': the row is filled, less than a pixel a column left');
+    }
+    if (l.cols >= 3) { assert.ok(l.tileW >= T.min, w + ': never under the least'); }
+    if (w >= 400) { assert.ok(l.tileW >= 135 && l.tileW <= 210, w + ': near the aim, ' + l.tileW); }
+    if (was) {
+      assert.ok(l.cols >= was.cols, w + ': a wider grid never has fewer columns');
+      if (l.cols > was.cols && l.cols >= 3) { assert.ok(was.tileW > T.aim && l.tileW < T.aim, w + ': a column is added once the tiles are past the aim, ' + was.tileW + ' -> ' + l.tileW); }
+    }
+    was = l;
+  }
+  assert.equal(C.gridLayout(-10).cols, 2, 'no room is still two columns');
+  assert.ok(C.gridLayout(0).tileW >= 1);
+});
+
 test('menus: every Show and Sort has one place, sections stay together, and people and faces are said to be counts', () => {
   assert.deepStrictEqual(C.SHOWS.map(s => s.id), ['interviews', 'people', 'nopeople', 'mediums', 'wides', 'speech', 'music', 'silent', 'onscreen', 'similar']);
-  assert.deepStrictEqual(C.SORTS.map(s => s.key), ['createdAt', 'durationS', 'sharpness', 'luma', 'clipHighPct', 'motionProxy', 'shake', 'audioDb', 'colorName', 'name']);
+  assert.deepStrictEqual(C.SORTS.map(s => s.key), ['createdAt', 'durationS', 'sharpness', 'luma', 'clipHighPct', 'motionProxy', 'shake', 'audioDb', 'colorName', 'camera', 'name']);
   for (const s of C.SHOWS) {
     assert.equal(C.SHOW[s.id], s);
     assert.equal(typeof s.filter, s.group ? 'undefined' : 'function', s.id + (s.group ? ' keeps the engine\'s groups, not a filter' : ''));
@@ -1289,34 +1359,27 @@ test('writes that need Tier 2 wait for it in stage three, turn on by themselves,
   const scan = { state: 'Scanning', failure: null, seconds: 2, stopping: false };
   const colour = V({ sort: [by('colorName', 1)] });
   const held = C.footState(facts({ store, scan, view: colour, needsTier2: C.viewNeedsTier2(colour) }));
-  assert.deepStrictEqual(held.held, ['label', 'columns', 'bins'], 'held, but still there');
-  assert.deepStrictEqual(held.actions, ['stop', 'label', 'columns', 'bins']);
-  assert.equal(held.wait, 'Colour needs every clip looked at, so Label, Add Columns and Sort into Bins wait until it is done. They turn on by themselves.');
+  assert.deepStrictEqual(held.held, ['label', 'sequence', 'bins'], 'held, but still there: Label in the right-click menu too');
+  assert.deepStrictEqual(held.actions, ['stop', 'sequence', 'bins']);
+  assert.equal(held.wait, 'Waits for looking closer');
   const soft = V({ sort: [by('sharpness', 1)] });
   assert.deepStrictEqual(C.footState(facts({ store, scan, view: soft, needsTier2: C.viewNeedsTier2(soft) })).held, [], 'a Tier 1 sort writes now');
   const landed = { ...store, tier2: 290, tier2Failed: 10 };
   assert.deepStrictEqual(C.footState(facts({ store: landed, scan, view: colour, needsTier2: true })).held, [], 'every clip has landed, so it turns on with nothing pressed');
   assert.ok(C.understandingShare(landed).landed && !C.understandingShare(store).landed);
-  for (const view of [colour, V({ show: 'people' }), V({ show: 'interviews', sort: [by('sharpness', -1)] }), V({ show: 'similar' }), V({ family: 'teal' }), V({ sort: [by('shotSize', 1)] }), V({ sort: [by('shake', 1)] })]) {
+  for (const view of [colour, V({ show: 'people' }), V({ show: 'interviews', sort: [by('sharpness', -1)] }), V({ show: 'similar' }), V({ families: ['teal'] }), V({ sort: [by('shotSize', 1)] }), V({ sort: [by('shake', 1)] })]) {
     assert.ok(C.viewNeedsTier2(view), JSON.stringify(view));
   }
   assert.ok(C.viewNeedsTier2(V(), ['bread']), 'a search reads Tier 2');
   for (const view of [soft, V(), V({ sort: [by('createdAt', 1)] }), V({ sort: [by('luma', 1)] }), V({ show: 'silent', sort: [by('audioDb', -1)] })]) {
     assert.ok(!C.viewNeedsTier2(view), JSON.stringify(view));
   }
+  // One phrase whatever the view waits on (0.4 cut the sentence that named it).
   const wait = view => C.footState(facts({ store, scan, view, needsTier2: true })).wait;
-  assert.match(C.footState(facts({ store, scan, view: V(), query: 'bread', needsTier2: true })).wait, /^This search needs every clip/);
-  assert.match(wait(V({ show: 'people', sort: [by('sharpness', -1)] })), /^People needs every clip/, 'the Show is named, not the sort');
-  assert.match(wait(V({ show: 'similar', family: 'teal' })), /^Similar shots needs every clip/, 'a Show before a colour');
-  assert.match(wait(V({ family: 'teal' })), /^Teal needs every clip/);
-  assert.match(wait(V({ sort: [by('shake', 1)] })), /^Shake needs every clip/);
-});
-
-test('Add Columns writes Tier 2 fields only once they have landed', () => {
-  assert.deepStrictEqual(C.columnFields(false).map(f => f.name), ['SelectRank', 'SelectSharpness', 'SelectLuma', 'SelectClipHigh', 'SelectMotion', 'SelectAudio']);
-  assert.equal(C.columnFields(true).length, 13);
-  const sent = { fields: C.columnFields(false), rows: [{ items: pairs('1'), values: {} }] };
-  assert.equal(C.writeOutcome('columns', sent, { ok: true, changed: 1, matched: 1, failed: [], columns: { shown: true } }).verdict, 'Added 6 columns');
+  assert.equal(C.footState(facts({ store, scan, view: V(), query: 'bread', needsTier2: true })).wait, 'Waits for looking closer');
+  for (const view of [V({ show: 'people', sort: [by('sharpness', -1)] }), V({ show: 'similar', families: ['teal'] }), V({ families: ['teal'] }), V({ sort: [by('shake', 1)] })]) {
+    assert.equal(wait(view), 'Waits for looking closer', JSON.stringify(view));
+  }
 });
 
 test('a Tier 2 reason is kept apart from Tier 1, shown quietly, and never called a picture problem', () => {
@@ -1368,12 +1431,12 @@ test('show and sort combine freely, whichever is chosen first; a colour narrows 
   // Colour, then search, each narrows what the Show and Sort left, and never reorders it.
   const view = V({ show: 'speech', sort: [by('sharpness', -1)] });
   const base = C.computeView(rows, view).order;
-  const red = C.computeView(rows, { ...view, family: 'red' }).order;
+  const red = C.computeView(rows, { ...view, families: ['red'] }).order;
   assert.ok(red.length > 0 && red.length < base.length);
   assert.ok(red.every(i => rows[i].colorName === 'red' && rows[i].speech === true));
   assert.ok(isSubsequence(red, base), 'a colour keeps the order');
   const tokens = C.searchTokens('sony');
-  const searched = C.computeView(rows, { ...view, family: 'red' }, null, { tokens }).order;
+  const searched = C.computeView(rows, { ...view, families: ['red'] }, null, { tokens }).order;
   assert.ok(searched.length > 0 && searched.length < red.length, 'the fixture has red speech both on and off the Sony');
   assert.ok(searched.every(i => C.matches(rows[i], tokens)));
   assert.ok(isSubsequence(searched, red), 'a search keeps the order');
@@ -1382,14 +1445,18 @@ test('show and sort combine freely, whichever is chosen first; a colour narrows 
 
 test('sort words: each Sort entry starts its own way, and flipping reads the other way', () => {
   for (const e of C.SORTS) {
+    // The menu shows the way (A to Z); the toolbar names the column too when the way alone doesn't (Camera A to Z).
+    const says = e.says || e.ways;
     assert.equal(e.ways.length, 2, e.key);
+    assert.equal(says.length, 2, e.key);
     assert.notEqual(e.ways[0], e.ways[1], e.key);
-    assert.equal(C.sortWords(by(e.key, e.dir)), e.ways[0], e.key);
-    assert.equal(C.sortWords(by(e.key, -e.dir)), e.ways[1], e.key);
+    assert.ok(says[0].endsWith(e.ways[0]) && says[1].endsWith(e.ways[1]), e.key + ' says the same way in the toolbar');
+    assert.equal(C.sortWords(by(e.key, e.dir)), says[0], e.key);
+    assert.equal(C.sortWords(by(e.key, -e.dir)), says[1], e.key);
     const first = C.nextSort([], e.key, false), flipped = C.nextSort(first, e.key, false);
-    assert.equal(C.sortWords(first[0]), e.ways[0], e.key + ' starts the way the menu says');
-    assert.equal(C.sortWords(flipped[0]), e.ways[1], e.key + ' flips');
-    assert.equal(C.sortWords(C.nextSort(flipped, e.key, false)[0]), e.ways[0], e.key + ' flips back');
+    assert.equal(C.sortWords(first[0]), says[0], e.key + ' starts the way the menu says');
+    assert.equal(C.sortWords(flipped[0]), says[1], e.key + ' flips');
+    assert.equal(C.sortWords(C.nextSort(flipped, e.key, false)[0]), says[0], e.key + ' flips back');
   }
   const reads = (key, dir) => C.sortWords(by(key, dir));
   assert.equal(reads('sharpness', -1), 'Sharpest first');
@@ -1442,20 +1509,20 @@ test('viewName: the whole view in a few words', () => {
   assert.equal(name({}), '');
   assert.equal(name({ show: 'interviews' }), 'Interviews');
   assert.equal(name({ sort: [by('sharpness', -1)] }), 'Sharpest first');
-  assert.equal(name({ family: 'red' }), 'Red');
-  assert.equal(name({ family: 'red', show: 'interviews', sort: [by('sharpness', -1)] }), 'Red, interviews, sharpest first');
+  assert.equal(name({ families: ['red'] }), 'Red');
+  assert.equal(name({ families: ['red'], show: 'interviews', sort: [by('sharpness', -1)] }), 'Red, interviews, sharpest first');
   assert.equal(name({ show: 'speech', sort: [by('name', 1)] }), 'Speech, A to Z');
   assert.equal(name({ show: 'speech', sort: [by('name', -1)] }), 'Speech, Z to A');
-  assert.equal(name({ family: 'red', sort: [by('colorName', 1)] }), 'Red', 'a colour sorted by colour is just the colour');
-  assert.equal(name({ family: 'red', sort: [by('colorName', -1)] }), 'Red');
-  assert.equal(name({ family: 'red', show: 'interviews', sort: [by('colorName', 1)] }), 'Red, interviews');
+  assert.equal(name({ families: ['red'], sort: [by('colorName', 1)] }), 'Red', 'a colour sorted by colour is just the colour');
+  assert.equal(name({ families: ['red'], sort: [by('colorName', -1)] }), 'Red');
+  assert.equal(name({ families: ['red'], show: 'interviews', sort: [by('colorName', 1)] }), 'Red, interviews');
   assert.equal(name({ show: 'interviews', sort: [by('colorName', 1)] }), 'Interviews, rainbow order');
   assert.equal(name({ sort: [by('colorName', -1)] }), 'Rainbow reversed');
-  assert.equal(name({ family: 'blue', show: 'onscreen' }), 'Blue, text on screen');
+  assert.equal(name({ families: ['blue'], show: 'onscreen' }), 'Blue, text on screen');
   assert.equal(name({ show: 'speech', sort: [by('camera', 1)] }), 'Speech, camera A to Z');
   assert.equal(name({ show: 'similar', sort: [by('shake', 1)] }), 'Similar shots, steadiest first');
-  assert.equal(name({ family: 'neutral', sort: [by('createdAt', -1)] }), 'Neutral, latest first');
-  assert.equal(name({ family: 'red', sort: [by('iso', -1)] }), 'Red, ISO high to low', 'a short name in capitals stays in capitals');
+  assert.equal(name({ families: ['neutral'], sort: [by('createdAt', -1)] }), 'Neutral, latest first');
+  assert.equal(name({ families: ['red'], sort: [by('iso', -1)] }), 'Red, ISO high to low', 'a short name in capitals stays in capitals');
   assert.equal(name({ show: 'people', sort: [by('people', -1)] }), 'People, most people first');
   assert.equal(name({ sort: [by('sharpness', 1), by('luma', -1)] }), 'Softest first', 'only the first key is named');
 });
@@ -1464,10 +1531,10 @@ test('binKind: what Sort into Bins would make, for every kind of view, and the f
   const cases = [
     [{ show: 'similar' }, 'groups'],
     [{ show: 'similar', sort: [by('colorName', 1)] }, 'groups'],
-    [{ show: 'similar', sort: [by('sharpness', -1)], family: 'red' }, 'groups'],
+    [{ show: 'similar', sort: [by('sharpness', -1)], families: ['red'] }, 'groups'],
     [{ sort: [by('colorName', 1)] }, 'colours'],
     [{ sort: [by('colorName', -1)], show: 'speech' }, 'colours'],
-    [{ sort: [by('colorName', 1)], family: 'red' }, 'colours'],
+    [{ sort: [by('colorName', 1)], families: ['red'] }, 'colours'],
     [{ sort: [by('createdAt', 1)] }, 'days'],
     [{ sort: [by('createdAt', -1)], show: 'people' }, 'days'],
     [{ sort: [by('camera', 1)] }, 'values'],
@@ -1477,10 +1544,10 @@ test('binKind: what Sort into Bins would make, for every kind of view, and the f
     [{ show: 'speech', sort: [by('sharpness', -1)] }, 'one'],
     [{ show: 'speech', sort: [by('name', 1)] }, 'one'],
     [{ show: 'music', sort: [by('iso', -1)] }, 'one'],
-    [{ family: 'red' }, 'one'],
-    [{ show: 'interviews', family: 'red' }, 'one'],
+    [{ families: ['red'] }, 'one'],
+    [{ show: 'interviews', families: ['red'] }, 'one'],
     [{ sort: [by('sharpness', -1)] }, 'fifths'],
-    [{ sort: [by('shake', 1)], family: 'red' }, 'fifths'],
+    [{ sort: [by('shake', 1)], families: ['red'] }, 'fifths'],
     [{ sort: [by('people', -1)] }, 'fifths'],
     [{}, null],
     [{ sort: [by('name', 1)] }, null],
@@ -1534,14 +1601,14 @@ test('bucketize: a bin per similar group, per colour in rainbow order, per day, 
   assert.equal(twenty[19].name, '20 Cam 20');
   assert.equal(twenty[20].name, '21 No value');
   assert.equal(C.bucketize(many(21), V({ sort: [by('camera', 1)] })), null, 'more than twenty values make no bins');
-  assert.equal(C.bucketize(many(21), V({ sort: [by('camera', 1)], family: 'red' })), null, 'a colour does not rescue them');
+  assert.equal(C.bucketize(many(21), V({ sort: [by('camera', 1)], families: ['red'] })), null, 'a colour does not rescue them');
   const fallback = C.bucketize(many(21), V({ show: 'speech', sort: [by('camera', 1)] }));
   assert.deepStrictEqual(fallback.map(b => [b.name, b.rows.length]), [['01 Speech', 21]], 'with a Show on, they make one bin of it');
 });
 
 test('bucketize: one bin for a Show or a colour alone, fifths for a number sort, none for a name or nothing', () => {
   const rows = [{ name: 'a', durationS: 3 }, { name: 'b', durationS: 9 }, { name: 'c', durationS: 1 }];
-  for (const [over, name] of [[{ show: 'interviews' }, '01 Interviews'], [{ show: 'onscreen', sort: [by('sharpness', -1)] }, '01 Text on screen'], [{ show: 'interviews', family: 'red' }, '01 Interviews'], [{ family: 'red' }, '01 Red'], [{ show: 'silent', sort: [by('name', 1)] }, '01 Silent']]) {
+  for (const [over, name] of [[{ show: 'interviews' }, '01 Interviews'], [{ show: 'onscreen', sort: [by('sharpness', -1)] }, '01 Text on screen'], [{ show: 'interviews', families: ['red'] }, '01 Interviews'], [{ families: ['red'] }, '01 Red'], [{ show: 'silent', sort: [by('name', 1)] }, '01 Silent']]) {
     const b = C.bucketize(rows, V(over));
     assert.equal(b.length, 1, JSON.stringify(over));
     assert.equal(b[0].name, name);
@@ -1558,25 +1625,29 @@ test('bucketize: one bin for a Show or a colour alone, fifths for a number sort,
   assert.equal(C.bucketize(rows, V({ sort: [by('iso', -1)] })), null, 'a number with no words has no fifths to name');
 });
 
-test('interviews: speech and a face for 15 seconds or more; a shorter talking clip is not an interview', () => {
+test('interviews: speech heard at 0.7 or more, a face, a medium shot, 15 seconds or longer, whatever the shake', () => {
   assert.equal(C.INTERVIEW_MIN_S, 15);
-  const clip = (name, over) => ({ name, speech: true, faces: 1, durationS: 60, shake: null, ...over });
-  const rows = [clip('at14.9', { durationS: 14.9 }), clip('at15', { durationS: 15 }), clip('long', { durationS: 600 }), clip('nospeech', { speech: false }), clip('unheard', { speech: null }),
-    clip('noface', { faces: 0 }), clip('unseen', { faces: null }), clip('nolength', { durationS: null })];
+  assert.equal(C.INTERVIEW_SPEECH, 0.7);
+  const talk = conf => [{ name: 'music', conf: .9 }, { name: 'speech', conf }];
+  const clip = (name, over) => ({ name, speech: true, sounds: talk(.8), faces: 1, shotSize: 'medium', durationS: 60, shake: null, ...over });
+  const rows = [clip('at14.9', { durationS: 14.9 }), clip('at15', { durationS: 15 }), clip('long', { durationS: 600 }), clip('nospeech', { speech: false, sounds: [{ name: 'music', conf: 1 }] }),
+    clip('unheard', { speech: null, sounds: null }), clip('noface', { faces: 0 }), clip('unseen', { faces: null }), clip('nolength', { durationS: null }),
+    clip('at.69', { sounds: talk(.69) }), clip('at.7', { sounds: talk(.7) }), clip('wide', { shotSize: 'wide' }), clip('noshot', { shotSize: null }),
+    clip('shaky', { shake: .95 }), clip('steady', { shake: 0 }), clip('noconf', { sounds: [{ name: 'speech' }] })];
   const names = view => C.computeView(rows, view).order.map(i => rows[i].name);
-  assert.deepStrictEqual(names(V({ show: 'interviews' })), ['at15', 'long']);
-  assert.equal(C.showCount(rows, 'interviews'), 2);
+  assert.deepStrictEqual(names(V({ show: 'interviews' })), ['at15', 'long', 'at.7', 'shaky', 'steady']);
+  assert.equal(C.showCount(rows, 'interviews'), 5);
   assert.deepStrictEqual(names(V({ show: 'speech' })).slice(0, 3), ['at14.9', 'at15', 'long'], 'a short clip with speech is still speech');
-  // Where the camera recorded its movement, up to a fixed line just past handheld, and unknown shake stays.
-  assert.equal(C.SHAKE_LIMIT, 0.6);
-  const steady = [.1, .35, .56, .6, .61, .9].map((shake, i) => clip('s' + i, { shake })).concat(clip('nogyro', { shake: null }), clip('short-steady', { shake: 0, durationS: 14.9 }));
-  assert.deepStrictEqual(C.computeView(steady, V({ show: 'interviews' })).order.map(i => steady[i].name), ['s0', 's1', 's2', 's3', 'nogyro']);
+  assert.equal(C.speechConf(clip('x', {})), .8, 'confidence comes from the sounds list');
+  assert.equal(C.speechConf({ sounds: null }), 0);
+  assert.equal(C.SHAKE_LIMIT, undefined, 'no shake line any more');
   assert.match(C.SHOW.interviews.tip, /15 seconds or longer/);
+  assert.match(C.SHOW.interviews.tip, /medium shot/);
+  assert.ok(!/shak/i.test(C.SHOW.interviews.tip));
 });
-
 test('showCount: what each Show would leave, Similar shots included', () => {
   const rows = [
-    { name: 'iv', speech: true, faces: 1, people: 1, durationS: 30, shake: null, shotSize: 'medium', music: false, hasAudio: true, silent: false, text: ['OPEN'], similar: 1 },
+    { name: 'iv', speech: true, sounds: [{ name: 'speech', conf: .9 }], faces: 1, people: 1, durationS: 30, shake: null, shotSize: 'medium', music: false, hasAudio: true, silent: false, text: ['OPEN'], similar: 1 },
     { name: 'short', speech: true, faces: 1, people: 2, durationS: 5, shotSize: 'wide', music: true, hasAudio: true, silent: false, text: [], similar: 1 },
     { name: 'empty', speech: false, faces: 0, people: 0, durationS: 30, shotSize: null, music: false, hasAudio: false, silent: null, text: [], similar: 2 },
     { name: 'quiet', speech: false, faces: 0, people: 0, durationS: 30, shotSize: null, music: false, hasAudio: true, silent: true, text: null },
@@ -1602,7 +1673,7 @@ test('foot wording: the verdict names the view, and the sentence only counts wha
   assert.equal(sorted.sentence, '', 'a sort alone keeps every clip, so there is nothing to say');
   const all = say({ view: V({ show: 'speech' }) });
   assert.equal(all.sentence, '');
-  const full = say({ shown: 4, view: V({ show: 'interviews', sort: [by('sharpness', -1)], family: 'red' }) });
+  const full = say({ shown: 4, view: V({ show: 'interviews', sort: [by('sharpness', -1)], families: ['red'] }) });
   assert.equal(full.verdict, 'Red, interviews, sharpest first');
   assert.equal(full.sentence, '4 of 301 clips');
   for (const s of C.SHOWS.filter(x => !x.group)) {
@@ -1611,8 +1682,8 @@ test('foot wording: the verdict names the view, and the sentence only counts wha
     assert.equal(say({ shown: 7, view: V({ show: s.id }) }).verdict, s.label);
   }
   assert.equal(say({ shown: 0, groupCount: 0, view: V({ show: 'similar' }), status: 'none' }).sentence, 'No similar shots in this scan.');
-  assert.equal(say({ shown: 7, groupCount: 3, view: V({ show: 'similar', family: 'teal' }) }).sentence, '3 groups');
-  const teal = say({ shown: 9, view: V({ family: 'teal' }) });
+  assert.equal(say({ shown: 7, groupCount: 3, view: V({ show: 'similar', families: ['teal'] }) }).sentence, '3 groups');
+  const teal = say({ shown: 9, view: V({ families: ['teal'] }) });
   assert.equal(teal.verdict, 'Teal');
   assert.equal(teal.sentence, '9 of 301 clips');
   assert.ok(!teal.binsOff);
@@ -1625,7 +1696,7 @@ test('foot wording: the verdict names the view, and the sentence only counts wha
   assert.equal(stage3(V()).verdict, 'Looking closer 120 of 300');
   assert.ok(stage3(V()).binsOff);
   assert.equal(stage3(V()).sentence, '');
-  assert.equal(stage3(V({ show: 'similar', family: 'teal' })).verdict, 'Looking closer 120 of 300', 'the toolbar says the view');
+  assert.equal(stage3(V({ show: 'similar', families: ['teal'] })).verdict, 'Looking closer 120 of 300', 'the toolbar says the view');
   assert.ok(!stage3(V({ show: 'similar' })).binsOff);
 });
 
@@ -1674,21 +1745,17 @@ test('H2: a write names each item by id and path, and an id that now names anoth
   assert.deepStrictEqual(label.restore.items.map(e => e[0]), ['1']);
   const o = C.writeOutcome('label', { items: pairs('1', '2', '9') }, label, 'Mango');
   assert.ok(!o.green);
-  assert.match(o.sentence, /2 items were left alone: they have changed in the project since Select found them\./);
+  assert.match(o.sentence, /2 clips changed since, left alone\./);
   assert.equal(o.failed.length, 2, 'Details lists them');
-
-  const cols = viaHost(h, 'columns', { fields: [{ name: 'SelectRank', label: 'Select Rank' }], show: false, rows: [{ items: pairs('1', '2'), values: { SelectRank: '0001' } }] });
-  assert.equal(cols.changed, 1);
-  assert.equal(cols.skipped.length, 1);
-  assert.equal(h.root.kids[1].getProjectMetadata(), '', 'nothing written to the other clip');
 
   const bins = viaHost(h, 'bins', binsArgs());
   assert.equal(bins.moved, 2);
   assert.deepStrictEqual(bins.skipped.map(x => x.id), ['2']);
   assert.ok(h.root.kids.some(k => k.name === 'C2.MP4'), 'the other clip stays where it was');
+  // Open goes by the id scan gave, checked against its path, and never opens another clip under that id.
   const opened = h.call('open', { project: '/p.prproj', id: '2', path: '/v/C2.MP4' });
   assert.equal(opened.ok, false);
-  assert.equal(opened.code, 'changed');
+  assert.equal(opened.code, 'not-found');
 });
 
 test('H3: batches of about 100, one top bin across them, read back once, and Undo in batches too', () => {
@@ -1702,7 +1769,7 @@ test('H3: batches of about 100, one top bin across them, read back once, and Und
   const o = C.writeOutcome('bins', sent, res);
   assert.ok(o.green, o.sentence);
   assert.equal(res.restore.items.length, 3);
-  // Undo Write in batches of one: the SELECT bin goes only with the last.
+  // Undo in batches of one: the SELECT bin goes only with the last.
   const parts = C.batches(res.restore.items, 1);
   const backs = parts.map((part, i) => h.call('restore', { project: '/p.prproj', restore: { ...res.restore, items: part }, final: i === parts.length - 1 }));
   assert.deepStrictEqual(backs.map(b => b.binRemoved), [null, null, true]);
@@ -1714,13 +1781,13 @@ test('H3: a write stopped or refused part way says what landed, is never green, 
   const stopped = C.writeOutcome('label', { items: pairs('1', '2', '3', '4') }, { changed: 2, failed: [], skipped: [], unsent: 2 }, 'Mango');
   assert.ok(!stopped.green);
   assert.equal(stopped.verdict, 'Labelled 2 of 4 clips');
-  assert.equal(stopped.sentence, 'Stopped, so the last 2 items weren\'t written.');
+  assert.equal(stopped.sentence, 'Stopped: 2 weren\'t sent.');
   assert.equal(stopped.undo, true);
   const refused = C.writeOutcome('columns', { fields: C.FIELDS, rows: [{ items: pairs('1', '2'), values: {} }] }, { changed: 1, matched: 1, failed: [], skipped: [], unsent: 1, error: 'Playback is running. Stop it and try again. Nothing was changed.', columns: { shown: true } });
   assert.ok(!refused.green);
   assert.match(refused.sentence, /The rest weren't sent: Playback is running\. Stop it and try again\.$/);
   assert.ok(!/Nothing was changed/.test(refused.sentence), 'part way, nothing changed is no longer true');
-  const late = C.undoOutcome({ restored: 100, skipped: 0, failed: [], unsent: 300, error: 'Premiere didn\'t answer within 2 minutes.' }, true);
+  const late = C.undoOutcome({ restored: 100, skipped: 0, failed: [], unsent: 300, error: 'Premiere didn\'t answer within 2 minutes.' });
   assert.equal(late.verdict, 'Partly undone');
   assert.match(late.sentence, /The rest weren't sent: Premiere didn't answer within 2 minutes\./);
 });
@@ -1797,7 +1864,7 @@ test('S2: an Undo record is found in either Unicode form of its path, and one th
     for (const [id, text] of Object.entries(odd)) { fs.writeFileSync(file(id), text); }
     for (const id of Object.keys(odd)) { assert.equal(N.readUndo(nfc, id, home), null, odd[id].slice(0, 40)); }
     const found = N.topUndo(nfc, null, home);
-    assert.equal(found.top.id, written, 'Undo Write reaches past them to the last record it can read');
+    assert.equal(found.top.id, written, 'Undo reaches past them to the last record it can read');
     assert.equal(found.ids.length, 5, 'they still count, as the newest ten kept on disk count them');
     for (const id of Object.keys(odd)) { assert.equal(fs.readFileSync(file(id), 'utf8'), odd[id], 'left exactly as it was'); }
     // An empty record of this format is a write whose first batch never answered: cleared, unless a write is filling it.
@@ -1822,25 +1889,25 @@ test('S2: the panel finds Undo records by the project\'s path in either form, an
   assert.match(app, /undoBatches\(entry, r\.project\.path\)/);
 });
 
-test('N6: the docs say what the panel does: Undo Write\'s reach per project, which log is converted, and where updates come from', () => {
+test('N6: the docs say what the panel does: Undo\'s reach per project, which log is converted, and where updates come from', () => {
   const root = path.join(__dirname, '../..');
   const readme = fs.readFileSync(path.join(root, 'README.md'), 'utf8');
-  assert.match(readme, new RegExp(`keeps the last ${C.UNDO_KEEP} writes for each project`));
-  assert.doesNotMatch(readme, /up to your last \d+ writes/, 'not ten in all');
+  const writes = fs.readFileSync(path.join(root, 'docs/WHAT-IT-WRITES.md'), 'utf8');
+  assert.match(writes, new RegExp(`up to the last ${C.UNDO_KEEP} for each project`));
+  assert.doesNotMatch(readme + writes, /up to your last \d+ writes/, 'not ten in all');
   const looks = fs.readFileSync(path.join(root, 'docs/WHAT-IT-LOOKS-AT.md'), 'utf8');
   assert.doesNotMatch(looks, /reads log footage through its own curve/i, 'not every log');
   assert.match(looks, /S-Log3 with S-Gamut3\.Cine is read through that curve and gamut/);
   assert.match(looks, /left as recorded[^.]*tooltip says so/);
-  const privacy = /## Privacy\n([\s\S]*?)\n## /.exec(readme)[1];
-  const about = /dialog\('About Select'.*Once a day (.*?)<\/p>/.exec(fs.readFileSync(path.join(root, 'panel/client/app.js'), 'utf8'))[1].replace(/\\'/g, '\'');
-  for (const said of ['That request is the only thing it sends', 'When there is a new version, Select downloads it from the same GitHub release.']) {
-    assert.ok(privacy.includes(said) && about.includes(said), said);
-  }
+  assert.ok(readme.includes('Once a day Select asks GitHub whether there is a new version. That is the only thing it sends.'));
+  assert.ok(writes.includes('None of it leaves the Mac. Once a day Select asks GitHub whether there is a new version, and downloads it from there when there is.'));
+  // About is one line since 0.4, and it says the same: nothing leaves the Mac but the daily question to GitHub.
+  assert.match(fs.readFileSync(path.join(root, 'panel/client/app.js'), 'utf8'), /dialog\('About Select'.*Everything runs on this Mac\. Once a day Select asks GitHub for a new version\./);
 });
 
-test('H1: the write sheets say how far Undo Write reaches, and Undo Write says what it will put back', () => {
+test('H1: the write sheets say how far Undo reaches, and Undo says what it will put back', () => {
   assert.equal(C.undoReach(3), '', 'said only when it matters');
-  assert.match(C.undoReach(10), /pushes the oldest of the last 10 writes out of Undo Write's reach/);
+  assert.match(C.undoReach(10), /pushes the oldest of the last 10 writes out of Undo's reach/);
   assert.equal(C.undoWords({ kind: 'columns', restore: { items: [1, 2, 3] } }), 'Puts back what the Select columns held on 3 clips before this write.');
   assert.equal(C.undoWords({ kind: 'bins', meta: { root: 'SELECT 2026-11-03 Sharpest first' }, restore: { items: [1, 2] } }), 'Moves 2 clips back to the bins they came from, and removes SELECT 2026-11-03 Sharpest first once it is empty.');
   const now = new Date(2026, 10, 3, 18, 0).getTime();
@@ -1871,18 +1938,17 @@ test('M2: dates and day bins are in this Mac\'s time zone, whether the time came
 });
 
 test('M3: Interviews is a fixed rule: the same clip is in or out whatever else is in the scan', () => {
-  const x = { name: 'X', speech: true, faces: 1, durationS: 40, shake: 0.45 };
-  const broll = s => Array.from({ length: 9 }, (_, i) => ({ name: 'b' + i, speech: false, faces: 0, durationS: 10, shake: s }));
+  const x = { name: 'X', speech: true, sounds: [{ name: 'speech', conf: .75 }], faces: 1, shotSize: 'medium', durationS: 40, shake: 0.45 };
+  const broll = s => Array.from({ length: 9 }, (_, i) => ({ name: 'b' + i, speech: false, sounds: [], faces: 0, shotSize: null, durationS: 10, shake: s }));
   const inScan = rows => C.computeView(rows, V({ show: 'interviews' })).order.map(i => rows[i].name).includes('X');
   assert.ok(inScan([x].concat(broll(0.2))), 'with tripod b-roll');
   assert.ok(inScan([x].concat(broll(0.6))), 'with handheld b-roll');
   assert.ok(inScan([x]), 'alone');
-  const whip = { ...x, name: 'X', shake: 0.8 };
-  assert.ok(!inScan([whip]) && !inScan([whip].concat(broll(0.9))), 'shakier than handheld stays out, even among shakier clips');
-  assert.match(C.SHOW.interviews.tip, /shakier than a handheld camera is left out/);
-  assert.ok(!/steadier/.test(C.SHOW.interviews.tip));
+  const handheld = { ...x, shake: 0.8 };
+  assert.ok(inScan([handheld]) && inScan([handheld].concat(broll(0.1))), 'a handheld interview stays in: shake is not asked');
+  const quiet = { ...x, sounds: [{ name: 'speech', conf: .5 }] };
+  assert.ok(!inScan([quiet]) && !inScan([quiet].concat(broll(0.1))), 'speech heard faintly stays out, among any clips');
 });
-
 test('unknown is not zero: a null from Vision is never No people, 0 faces or Silent, and shows blank', () => {
   const unknown = { name: 'u', durationS: 30, hasAudio: true, silent: null, speech: null, music: null, people: null, faces: null, shotSize: null, text: null, labels: null, sounds: null, colorName: null, shake: null };
   const rows = [unknown, { ...unknown, name: 'none', people: 0, faces: 0 }, { ...unknown, name: 'quiet', silent: true }];
@@ -1895,8 +1961,6 @@ test('unknown is not zero: a null from Vision is never No people, 0 faces or Sil
   for (const key of ['people', 'faces', 'shotSize', 'colorName', 'soundText', 'screenText', 'labelText', 'shake']) {
     assert.equal(C.cellText(unknown, C.COLUMN[key]), '', key);
   }
-  const v = C.columnValues(unknown, 1, 4);
-  for (const f of ['SelectPeople', 'SelectFaces', 'SelectShot', 'SelectColour', 'SelectSound', 'SelectLabels', 'SelectText']) { assert.equal(v[f], '', f); }
   assert.equal(C.cellText({ people: 0 }, C.COLUMN.people), '0', 'a real zero stays 0');
   const sorted = C.computeView(rows, V({ sort: [by('people', -1)] })).order.map(i => rows[i].name);
   assert.equal(sorted[0], 'none', 'unknown sorts after a real 0');
@@ -1905,12 +1969,12 @@ test('unknown is not zero: a null from Vision is never No people, 0 faces or Sil
 test('L1: an Undo that put nothing back never says Undone', () => {
   const o = C.undoOutcome({ ok: true, restored: 0, skipped: 12, failed: [], remaining: null, binRemoved: null });
   assert.equal(o.verdict, 'Nothing went back');
-  assert.equal(o.sentence, '12 changed since and left alone.');
+  assert.equal(o.sentence, '12 changed since, left alone.');
   assert.equal(o.kind, 'partial');
-  assert.equal(C.undoOutcome({ restored: 0, skipped: 0, failed: [] }).sentence, 'There was nothing left to put back.');
+  assert.equal(C.undoOutcome({ restored: 0, skipped: 0, failed: [] }).sentence, 'Nothing left to put back.');
 });
 
-test('L2: a write during stage three keeps the scan\'s Stop', () => {
+test('L2: a write during stage three is its own row: Undo beside it, the scan\'s Stop not', () => {
   const store = C.createStore();
   C.addItems(store, [{ path: '/a/1.mp4', id: '1' }, { path: '/a/2.mp4', id: '2' }]);
   ['/a/1.mp4', '/a/2.mp4'].forEach(p => { C.ingest(store, { type: 'clip', tier: 0, path: p, durationS: 20 }); C.ingest(store, { type: 'clip', tier: 1, path: p, sharpness: 0.5 }); });
@@ -1919,7 +1983,14 @@ test('L2: a write during stage three keeps the scan\'s Stop', () => {
   const out = C.writeOutcome('label', { items: pairs('1', '2') }, { changed: 2, failed: [], skipped: [] }, 'Mango');
   const f = C.footState({ ...scanning, outcome: out });
   assert.ok(f.green);
-  assert.deepStrictEqual(f.actions, ['stop', 'undo']);
+  assert.deepStrictEqual(f.actions, ['undo']);
+  assert.deepStrictEqual(C.bandRow(f, { ...scanning, outcome: out }).actions, ['undo']);
+  const undone = C.footState({ ...scanning, outcome: { kind: 'undone', verdict: 'Undone', sentence: '', green: false, undo: false } });
+  assert.ok(undone.actions.indexOf('stop') < 0, 'Undone carries no Stop either');
+  // Once the result closes, the scan's own row is back, with its Stop.
+  const back = C.footState(scanning);
+  assert.equal(back.kind, 'understanding');
+  assert.equal(back.actions[0], 'stop');
   const after = C.footState({ ...scanning, scan: { ...scanning.scan, state: 'Done' }, outcome: out });
   assert.deepStrictEqual(after.actions, ['undo']);
 });
@@ -1967,19 +2038,450 @@ test('L5: a Selection scan knows where its clips come from, and two selections a
   assert.deepStrictEqual(current.items.map(i => i.id), ['1']);
 });
 
-test('wording: project columns use the panel\'s words, Undo has one name, and refusals name projects plainly', () => {
-  const labels = C.FIELDS.map(f => f.label);
-  assert.deepStrictEqual(labels.slice(0, 6), ['Select Rank', 'Select Sharpness', 'Select Brightness', 'Select Highlights', 'Select Motion', 'Select Loudness']);
-  assert.ok(!labels.some(l => /dB\+100|Clip Hi|Luma|Audio/.test(l)), labels.join());
+// ---------------------------------------------------------------- 0.4: search, sort and bins
+
+test('0.4 search: a folder name finds its clips: the bins in the project first, then the last three folders on disk, closest first', () => {
+  const home = ['', 'Users', 'someone', 'Movies'].join('/');
+  const s = C.createStore();
+  C.addItems(s, [
+    { id: '1', path: '/Volumes/Field SSD/Shoot/DAY 2/A CAM/C0001.MP4', bin: 'Selects/Day 2' },
+    { id: '2', path: home + '/Card 03/C0002.MP4' },
+    { id: '3', path: '/Volumes/EOS_DIGITAL/DCIM/100CANON/MVI_0001.MP4' },
+    { id: '4', path: '/Volumes/Field SSD/Shoot/DAY 2/A CAM/C0001.MP4', bin: 'Interviews' }
+  ]);
+  const find = q => C.computeView(s.rows, V(), null, { tokens: C.searchTokens(q) }).order.map(i => s.rows[i].name);
+  assert.deepStrictEqual(s.rows[0].binPaths, ['Selects/Day 2', 'Interviews'], 'one row, the bins of both its items');
+  assert.deepStrictEqual(C.folderNames(s.rows[0]), ['Day 2', 'Selects', 'Interviews', 'A CAM', 'Shoot'], 'a name already there is not said twice, and a fourth folder up is not a card, a camera or a day');
+  assert.deepStrictEqual(find('day 2'), ['C0001.MP4']);
+  assert.deepStrictEqual(find('a cam'), ['C0001.MP4']);
+  assert.deepStrictEqual(find('interviews'), ['C0001.MP4'], 'a bin the clip sits in');
+  assert.deepStrictEqual(find('card 03'), ['C0002.MP4']);
+  assert.deepStrictEqual(find('movies'), ['C0002.MP4']);
+  assert.deepStrictEqual(find('eos'), ['MVI_0001.MP4'], 'a card\'s own name');
+  assert.deepStrictEqual(find('100canon'), ['MVI_0001.MP4']);
+  for (const q of ['volumes', 'users', 'someone', 'field ssd']) { assert.deepStrictEqual(find(q), [], q + ' is not a folder anyone means'); }
+  assert.deepStrictEqual(find('ay'), [], 'a folder is matched from the start of a word, as everything else is');
+  // Why it is on screen: the folder's own name, bare, as a word is.
+  assert.equal(C.matchedWord(s.rows[0], C.searchTokens('day')), 'Day 2');
+  assert.equal(C.matchedWord(s.rows[0], C.searchTokens('cam')), 'A CAM');
+  assert.equal(C.matchedWord(s.rows[1], C.searchTokens('card')), 'Card 03');
+  assert.equal(C.tileFact(s.rows[2], V(), C.searchTokens('dcim')), 'DCIM');
+  // What the frames hold comes before a folder.
+  const t = t2Store([{ path: '/v/Kitchen/C1.MP4', labels: [{ name: 'kitchen', conf: .9 }], text: [], sounds: [] }]);
+  assert.equal(C.matchedWord(t.rows[0], C.searchTokens('kitchen')), 'kitchen');
+});
+
+test('0.4 bins: clips whose values read the same stay in one bin, whichever fifth they would cross', () => {
+  const view = V({ sort: [by('sharpness', -1)] });
+  const rows = vals => vals.map((v, i) => ({ name: 'c' + i, sharpness: v }));
+  const bins = list => C.bucketize(list, view).map(b => [b.name, b.rows.map(r => r.name)]);
+  // Ten clips with the same sharpness were five bins in 0.3.
+  assert.deepStrictEqual(bins(rows(Array(10).fill(0.5))), [['01 Sharpest', ['c0', 'c1', 'c2', 'c3', 'c4', 'c5', 'c6', 'c7', 'c8', 'c9']]]);
+  assert.deepStrictEqual(bins(rows([0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.3, 0.2])), [['01 Sharpest', ['c0', 'c1', 'c2', 'c3', 'c4', 'c5', 'c6', 'c7']], ['05 Softest', ['c8', 'c9']]]);
+  assert.deepStrictEqual(bins(rows([0.9, 0.8, 0.7, 0.6, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1])).map(b => b[1].length), [2, 3, 1, 2, 2], 'a pair across a line goes where the first of it falls');
+  // Equal as the column shows them: 0.5001 and 0.5004 both read 0.500.
+  assert.equal(bins(rows([0.5004, 0.5001, 0.5001, 0.5001, 0.5001])).length, 1);
+  // On the fixture: every value the column shows sits in exactly one bin, and every clip in one.
+  const s = storeFromFixture(fixture);
+  for (const key of ['sharpness', 'luma', 'durationS', 'audioDb', 'shake']) {
+    const v = V({ sort: [by(key, C.naturalDir(key))] }), list = byOrder(s.rows, C.computeView(s.rows, v).order);
+    const b = C.bucketize(list, v), where = new Map();
+    assert.equal(b.reduce((n, x) => n + x.rows.length, 0), list.length, key);
+    for (const bin of b) {
+      for (const r of bin.rows) {
+        const shown = C.cellText(r, C.COLUMN[key]);
+        assert.ok(!where.has(shown) || where.get(shown) === bin.name, `${key} ${shown} in ${where.get(shown)} and ${bin.name}`);
+        where.set(shown, bin.name);
+      }
+    }
+  }
+});
+
+test('0.4 sort: Camera in the Sort menu, A to Z, clips with no camera last, and a bin per camera', () => {
+  const rows = [{ name: 'a', camera: 'SONY ILME-FX3' }, { name: 'b', camera: 'Canon EOS R5' }, { name: 'c', camera: null }, { name: 'd', camera: 'SONY ILME-FX3' }, { name: 'e', camera: 'Apple iPhone 15 Pro' }];
+  const names = dir => C.computeView(rows, V({ sort: [by('camera', dir)] })).order.map(i => rows[i].name);
+  assert.deepStrictEqual(names(1), ['e', 'b', 'a', 'd', 'c']);
+  assert.deepStrictEqual(names(-1), ['a', 'd', 'b', 'e', 'c'], 'no camera stays last both ways');
+  assert.equal(C.SORT.camera.dir, 1);
+  assert.deepStrictEqual(C.SORT.camera.ways, ['A to Z', 'Z to A'], 'the menu hint');
+  assert.equal(C.sortWords(by('camera', 1)), 'Camera A to Z', 'the toolbar');
+  assert.equal(C.sortWords(by('camera', -1)), 'Camera Z to A');
+  assert.equal(C.viewName(V({ show: 'interviews', sort: [by('camera', 1)] })), 'Interviews, camera A to Z');
+  assert.equal(C.COLUMN.camera.tip, 'Maker and model.', 'the Sort menu\'s tooltip, as CONTRACTS 5.7 has it');
+  const list = byOrder(rows, C.computeView(rows, V({ sort: [by('camera', 1)] })).order);
+  assert.deepStrictEqual(C.bucketize(list, V({ sort: [by('camera', 1)] })).map(b => [b.name, b.rows.length]), [['01 Apple iPhone 15 Pro', 1], ['02 Canon EOS R5', 1], ['03 SONY ILME-FX3', 2], ['04 No value', 1]]);
+  assert.equal(C.binKind(V({ sort: [by('camera', 1)] })), 'values');
+});
+
+// ---------------------------------------------------------------- 0.4: the host's new calls
+
+const VIDEO = ['mp4', 'mov', 'mxf'];
+// FNV-1a, 32 bits, written the plain way, to check the host's ES3 one against.
+const fnv = text => { let h = 0x811c9dc5; for (const ch of text) { h ^= ch.charCodeAt(0); h = Math.imul(h, 16777619) >>> 0; } return h.toString(16).padStart(8, '0'); };
+const sigOf = ids => ids.length + ':' + fnv(ids.join(','));
+
+test('0.4 host: every answer says how long it took inside Premiere, and the protocol is 3 in the host and the page', () => {
+  const h = hostWith();
+  for (const [fn, args] of [['ping', {}], ['status', {}], ['watch', {}], ['target', {}], ['find', { paths: ['/v/C1.MP4'] }], ['nonsense', {}]]) {
+    const res = h.call(fn, args);
+    assert.equal(typeof res.ms, 'number', fn);
+  }
+  assert.equal(h.call('ping', {}).protocol, 3);
+  const host = fs.readFileSync(path.join(__dirname, '../host/select.jsx'), 'utf8'), app = fs.readFileSync(path.join(__dirname, '../client/app.js'), 'utf8');
+  assert.match(host, /^var SELECT_HOST_PROTOCOL = 3;$/m);
+  assert.match(app, /^  var HOST_PROTOCOL = 3;$/m);
+});
+
+test('0.4 host: watch names the project and a signature of the selection, with no search and no walk', () => {
+  const h = hostWithViews([], [[2, 3]]);
+  h.options.searches = 0;
+  const w = h.call('watch', {});
+  assert.ok(w.ok);
+  assert.deepStrictEqual(w.project, { path: '/p.prproj', name: 'p.prproj', id: 'doc-1' });
+  assert.equal(w.sig, sigOf(['2', '3']), 'count and a hash of every id');
+  assert.equal(h.options.searches, 0);
+  assert.equal(hostWithViews([], [[]]).call('watch', {}).sig, '', 'nothing selected');
+  assert.equal(hostWithViews([], [[1], [3]]).call('watch', {}).sig, 'several:2', 'two Project panels, none in focus');
+  assert.equal(hostWithViews([3], [[1], [3]]).call('watch', {}).sig, sigOf(['3']), 'the one in focus wins');
+  const none = hostWith();
+  none.sandbox.app.project.path = '';
+  assert.deepStrictEqual([none.call('watch', {}).project, none.call('watch', {}).sig], [null, '']);
+});
+
+test('0.4 host fixes K1: the signature is the count and a 32-bit FNV-1a of every id, so a clip swapped in the middle changes it', () => {
+  const h = hostWith();
+  assert.deepStrictEqual(['', 'a', 'foobar'].map(x => h.sandbox.slFnv(x)), ['811c9dc5', 'e40c292c', 'bf9cf968'], 'the published test values');
+  for (const x of ['000f4a21', '000f4a21,000f4a3c,000f4b02', 'é,ü', Array.from({ length: 900 }, (_, i) => (0xf4000 + i).toString(16)).join(',')]) {
+    assert.equal(h.sandbox.slFnv(x), fnv(x), x.slice(0, 30));
+  }
+  const sig = sel => hostWithViews([], [sel]).call('watch', {}).sig;
+  assert.notEqual(sig([1, 2, 3]), sig([1, 3, 2]), 'order counts');
+  const swap = hostWithViews([], [[1, 2, 3]]), before = swap.call('watch', {}).sig;
+  swap.addClip(9, swap.root);
+  swap.sandbox.app.getProjectViewSelection = () => [swap.clip(1), swap.clip(9), swap.clip(3)];
+  const after = swap.call('watch', {}).sig;
+  assert.ok(/^3:[0-9a-f]{8}$/.test(before) && /^3:[0-9a-f]{8}$/.test(after) && before !== after, 'same count, same ends, another clip in the middle');
+  assert.equal(hostWithViews([], [[1], [3]]).call('watch', {}).sig, 'several:2');
+  assert.equal(hostWithViews([], [[]]).call('watch', {}).sig, '');
+});
+
+test('0.4 host fixes R6: the whole project is walked again only when it may have changed, and many loose clips never hand it all out', () => {
+  // A sequence selected means the whole project: the first time it is walked, then it comes from that walk while Premiere's
+  // undo history stands still. An import, a move or a deletion adds a step, and the next target walks again.
+  const h = hostWithViews([], [[]]), o = h.options;
+  const seq = h.sandbox.app.project.createNewSequenceFromClips('A sequence', [h.clip(1)], h.root);
+  h.sandbox.app.getProjectViewSelection = () => [seq.projectItem];
+  o.everything = 0;
+  let t = h.call('target', { exts: VIDEO });
+  assert.deepStrictEqual([t.kind, t.items.length, t.walked, o.everything], ['project', 3, true, 1]);
+  const again = h.call('target', { exts: VIDEO });
+  assert.deepStrictEqual([again.kind, again.items.length, again.walked, o.everything], ['project', 3, false, 1], 'another click, no walk');
+  h.sandbox.app.getProjectViewSelection = () => [];
+  assert.deepStrictEqual([h.call('target', { exts: VIDEO }).walked, o.everything], [false, 1], 'nothing selected: still the same project');
+  h.addClip(4, h.root);
+  o.undoAt = 8;
+  t = h.call('target', { exts: VIDEO });
+  assert.deepStrictEqual([t.items.length, t.walked, o.everything], [4, true, 2], 'an import moved the undo history: walked again');
+  assert.equal(h.call('target', { whole: true, exts: VIDEO }).walked, true, 'Scan Whole Project walks whatever');
+  assert.equal(h.call('target', { fresh: true, exts: VIDEO }).walked, true, 'and so does fresh');
+  assert.equal(o.everything, 4);
+  // No undo history to read: every target walks, as before.
+  const blind = hostWithViews([], [[]]);
+  blind.sandbox.qe.project.undoStackIndex = () => { throw new Error('no QE'); };
+  blind.call('target', { exts: VIDEO });
+  blind.call('target', { exts: VIDEO });
+  assert.equal(blind.options.everything, 2);
+  // Another project in front never gets this one's list.
+  const other = hostWithViews([], [[]]);
+  other.call('target', { exts: VIDEO });
+  other.sandbox.app.project.path = '/q.prproj';
+  assert.equal(other.call('target', { exts: VIDEO }).walked, true);
+  // 150 loose clips selected: one search per path, never one search of every item in the project.
+  const many = hostWithViews([], [[]]);
+  const list = Array.from({ length: 150 }, (_, i) => many.addClip(200 + i, many.root));
+  many.addClip(400, many.root, { name: 'sub', sub: true, getMediaPath: () => '/v/C200.MP4' });
+  many.sandbox.app.getProjectViewSelection = () => list.concat([many.clip(400)]);
+  many.options.searches = 0; many.options.everything = 0;
+  t = many.call('target', { exts: VIDEO });
+  assert.deepStrictEqual([t.kind, t.items.length, t.subclips, many.options.everything, many.options.searches], ['clips', 150, 1, 0, 150]);
+});
+
+test('0.4 host fixes R5: Reveal in Project selects at most 50 clips', () => {
+  const h = hostWith();
+  for (let i = 4; i <= 60; i++) { h.addClip(i, h.root); }
+  const ids = n => Array.from({ length: n }, (_, i) => [String(i + 4), '/v/C' + (i + 4) + '.MP4']);
+  const fifty = h.call('reveal', { project: '/p.prproj', items: ids(50) });
+  assert.deepStrictEqual([fifty.ok, fifty.selected], [true, 50]);
+  const more = h.call('reveal', { project: '/p.prproj', items: ids(51) });
+  assert.deepStrictEqual([more.ok, more.code, more.message], [false, 'too-many', 'At most 50 clips.']);
+  assert.equal(h.sandbox.SL_MOST_REVEAL, 50);
+});
+
+test('0.4 host fixes R21: refusals are a few words, with the same codes', () => {
+  const said = (options, change, fn, args) => { const h = hostWith(options); if (change) { change(h); } const r = h.call(fn, args || { project: '/p.prproj', items: pairs('1'), color: 5 }); return [r.code, r.message]; };
+  assert.deepStrictEqual(said({}, h => { h.sandbox.qe.getModalWindowID = () => 'dlg'; }, 'label'), ['modal', 'A Premiere dialog is open.']);
+  assert.deepStrictEqual(said({ noModalCheck: true }, null, 'bins'), ['modal-unknown', 'Premiere didn\'t answer. Nothing was written.']);
+  assert.deepStrictEqual(said({}, h => { h.sandbox.qe.source.player.isPlaying = true; }, 'restore', { project: '/p.prproj', restore: { kind: 'label', color: 5, items: [] } }), ['playing', 'Playback is running.']);
+  assert.deepStrictEqual(said({}, h => { h.sandbox.qe.source.player.isPlaying = 'x'; }, 'label'), ['playback-unknown', 'Premiere didn\'t answer. Nothing was written.']);
+  assert.deepStrictEqual(said({}, h => { h.sandbox.app.project.path = ''; }, 'sequence', { project: '/p.prproj', name: 'X', items: pairs('1') }), ['no-project', 'No project is open.']);
+  assert.deepStrictEqual(said({}, null, 'sequence', { project: '/p.prproj', name: 'X', items: [['9', '/v/C9.MP4']] }), ['empty', 'None of these clips are in this project.']);
+  assert.deepStrictEqual(said({}, null, 'reveal', { project: '/p.prproj', items: [['9', '/v/C9.MP4']] }), ['not-found', 'None of these clips are in this project.']);
+  assert.deepStrictEqual(said({}, null, 'sequence', { project: '/p.prproj', name: 'X', items: Array.from({ length: 2001 }, () => ['1', '/v/C1.MP4']) }), ['too-many', 'A sequence from Select holds at most 2,000 clips.']);
+  const host = fs.readFileSync(path.join(__dirname, '../host/select.jsx'), 'utf8');
+  assert.ok(!/Close it first|Stop it and try again|and try again\. Nothing was changed|did not confirm that/.test(host), 'none of the long ones left');
+});
+
+test('0.4 host fixes R3: Undo deletes a sequence only while it holds what Select made and no other sequence uses it', () => {
+  const make = () => {
+    const h = hostWith(), made = h.call('sequence', { project: '/p.prproj', name: 'Picks', items: pairs('1', '2'), write: 's' });
+    return { h, made, q: h.seqs[h.seqs.length - 1], undo: () => h.call('restore', { project: '/p.prproj', restore: made.restore, final: true, write: 'u' }) };
+  };
+  // The record holds the sequence's shape as it was made.
+  let { h, made, q, undo } = make();
+  assert.equal(made.restore.items[0].length, 6);
+  assert.equal(made.restore.items[0][5], 'v3,2/0,0/0,0/0|a3,2/0,0/0,0/0|m0|io0,2|f1920x1080@10160640000|z0|e' + q.end);
+  let r = undo();
+  assert.deepStrictEqual([r.restored, r.skipped, r.kept, r.note], [1, 0, [], null], 'untouched: it goes');
+  const kept = (change, words) => {
+    const m = make();
+    change(m.q, m.h);
+    const a = m.undo();
+    assert.deepStrictEqual([a.restored, a.skipped, a.kept.length, a.note, m.h.seqs.includes(m.q)], [0, 1, 1, words || 'The sequence has changed. It stays.', true], change.toString());
+    assert.equal(a.kept[0].name, 'Picks');
+    assert.equal(C.undoOutcome(a, 'sequence').verdict, 'Nothing went back');
+  };
+  kept(q => { q.videoTracks[1].clips = { numItems: 1 }; });                   // a title on V2
+  kept(q => { q.audioTracks[0].clips = { numItems: 3 }; });                   // an audio edit on A1
+  kept(q => { q.audioTracks[2].transitions = { numItems: 1 }; });             // a crossfade on A3
+  kept(q => { q.markers = { numMarkers: 1 }; });                              // a marker
+  kept(q => { q.outPoint = '1'; });                                           // an out point
+  kept(q => { q.videoTracks = Object.assign({ numTracks: 4 }, [q.videoTracks[0], q.videoTracks[1], q.videoTracks[2], { clips: { numItems: 0 }, transitions: { numItems: 0 } }]); }); // a track added
+  kept(q => { q.timebase = '5080320000'; });                                  // settings changed
+  // Nested in another sequence: Premiere says so in the item's Video Usage, and deleting it would empty that timeline.
+  const usage = n => `<premierePrivateProjectMetaData:Column.Intrinsic.VideoUsage>${n}</premierePrivateProjectMetaData:Column.Intrinsic.VideoUsage>`;
+  kept(q => { q.projectItem.setProjectMetadata(usage(1)); }, 'The sequence is in another sequence. It stays.');
+  kept(q => { q.projectItem.getProjectMetadata = () => { throw new Error('unreadable'); }; }, 'The sequence is in another sequence. It stays.');
+  ({ h, made, q, undo } = make());
+  q.projectItem.setProjectMetadata(usage(0));
+  assert.equal(undo().restored, 1, 'a usage of 0, as after the other sequence let it go, is free to go');
+  // A record without a shape (a dev build's, before this) is never trusted.
+  ({ h, made, q, undo } = make());
+  made.restore.items[0] = made.restore.items[0].slice(0, 5);
+  r = undo();
+  assert.deepStrictEqual([r.restored, r.note], [0, 'The sequence has changed. It stays.']);
+  // Gone already is not a change, and says nothing.
+  ({ h, made, q, undo } = make());
+  h.sandbox.app.project.deleteSequence(q);
+  r = undo();
+  assert.deepStrictEqual([r.restored, r.skipped, r.kept, r.note], [0, 1, [], null]);
+});
+
+test('0.4 host: target reads what Scan would: the clips selected, the bins selected, or the whole project', () => {
+  // Day 2 holds 4 and 5, Day 3 holds 6; 7 is a still; 8 is a subclip of 4; a sequence sits at the top.
+  const make = () => {
+    const h = hostWithViews([], [[]]), day2 = h.root.createBin('Day 2'), day3 = h.root.createBin('Day 3');
+    h.addClip(4, day2); h.addClip(5, day2); h.addClip(6, day3);
+    h.addClip(7, h.root, { name: 'still.png', getMediaPath: () => '/v/still.png' });
+    h.addClip(8, day2, { name: 'sub of 4', sub: true, getMediaPath: () => '/v/C4.MP4' });
+    h.sandbox.app.project.createNewSequenceFromClips('A sequence', [h.clip(1)], h.root);
+    return { h, day2, day3 };
+  };
+  const select = (h, list) => { h.sandbox.app.getProjectViewSelection = () => list; };
+  let { h, day2, day3 } = make();
+  select(h, [h.clip(4), h.clip(6)]);
+  let t = h.call('target', { exts: VIDEO });
+  assert.equal(t.kind, 'clips');
+  assert.deepStrictEqual(t.places, ['Day 2', 'Day 3']);
+  assert.equal(t.name, null, 'two clips have no one name');
+  assert.deepStrictEqual(t.items.map(i => [i.id, i.bin]), [['4', 'Day 2'], ['6', 'Day 3']]);
+  assert.equal(t.sig, sigOf(['4', '6']));
+  select(h, [h.clip(6)]);
+  t = h.call('target', { exts: VIDEO });
+  assert.deepStrictEqual([t.kind, t.name, t.places], ['clips', 'C6.MP4', ['Day 3']]);
+  select(h, [day2]);
+  t = h.call('target', { exts: VIDEO });
+  assert.equal(t.kind, 'bins');
+  assert.deepStrictEqual(t.places, ['Day 2']);
+  assert.deepStrictEqual(t.items.map(i => i.id), ['4', '5'], 'the subclip in the bin is left out');
+  select(h, [day2, day3]);
+  assert.deepStrictEqual(h.call('target', { exts: VIDEO }).items.map(i => i.id), ['4', '5', '6']);
+  // Only a still, or only the sequence: Scan reads the whole project.
+  select(h, [h.clip(7)]);
+  t = h.call('target', { exts: VIDEO });
+  assert.equal(t.kind, 'project');
+  assert.deepStrictEqual(t.items.map(i => i.id).sort(), ['1', '2', '3', '4', '5', '6', '7'], 'every master clip with media; the panel keeps the video');
+  assert.equal(t.sequences, 1);
+  select(h, [h.clip(4), h.clip(8)]);
+  t = h.call('target', { exts: VIDEO });
+  assert.deepStrictEqual([t.kind, t.items.length, t.subclips], ['clips', 1, 1], 'a subclip selected is counted and left out');
+  assert.equal(h.call('target', { whole: true, exts: VIDEO }).kind, 'project', 'Scan Whole Project ignores the selection');
+  // More than three places: three and a count.
+  ({ h } = make());
+  const bins = ['A', 'B', 'C', 'D', 'E'].map((n, i) => { const b = h.root.createBin(n); h.addClip(20 + i, b); return b; });
+  select(h, bins);
+  t = h.call('target', { exts: VIDEO });
+  assert.deepStrictEqual([t.places, t.more], [['A', 'B', 'C'], 2]);
+  const several = hostWithViews([], [[1], [3]]).call('target', { exts: VIDEO });
+  assert.deepStrictEqual([several.kind, several.several, several.items.length], ['several', 2, 0]);
+  const none = hostWith();
+  none.sandbox.app.project.path = '';
+  assert.equal(none.call('target', {}).code, 'no-project');
+});
+
+test('0.4 host: subclips are never written to: find, collect and target leave them out, so Label and Bins never reach one', () => {
+  const h = hostWith();
+  h.addClip(9, h.root, { name: 'sub of 1', sub: true, getMediaPath: () => '/v/C1.MP4' });
+  assert.deepStrictEqual(h.call('find', { paths: ['/v/C1.MP4'] }).items.map(i => i.id), ['1']);
+  assert.deepStrictEqual(h.call('collect', { mode: 'project' }).items.map(i => i.id), ['1', '2', '3']);
+  h.options.searches = 0;
+  const many = ['/v/C1.MP4'].concat(Array.from({ length: 120 }, (_, i) => '/v/none' + i + '.MP4'));
+  assert.deepStrictEqual(h.call('find', { paths: many }).items.map(i => i.id), ['1'], 'one search for every item, past 100 paths');
+  assert.equal(h.options.searches, 1);
+  h.options.searches = 0;
+  assert.deepStrictEqual(h.call('find', { paths: many.slice(0, 100) }).items.map(i => i.id), ['1'], 'one search per path up to 100');
+  assert.equal(h.options.searches, 100);
+  const sel = hostWithViews([], [[1, 9]]);
+  sel.addClip(9, sel.root, { name: 'sub of 1', sub: true, getMediaPath: () => '/v/C1.MP4' });
+  const picked = sel.call('collect', { mode: 'selection' });
+  assert.deepStrictEqual([picked.items.map(i => i.id), picked.picked.subclips], [['1'], 1]);
+});
+
+test('0.4 host: a write looks the project up once: later batches reuse the index, the last lets it go', () => {
+  const h = hostWith();
+  const one = h.call('label', { project: '/p.prproj', items: pairs('1'), color: 3, write: 'w1' });
+  const two = h.call('label', { project: '/p.prproj', items: pairs('2'), color: 3, write: 'w1' });
+  assert.deepStrictEqual([one.index.reused, two.index.reused], [false, true]);
+  assert.ok(h.sandbox.slCache && h.sandbox.slCache.token === 'w1');
+  const last = h.call('label', { project: '/p.prproj', items: pairs('3'), color: 3, write: 'w1', final: true });
+  assert.equal(last.index.reused, true);
+  assert.equal(h.sandbox.slCache, null, 'let go after the last batch');
+  assert.equal(h.call('label', { project: '/p.prproj', items: pairs('1'), color: 4, write: 'w2' }).index.reused, false, 'another write looks again');
+  assert.equal(h.call('label', { project: '/p.prproj', items: pairs('1'), color: 5 }).index.reused, false, 'no write id, no reuse');
+  // A clip changed between two batches of one write is still left alone: its path is checked every time.
+  h.call('label', { project: '/p.prproj', items: pairs('1'), color: 6, write: 'w3' });
+  h.clip(2).getMediaPath = () => '/v/Other.MP4';
+  const later = h.call('label', { project: '/p.prproj', items: pairs('2'), color: 6, write: 'w3', final: true });
+  assert.deepStrictEqual([later.changed, later.skipped[0].error], [0, 'now a different clip']);
+  // Loading the host again keeps a write's index.
+  h.call('label', { project: '/p.prproj', items: pairs('1'), color: 7, write: 'w4' });
+  require('vm').runInContext(fs.readFileSync(path.join(__dirname, '../host/select.jsx'), 'utf8'), h.sandbox);
+  assert.equal(h.call('label', { project: '/p.prproj', items: pairs('3'), color: 7, write: 'w4', final: true }).index.reused, true);
+  // Undo's batches share one too, and a bins write keeps the bins it made in it.
+  const b = hostWith(), res = b.call('bins', { ...binsArgs(), write: 'b1' });
+  assert.equal(b.call('restore', { project: '/p.prproj', restore: res.restore, final: true, write: 'u1' }).restored, 3);
+});
+
+test('0.4 host: open goes by the id the scan gave, and by the path only when that id has gone', () => {
+  const h = hostWith();
+  let opened = null;
+  h.sandbox.app.sourceMonitor = { openProjectItem(it) { opened = it.nodeId; } };
+  h.options.searches = 0;
+  let r = h.call('open', { project: '/p.prproj', id: '2', path: '/v/C2.MP4' });
+  assert.deepStrictEqual([r.ok, r.by, r.id, opened], [true, 'id', '2', 2]);
+  assert.equal(h.options.searches, 1, 'one search for that path, no walk');
+  r = h.call('open', { project: '/p.prproj', id: '77', path: '/v/C3.MP4' });
+  assert.deepStrictEqual([r.ok, r.by, r.id], [true, 'path', '3'], 'an id from before a revert: the clip with that path');
+  r = h.call('open', { project: '/p.prproj', id: '1', path: '/v/gone.MP4' });
+  assert.deepStrictEqual([r.ok, r.code], [false, 'not-found']);
+  assert.equal(h.call('open', { project: '/elsewhere.prproj', id: '1', path: '/v/C1.MP4' }).code, 'wrong-project');
+  const app = fs.readFileSync(path.join(__dirname, '../client/app.js'), 'utf8');
+  assert.match(app, /openId\(known, st\.project, true\)/, 'the panel opens by the scan\'s id first');
+});
+
+test('0.4 host: reveal selects the clips in the Project panel, by id and path, and says what it could not', () => {
+  const h = hostWith();
+  const r = h.call('reveal', { project: '/p.prproj', items: pairs('1', '3', '9') });
+  assert.ok(r.ok);
+  assert.deepStrictEqual([r.selected, r.asked, r.skipped.map(s => s.id)], [2, 2, ['9']]);
+  assert.deepStrictEqual(Array.from(h.sandbox.app.getProjectViewSelection('view0'), i => i.nodeId), [1, 3]);
+  assert.equal(h.call('reveal', { project: '/p.prproj', items: pairs('9') }).code, 'not-found');
+  assert.equal(h.call('reveal', { project: '/p.prproj', items: [] }).code, 'empty');
+  assert.equal(h.call('reveal', { project: '/p.prproj', items: Array.from({ length: 501 }, (_, i) => [String(i), '/v/x.MP4']) }).code, 'too-many');
+  const blind = hostWith();
+  blind.sandbox.app.getProjectFromViewID = () => ({ path: '/other.prproj' });
+  assert.equal(blind.call('reveal', { project: '/p.prproj', items: pairs('1') }).code, 'no-view');
+  // It changes nothing in the project, so playback doesn't stop it; a dialog does.
+  const playing = hostWith();
+  playing.sandbox.qe.source.player.isPlaying = true;
+  assert.ok(playing.call('reveal', { project: '/p.prproj', items: pairs('1') }).ok);
+  assert.equal(playing.call('label', { project: '/p.prproj', items: pairs('1'), color: 1 }).code, 'playing');
+});
+
+test('0.4 host: Make Sequence: one new sequence at the top, in the order given, never over another name, and Undo removes exactly it', () => {
+  const h = hostWith();
+  h.sandbox.app.project.createNewSequenceFromClips('Old cut', [h.clip(1)], h.root);
+  h.root.createBin('SELECT 2026-11-04 Interviews');
+  const order = pairs('3', '1', '2');
+  const made = h.call('sequence', { project: '/p.prproj', name: 'SELECT 2026-11-04 Interviews', items: order.concat([['9', '/v/C9.MP4']]), open: true, write: 's1' });
+  assert.ok(made.ok, made.message);
+  assert.equal(made.name, 'SELECT 2026-11-04 Interviews (2)', 'a bin at the top already has the name');
+  assert.deepStrictEqual([made.clips, made.inOrder, made.opened, made.othersKept], [3, true, true, true]);
+  assert.deepStrictEqual(Array.from(h.seqs[1].v1, c => String(c.projectItem.nodeId)), ['3', '1', '2']);
+  assert.deepStrictEqual(made.skipped.map(s => s.id), ['9']);
+  assert.deepStrictEqual(made.settings, { width: 1920, height: 1080, fps: 25, par: null });
+  assert.equal(made.restore.kind, 'sequence');
+  assert.deepStrictEqual(made.restore.items[0].slice(0, 4), [made.sequenceID, made.id, made.name, 3]);
+  assert.ok(h.root.kids.some(k => String(k.nodeId) === made.id), 'its project item is at the top of the project');
+  // Undo: only that sequence goes, found by its id, even while it is open in front.
+  assert.equal(h.sandbox.app.project.activeSequence, h.seqs[1]);
+  const back = h.call('restore', { project: '/p.prproj', restore: made.restore, final: true, write: 'u1' });
+  assert.deepStrictEqual([back.restored, back.skipped, back.failed.length], [1, 0, 0]);
+  assert.deepStrictEqual(h.seqs.map(q => q.name), ['Old cut']);
+  assert.equal(h.call('restore', { project: '/p.prproj', restore: made.restore, final: true }).skipped, 1, 'already gone');
+  // Worked in since: left alone.
+  const again = h.call('sequence', { project: '/p.prproj', name: 'Picks', items: pairs('1', '2'), write: 's2' });
+  h.seqs[1].name = 'Picks, renamed';
+  assert.deepStrictEqual([h.call('restore', { project: '/p.prproj', restore: again.restore }).skipped, h.seqs.length], [1, 2]);
+  const third = h.call('sequence', { project: '/p.prproj', name: 'More', items: pairs('1', '2'), write: 's3' });
+  h.seqs[2].end = '1';
+  assert.equal(h.call('restore', { project: '/p.prproj', restore: third.restore }).skipped, 1, 'a changed end is a change');
+  const kept = hostWith({ keepSequences: true }), k = kept.call('sequence', { project: '/p.prproj', name: 'K', items: pairs('1') });
+  const stuck = kept.call('restore', { project: '/p.prproj', restore: k.restore });
+  assert.deepStrictEqual([stuck.restored, stuck.failed[0].error, stuck.remaining.items.length], [0, 'did not go', 1]);
+  // Nothing found, or nothing made: nothing changed.
+  assert.equal(h.call('sequence', { project: '/p.prproj', name: 'X', items: [['9', '/v/C9.MP4']] }).code, 'empty');
+  assert.equal(hostWith({ noSequence: true }).call('sequence', { project: '/p.prproj', name: 'X', items: pairs('1') }).code, 'failed');
+  assert.equal(h.call('sequence', { project: '/p.prproj', name: 'X', items: Array.from({ length: 2001 }, () => ['1', '/v/C1.MP4']) }).code, 'too-many');
+  // A Premiere that makes the sequence and answers nothing: the new sequence of that name is the one made, and Undo reaches it.
+  const mute = hostWith(), real = mute.sandbox.app.project.createNewSequenceFromClips;
+  mute.sandbox.app.project.createNewSequenceFromClips = (n, list, into) => { real(n, list, into); return undefined; };
+  const quiet = mute.call('sequence', { project: '/p.prproj', name: 'Quiet', items: pairs('2', '1') });
+  assert.deepStrictEqual([quiet.ok, quiet.clips, quiet.inOrder, quiet.name], [true, 2, true, 'Quiet']);
+  assert.equal(mute.call('restore', { project: '/p.prproj', restore: quiet.restore }).restored, 1);
+  assert.equal(h.call('sequence', { project: '/elsewhere.prproj', name: 'X', items: pairs('1') }).code, 'wrong-project');
+  assert.equal(C.undoWords({ kind: 'sequence', restore: made.restore }), 'Removes the sequence ' + made.name + '.');
+});
+
+test('0.4 host: Sort into Bins can make one bin with no bins inside, read back and undone like the others', () => {
+  const h = hostWith();
+  h.root.createBin('SELECT x');
+  const sent = { project: '/p.prproj', root: 'SELECT x', single: true, buckets: [{ name: 'SELECT x', items: pairs('1', '3') }], write: 'b1', final: true };
+  const res = h.call('bins', sent);
+  assert.ok(res.ok);
+  assert.equal(res.root, 'SELECT x (2)');
+  const top = h.root.kids.find(k => String(k.nodeId) === res.top);
+  assert.deepStrictEqual(top.kids.map(k => k.nodeId), [1, 3], 'the clips sit in the bin itself');
+  const check = h.call('binsCheck', { project: '/p.prproj', top: res.top, single: true, name: 'SELECT x' });
+  assert.deepStrictEqual(check.buckets, [{ name: 'SELECT x', ids: ['1', '3'] }]);
+  const back = h.call('restore', { project: '/p.prproj', restore: res.restore, final: true, write: 'u1' });
+  assert.deepStrictEqual([back.restored, back.binRemoved], [2, true]);
+  assert.ok(!h.root.kids.some(k => String(k.nodeId) === res.top));
+});
+
+test('wording: Undo has one name, and refusals name projects plainly', () => {
   assert.equal(C.COLUMN.audioDb.label, 'Loudness');
   assert.equal(C.COLUMN.audioDb.label, C.SORT.audioDb.label, 'the table and the Sort menu agree');
   const html = fs.readFileSync(path.join(__dirname, '../client/index.html'), 'utf8');
-  assert.match(html, /data-menu="undo" hidden>Undo Write</);
-  assert.match(html, /id="undo-write" class="action" hidden>Undo Write</);
+  assert.match(html, /data-menu="undo" hidden>Undo</);
+  assert.match(html, /id="undo-write" class="action" hidden>Undo</);
   assert.match(html, /data-menu="undo-view"[^>]*>Previous View</);
-  assert.ok(!/Undo Last Write|>Undo View</.test(html));
+  assert.ok(!/Undo Last Write|>Undo View<|Undo Write/.test(html));
+  // Since 0.4 the editor sees one word, Undo: no "Undo Write" left in what the panel says.
+  const app = fs.readFileSync(path.join(__dirname, '../client/app.js'), 'utf8'), core = fs.readFileSync(path.join(__dirname, '../client/core.js'), 'utf8');
+  assert.ok(!/Undo Write/.test(app + core), 'no Undo Write in the panel');
+  assert.ok(!/foot-close/.test(html + app), 'no × on the status: a write that worked goes by itself');
   const wrong = hostWith().call('label', { project: '/Volumes/Field SSD/Projects/north-pier.prproj', items: pairs('1'), color: 5 });
-  assert.equal(wrong.message, 'The project in front is p, not north-pier. Open north-pier and try again. Nothing was changed.');
+  assert.equal(wrong.message, 'The project in front is p, not north-pier.');
   assert.ok(!/\/Volumes|\.prproj/.test(wrong.message), 'no full path');
   const twin = hostWith().call('restore', { project: '/elsewhere/p.prproj', restore: { kind: 'label', color: 5, items: [] } });
   assert.match(twin.message, /^The project in front is another p, in a different folder\./);
@@ -2051,6 +2553,8 @@ function es3Problems(src) {
 test('N7: the ExtendScript host uses ES3 only, and the check catches what ExtendScript lacks', () => {
   const host = fs.readFileSync(path.join(__dirname, '../host/select.jsx'), 'utf8');
   assert.deepStrictEqual(es3Problems(host), []);
+  // ExtendScript may read the file in the Mac's own encoding, so a character past ASCII, even in a regex, would change.
+  assert.ok(/^[\x00-\x7f]*$/.test(host), 'the host file is pure ASCII');
   // It parses JSON by eval and writes it with slJson, because ExtendScript has no JSON object.
   assert.match(host, /eval\('\(' \+ json \+ '\)'\)/);
   assert.match(host, /^function slJson\(v\)/m);

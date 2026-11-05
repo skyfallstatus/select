@@ -196,13 +196,19 @@ func fallbackTier0(path: String, size: Int64, mtime: Double, reason: String) thr
     let channels = audio.compactMap { $0["channels"] as? Int }.reduce(0, +)
 
     var meta = Embedded()
-    let side = readSidecar(clipPath: path)
-    meta.created = side?.created.flatMap(isoDate)
-        ?? ["com.apple.quicktime.creationdate", "creation_time"].lazy.compactMap { (formatTags[$0] as? String).flatMap(isoDate) }.first
+    // Sony's XML beside the clip, or the copy Sony keeps near the start of an MXF.
+    let beside = readSidecar(clipPath: path)
+    let side = beside ?? leadingSidecar(path: path)
+    if let date = (formatTags["com.apple.quicktime.creationdate"] as? String).flatMap(isoDate) {
+        (meta.created, meta.createdSource) = (date, .camera)
+    } else if let date = ["creation_time", "modification_date"].lazy.compactMap({ (formatTags[$0] as? String).flatMap(isoDate) }).first {
+        // The container's time, UTC. MXF has only the time the file was last written, which on Sony cameras is when it was shot.
+        (meta.created, meta.createdSource) = (date, .container)
+    }
     meta.timecode = side?.timecode ?? (videoTags["timecode"] as? String) ?? (formatTags["timecode"] as? String)
-    meta.make = side?.make ?? (formatTags["company_name"] as? String)
-    meta.model = side?.model ?? (formatTags["product_name"] as? String)
-    meta.lens = side?.lens
+    (meta.make, meta.model) = writerAsCamera(company: formatTags["company_name"] as? String, product: formatTags["product_name"] as? String)
+    applySidecar(side, to: &meta)
+    preferNameDate(&meta, name: (path as NSString).lastPathComponent)
     // HLG and PQ, as ffprobe names them, so the colour can say it wasn't converted.
     let transfer: String? = ["arib-std-b67": "hlg", "smpte2084": "pq"][v["color_transfer"] as? String ?? ""]
     meta.gamma = side?.gamma ?? transfer
@@ -219,12 +225,41 @@ func fallbackTier0(path: String, size: Int64, mtime: Double, reason: String) thr
     plan.bitDepth = depth
     plan.formatName = info.displayName
     plan.color = colorPlan(gamma: meta.gamma, primaries: side?.primaries, rtmd: nil)
+    let before = colorPlan(gamma: beside?.gamma ?? transfer, primaries: beside?.primaries, rtmd: nil)
     let mbps = duration > 0 ? Double(size) * 8 / duration / 1e6 : nil
     let fields = tier0Fields(path: path, size: size, duration: duration, fps: fps, w: w, h: h, rotation: rotation,
                              info: info, allIntra: nil, mbps: mbps, hasAudio: !audio.isEmpty,
                              channels: channels > 0 ? channels : nil, meta: meta, keyframe: nil, motion: nil,
                              colorNote: plan.color.note)
-    return Tier0Result(fields: fields, plan: plan, size: size, mtime: mtime)
+    return Tier0Result(fields: fields, plan: plan, size: size, mtime: mtime, colorBefore: before)
+}
+
+/// MXF names the program that wrote it, which for a camera is often its maker and a module name, such as Sony's "Mem", and
+/// for an export is the editing program. Only a maker and model that name a camera are kept. Programs are matched as whole
+/// words, so a Blackmagic camera keeps its name while DaVinci Resolve, from the same maker, names none.
+func writerAsCamera(company: String?, product: String?) -> (String?, String?) {
+    let c = company?.trimmingCharacters(in: .whitespaces), p = product?.trimmingCharacters(in: .whitespaces)
+    let words = ((c ?? "") + " " + (p ?? "")).lowercased().split { !$0.isLetter && !$0.isNumber }.map(String.init)
+    func says(_ phrase: String) -> Bool {
+        let want = phrase.split(separator: " ").map(String.init)
+        guard want.count <= words.count else { return false }
+        return (0...(words.count - want.count)).contains { at in (0..<want.count).allSatisfy { words[at + $0] == want[$0] } }
+    }
+    let programs = ["adobe", "media encoder", "premiere", "after effects", "resolve", "avid", "media composer", "compressor",
+                    "final cut", "ffmpeg", "libavformat", "telestream", "episode", "vantage", "harmonic", "grass valley", "edius",
+                    "omneon", "mog", "opencube", "bmx", "mxflib"]
+    // ffmpeg's library signs itself Lavf with its version run into the word, such as Lavf60.16.100.
+    if programs.contains(where: says) || words.contains(where: { $0.hasPrefix("lavf") }) { return (nil, nil) }
+    let maker = c?.isEmpty == false ? c : nil
+    // Sony's cameras call their recording module "Mem": that's no model.
+    guard let p, !p.isEmpty, p != "Mem" else { return (maker, nil) }
+    return (maker, p)
+}
+
+/// Sony keeps a copy of the clip's XML in the header of its MXF files: 10 KB in on most, 445 KB in on one FX6 clip here.
+func leadingSidecar(path: String) -> Sidecar? {
+    guard let f = try? MediaFile(path: path), let b = try? f.read(at: 0, count: Int(min(f.size, 1 << 20))) else { return nil }
+    return embeddedSidecar(b.bytes)
 }
 
 /// One frame through an ffmpeg process, rebuilt into the layout VideoToolbox gives.
@@ -260,6 +295,18 @@ func fallbackImage(path: String, at time: Double, width: Int, height: Int) -> Da
     guard let tool = ffmpegPath else { return nil }
     guard let raw = capture([tool, "-v", "error", "-nostdin", "-noautorotate", "-ss", String(format: "%.3f", max(0, time)), "-i", path,
                              "-map", "0:v:0", "-frames:v", "1", "-vf", "scale=\(width):\(height)", "-f", "rawvideo", "-pix_fmt", "bgra", "-"]),
+          raw.count == width * height * 4 else { return nil }
+    return raw
+}
+
+/// One frame for a strip through an ffmpeg process: the keyframe at or before `time`, turned upright and cropped from the centre
+/// to `width` by `height`, as BGRA.
+func fallbackStripFrame(path: String, at time: Double, width: Int, height: Int, timeout: Double) -> Data? {
+    guard let tool = ffmpegPath else { return nil }
+    guard let raw = capture([tool, "-v", "error", "-nostdin", "-ss", String(format: "%.3f", max(0, time)), "-noaccurate_seek",
+                             "-i", path, "-map", "0:v:0", "-frames:v", "1",
+                             "-vf", "scale=\(width):\(height):force_original_aspect_ratio=increase,crop=\(width):\(height)",
+                             "-f", "rawvideo", "-pix_fmt", "bgra", "-"], timeout: timeout),
           raw.count == width * height * 4 else { return nil }
     return raw
 }

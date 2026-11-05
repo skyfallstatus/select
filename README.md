@@ -1,26 +1,21 @@
 # Select
 
-A Premiere Pro panel that sorts hundreds of clips in seconds, so you know where to look first.
+A Premiere Pro panel that sorts and searches your clips in seconds. Everything runs on your Mac.
 
 <p align="center">
-  <img src="docs/media/panel-grid-dark.png" width="760" alt="The Select panel in grid view with 24 invented clips, simple drawn scenes rather than real footage, sorted by colour: reds and oranges first, then yellows, greens, blues and purples, with grey clips last. Each clip shows a small strip of its main colours.">
+  <img src="docs/media/panel-grid-dark.png" width="760" alt="The Select panel in grid view, dark, with 24 invented clips sorted by colour.">
 </p>
 
-Press **Scan** and Select looks at every clip: the picture, the sound and the camera's details. Then pick what to **Show** (interviews, people, speech, similar shots…) and how to **Sort** (sharpness, brightness, colour, length…). Search finds what's in your clips. Everything stays on your Mac.
+Press **Scan**. Select reads every clip: the picture, the sound and the camera's details. **Show** picks which clips you see, **Sort** puts them in order, and search finds what is in them.
 
-Select is in beta, so try it on a copy of your project first.
+Select is in beta. Try it on a copy of a project first.
 
 ## Install
 
-### Requirements
-
-- **macOS** 13 Ventura or later
-- **Mac** with Apple silicon, or Intel (untested so far)
-- **Premiere Pro** 2023 (version 23) or later
-- **Footage:** MP4 and MOV. MXF needs [ffmpeg](https://ffmpeg.org).
-- **Windows** isn't supported.
-
-So far it has been tested on Premiere 26.5 with an Apple silicon Mac.
+- macOS 13 or later. Apple silicon; Intel is untested.
+- Premiere Pro 2023 (version 23) or later. Tested on 26.5.
+- MP4 and MOV. MXF needs [ffmpeg](https://ffmpeg.org).
+- Not on Windows.
 
 ### Steps
 
@@ -35,32 +30,26 @@ On macOS 13 or 14, you can instead Control-click the package and choose **Open**
 
 ### Updates
 
-Select updates itself. When a new version is ready, a line at the top of the panel says so. **Restart** switches to it, or Premiere uses it the next time it opens. **Check for Updates** in the **···** menu checks now.
+Select updates itself. When a new version is ready, a line at the top of the panel says so. **Restart** switches to it, or Premiere uses it the next time it opens. Only versions signed with Select's own key are accepted. The package isn't signed by Apple, which is why macOS asks once.
 
-Coming from Select 0.1? Install the package once, as above. 0.1 can't update itself.
+To remove Select, quit Premiere and delete `com.skyfallstatus.select` from `~/Library/Application Support/Adobe/CEP/extensions`, and the folders `~/Library/Application Support/com.skyfallstatus.select` and `~/Library/Caches/com.skyfallstatus.select`.
 
 ## Use
 
-1. Choose **Selection**, **Project** or **Folder** from the **From** menu, and press **Scan**.
-2. Pick from **Show** and **Sort**, tap a colour dot, or search.
-3. Happy with the view? **Label**, **Add Columns** or **Sort into Bins** puts it in your project. **Undo Write** in the **···** menu takes it back. Select keeps the last 10 writes for each project, and they stay when the panel reloads.
+1. Select clips or bins in the Project panel, or nothing for the whole project, and press **Scan**. The line under the toolbar says what it will read. **Scan a Folder…** in the **···** menu scans a folder on disk.
+2. **Show**, a colour dot and search narrow what's on screen, and **Sort** puts it in order. In the grid, hover a picture for a second, then move across it to scrub through the clip. Right-click a clip for a menu.
+3. **Make Sequence** and **Sort into Bins** write to the project: the clips you selected in Select, or every clip on screen. **Label** is in the right-click menu. **Undo** in the **···** menu takes it back.
 
-Your media files are never changed. What each option measures, and how accurate it is, is in [What Select looks at](docs/WHAT-IT-LOOKS-AT.md).
+Results come back when the panel opens again on the same project. Another project needs its own scan.
 
-## Privacy
+## More
 
-Your clips and what Select finds in them never leave your Mac: no account, no tracking. Results are kept in `~/Library/Caches/com.skyfallstatus.select`, and Undo records in `~/Library/Application Support/com.skyfallstatus.select`.
+- What it looks at, and how often it was right on real footage: [docs/WHAT-IT-LOOKS-AT.md](docs/WHAT-IT-LOOKS-AT.md).
+- What it writes to a project, how its Undo works, and what stays on your Mac: [docs/WHAT-IT-WRITES.md](docs/WHAT-IT-WRITES.md).
+- Testing it, and what to send back: [BETA.md](BETA.md). Building it: [CONTRIBUTING.md](CONTRIBUTING.md).
 
-Once a day Select asks GitHub whether there's a new version. That request is the only thing it sends. You can turn it off in the ··· menu. When there is a new version, Select downloads it from the same GitHub release.
-
-## Feedback
-
-Bugs, odd formats and ideas are welcome. Use **Report a Bug** in the panel's **···** menu, or see [BETA.md](BETA.md) for what's most useful to hear.
-
-To remove Select, quit Premiere and delete `com.skyfallstatus.select` from `~/Library/Application Support/Adobe/CEP/extensions`, and its settings folder, `~/Library/Application Support/com.skyfallstatus.select`. Select 0.1 installed for all users, in `/Library/Application Support/Adobe/CEP/extensions`, so if you had it, delete it there too.
-
-Want to build it yourself or help out? See [CONTRIBUTING.md](CONTRIBUTING.md).
+Once a day Select asks GitHub whether there is a new version. That is the only thing it sends. **Check Automatically** in the **···** menu turns it off.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE) and [NOTICE](NOTICE).

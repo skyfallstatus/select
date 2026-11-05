@@ -7,7 +7,7 @@ scripts/build-engine.sh
 engine/tests/contract.sh
 engine/tests/fuzz.py
 if command -v node >/dev/null; then
-  (cd panel && node --test test/unit.test.js test/update.test.js)
+  (cd panel && node --test test/unit.test.js test/update.test.js test/unit-a.test.js test/unit-b.test.js test/unit-f5.test.js)
 else
   print "SKIP panel unit tests: Node isn't installed."
 fi

@@ -47,7 +47,7 @@ engine/Sources    the native engine: file reader, decoding, scores, cache
 engine/tests      the contract test and the fuzz test
 panel/            the panel: CSXS manifest, client, host script, tests
 scripts/          build, sign, package, release, privacy scan
-docs/             the engine's interface, formats, packaging, releasing
+docs/             what it looks at and writes, the engine's interface, formats, packaging, releasing
 product.conf      the name, ids and version, in one place
 ```
 

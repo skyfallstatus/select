@@ -161,6 +161,25 @@ private func decodeAAC(esds: Data, windows: [(ReadBuffer, [(at: Int, size: Int)]
     return added
 }
 
+/// Reads AAC pieces and joins those of one run, in order, so the decoder gets each run as one stream: it needs its first
+/// packets to settle, and a piece can be a single packet. A piece that can't be read is left out of its run.
+private func joinRuns(_ windows: [AudioWindow], file: MediaFile) -> [(ReadBuffer, [(at: Int, size: Int)])] {
+    var runs: [Int: (bytes: [UInt8], packets: [(at: Int, size: Int)])] = [:]
+    for w in windows {
+        guard let b = try? file.read(at: w.offset, count: w.bytes), b.count == w.bytes else { continue }
+        var whole = runs[w.run] ?? ([], [])
+        let base = whole.bytes.count
+        whole.bytes.append(contentsOf: UnsafeBufferPointer(start: b.view, count: b.count))
+        whole.packets += w.packets.map { ($0.at + base, $0.size) }
+        runs[w.run] = whole
+    }
+    return runs.sorted { $0.key < $1.key }.compactMap { _, r in
+        guard !r.bytes.isEmpty, let raw = malloc(r.bytes.count) else { return nil }
+        r.bytes.withUnsafeBytes { raw.copyMemory(from: $0.baseAddress!, byteCount: $0.count) }
+        return (ReadBuffer(raw: raw, skip: 0, count: r.bytes.count), r.packets)
+    }
+}
+
 /// The level of the loudest channel in one track's sampled windows, in dBFS.
 func measureAudio(_ plan: AudioPlan, file: MediaFile) -> Double? {
     switch plan.kind {
@@ -173,11 +192,7 @@ func measureAudio(_ plan: AudioPlan, file: MediaFile) -> Double? {
         }
         return levels.db
     case .aac(let esds, _):
-        var reads: [(ReadBuffer, [(at: Int, size: Int)])] = []
-        for w in plan.windows {
-            guard let b = try? file.read(at: w.offset, count: w.bytes), b.count == w.bytes else { continue }
-            reads.append((b, w.packets))
-        }
+        let reads = joinRuns(plan.windows, file: file)
         var levels: ChannelLevels?
         guard decodeAAC(esds: esds, windows: reads, sink: { pcm, channels in
             if levels == nil { levels = ChannelLevels(channels: channels) }
@@ -290,22 +305,7 @@ func readMono(_ plan: AudioPlan, file: MediaFile) -> MonoAudio? {
         }
         return picker.finish()
     case .aac(let esds, _):
-        // Pieces of one run are joined before decoding, because the decoder needs its first packets to settle and a piece
-        // can be a single packet.
-        var runs: [Int: (bytes: [UInt8], packets: [(at: Int, size: Int)])] = [:]
-        for w in plan.windows {
-            guard let b = try? file.read(at: w.offset, count: w.bytes), b.count == w.bytes else { continue }
-            var whole = runs[w.run] ?? ([], [])
-            let base = whole.bytes.count
-            whole.bytes.append(contentsOf: UnsafeBufferPointer(start: b.view, count: b.count))
-            whole.packets += w.packets.map { ($0.at + base, $0.size) }
-            runs[w.run] = whole
-        }
-        let reads: [(ReadBuffer, [(at: Int, size: Int)])] = runs.sorted { $0.key < $1.key }.compactMap { _, r in
-            guard !r.bytes.isEmpty, let raw = malloc(r.bytes.count) else { return nil }
-            r.bytes.withUnsafeBytes { raw.copyMemory(from: $0.baseAddress!, byteCount: $0.count) }
-            return (ReadBuffer(raw: raw, skip: 0, count: r.bytes.count), r.packets)
-        }
+        let reads = joinRuns(plan.windows, file: file)
         var picker: MonoPicker?
         guard decodeAAC(esds: esds, windows: reads, sink: { pcm, channels in
             if picker == nil { picker = MonoPicker(channels: channels, sourceRate: plan.rate) }
