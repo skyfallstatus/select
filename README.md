@@ -3,7 +3,7 @@
 A Premiere Pro panel that sorts and searches your clips in seconds. Everything runs on your Mac.
 
 <p align="center">
-  <img src="docs/media/panel-grid-dark.png" width="760" alt="The Select panel in grid view, dark, with 24 invented clips sorted by colour.">
+  <img src="docs/media/panel-grid-dark.png" width="760" alt="The Select panel in grid view, dark, with 23 clips of an invented boat-building shoot sorted by colour.">
 </p>
 
 Press **Scan**. Select reads every clip: the picture, the sound and the camera's details. **Show** picks which clips you see, **Sort** puts them in order, and search finds what is in them.
@@ -38,7 +38,11 @@ To remove Select, quit Premiere and delete `com.skyfallstatus.select` from `~/Li
 
 1. Select clips or bins in the Project panel, or nothing for the whole project, and press **Scan**. The line under the toolbar says what it will read. **Scan a Folder…** in the **···** menu scans a folder on disk.
 2. **Show**, a colour dot and search narrow what's on screen, and **Sort** puts it in order. In the grid, hover a picture for a second, then move across it to scrub through the clip. Right-click a clip for a menu.
-3. **Make Sequence** and **Sort into Bins** write to the project: the clips you selected in Select, or every clip on screen. **Label** is in the right-click menu. **Undo** in the **···** menu takes it back.
+3. **Make Sequence** and **Sort into Bins** write to the project: the clips you selected in Select, or every clip on screen. **Label** is in the right-click menu. **Undo**, right after or later in the **···** menu, takes it back.
+
+<p align="center">
+  <img src="docs/media/scan-show-sequence.webp" width="760" alt="Select scans 74 clips, sorts them by colour, shows only the interviews, and makes a sequence of them.">
+</p>
 
 Results come back when the panel opens again on the same project. Another project needs its own scan.
 

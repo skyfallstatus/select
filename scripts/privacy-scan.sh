@@ -50,7 +50,7 @@ if any(p.startswith('.local/') for p in tracked):
 for path in tracked:
     scan_text('file name ' + path, path)
     # Compressed pixels match short patterns by chance. Images are checked by their metadata below.
-    if os.path.isfile(path) and not path.lower().endswith(('.png', '.jpg', '.jpeg')):
+    if os.path.isfile(path) and not path.lower().endswith(('.png', '.jpg', '.jpeg', '.webp')):
         scan_text(path, open(path, 'rb').read())
 
 # PNG chunks and JPEG segments that can carry words. The panel screenshots need none of them.
@@ -85,6 +85,20 @@ def jpeg_metadata(data):
         pos += 2 + size
     return found
 
+# WebP keeps metadata in its EXIF and XMP chunks. ICCP is a colour profile, as JPEG's ICC_PROFILE is.
+def webp_metadata(data):
+    found, pos = [], 12
+    while pos + 8 <= len(data):
+        kind = data[pos:pos + 4]
+        size = struct.unpack('<I', data[pos + 4:pos + 8])[0]
+        if kind in (b'EXIF', b'XMP '):
+            found.append((kind.decode().strip(), data[pos + 8:pos + 8 + size]))
+        pos += 8 + size + (size & 1)
+    return found
+
+def is_webp(data):
+    return data[:4] == b'RIFF' and data[8:12] == b'WEBP'
+
 for path in tracked:
     lower = path.lower()
     if not path.startswith(IMAGES + '/') or not os.path.isfile(path):
@@ -94,8 +108,10 @@ for path in tracked:
         found = png_metadata(data)
     elif lower.endswith(('.jpg', '.jpeg')) and data[:2] == b'\xff\xd8':
         found = [f for f in jpeg_metadata(data) if not f[1].startswith(b'ICC_PROFILE')]
+    elif lower.endswith('.webp') and is_webp(data):
+        found = webp_metadata(data)
     else:
-        problems.append(f'{path}: use PNG or JPEG here, this one can\'t be checked')
+        problems.append(f'{path}: use PNG, JPEG or WebP here, this one can\'t be checked')
         continue
     for kind, body in found:
         problems.append(f'{path}: has {kind} metadata, strip it')
@@ -120,7 +136,16 @@ if git('rev-parse', '--verify', '-q', 'HEAD').strip():
     scan_text('file names in history', names)
     for line in names.decode('utf8', 'replace').splitlines():
         sha, _, name = line.partition(' ')
-        if not name.lower().endswith('.png'):
+        lower = name.lower()
+        if lower.endswith('.webp'):
+            data = git('cat-file', 'blob', sha)
+            if not is_webp(data):
+                problems.append(f'history {name}: not a WebP, so it can\'t be checked')
+                continue
+            for kind, body in webp_metadata(data):
+                problems.append(f'history {name}: {kind} metadata')
+            continue
+        if not lower.endswith('.png'):
             continue
         data = git('cat-file', 'blob', sha)
         if data[:8] != b'\x89PNG\r\n\x1a\n':
