@@ -1645,6 +1645,18 @@ async function main() {
     check('Clear search puts every clip back', (await b.evalIn(`SelectApp.state.order.length`)) === 400 && (await b.evalIn(`document.getElementById('search').value`)) === '');
     const closed = await b.waitFor(`!document.getElementById('search-box').classList.contains('open')&&!document.getElementById('toolbar').classList.contains('searching')`, 'search closes', 2000).then(() => true, () => false);
     check('an empty search left behind closes back to the glass', closed);
+    check('and the closed field lets go of the focus, so no key goes into it unseen', await b.evalIn(`document.activeElement!==document.getElementById('search')`));
+    // the clear button empties the search and keeps it open for the next word, typed in order
+    await b.click('#search-box');
+    await b.send('Input.insertText', { text: 'bread' });
+    await b.waitFor(`SelectApp.state.query==='bread'`);
+    await b.click('#search-clear');
+    await sleep(300);
+    for (const ch of 'sony') { await b.send('Input.insertText', { text: ch }); await sleep(60); }
+    const afterClear = await b.evalIn(`({v:document.getElementById('search').value,open:document.getElementById('search-box').classList.contains('open'),focus:document.activeElement.id})`);
+    check('the clear button keeps the search open and focused, and the next word types in order', afterClear.v === 'sony' && afterClear.open && afterClear.focus === 'search', afterClear);
+    await b.evalIn(`document.getElementById('search').value='';document.getElementById('search').dispatchEvent(new Event('input'));document.getElementById('search').blur()`);
+    await b.waitFor(`!document.getElementById('search-box').classList.contains('open')`, 'search closes', 2000);
     await b.click('#search-box');
     const opened = await b.evalIn(`document.getElementById('toolbar').classList.contains('searching')`);
     await b.click('#sort');

@@ -1619,8 +1619,12 @@
     if (select) { $('search').select(); }
   }
 
+  // A closed field that kept the focus would take the next key unseen, the caret before it, so the focus goes with it.
   function closeSearchIfEmpty() {
-    if (!S.query) { $('search-box').classList.remove('open'); $('toolbar').classList.remove('searching'); }
+    if (S.query) { return; }
+    $('search-box').classList.remove('open');
+    $('toolbar').classList.remove('searching');
+    if (document.activeElement === $('search')) { $('search').blur(); }
   }
 
   // Closing the search brings the toolbar's small words back and moves its buttons, so it waits for a press to end: the
@@ -3690,6 +3694,8 @@
       if (e.key === 'Escape' && S.query) { e.stopPropagation(); clearSearch(); }
     });
     $('search-clear').onclick = function (e) { e.preventDefault(); clearSearch(); $('search').focus(); };
+    // A press on the clear button keeps the field focused, so it stays open for the next word.
+    $('search-clear').addEventListener('mousedown', function (e) { e.preventDefault(); });
     $('search-box').addEventListener('mousedown', function (e) {
       if (!$('search-box').classList.contains('open')) { e.preventDefault(); openSearch(false); }
     });
